@@ -44,8 +44,7 @@ struct ColibriRecord {
 
 /// Runs forever, reconnecting on any error.
 pub async fn run(pool: PgPool, bus: EventBus) {
-    let url = std::env::var("JETSTREAM_URL")
-        .unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
+    let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
 
     loop {
         if let Err(e) = connect_and_consume(&url, &pool, &bus).await {

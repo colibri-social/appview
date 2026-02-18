@@ -60,9 +60,7 @@ impl Subscriptions {
         match event_type {
             "message" => match param {
                 Some(ch) => {
-                    let set = self
-                        .messages
-                        .get_or_insert_with(|| Some(HashSet::new()));
+                    let set = self.messages.get_or_insert_with(|| Some(HashSet::new()));
                     if let Some(inner) = set {
                         inner.insert(ch);
                     }
@@ -72,9 +70,7 @@ impl Subscriptions {
             },
             "user_status" => match param {
                 Some(did) => {
-                    let set = self
-                        .user_status
-                        .get_or_insert_with(|| Some(HashSet::new()));
+                    let set = self.user_status.get_or_insert_with(|| Some(HashSet::new()));
                     if let Some(inner) = set {
                         inner.insert(did);
                     }
@@ -113,11 +109,6 @@ impl Subscriptions {
                 None => false,
                 Some(None) => true,
                 Some(Some(channels)) => channels.contains(&msg.channel),
-            },
-            AppEvent::UserStatus(s) => match &self.user_status {
-                None => false,
-                Some(None) => true,
-                Some(Some(dids)) => dids.contains(&s.did),
             },
         }
     }

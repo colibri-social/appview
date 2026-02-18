@@ -69,12 +69,14 @@ fn rocket() -> _ {
                 }
             };
 
-            match PgPoolOptions::new()
-                .max_connections(10)
-                .connect(&url)
-                .await
-            {
-                Ok(pool) => Ok(rocket.manage(pool)),
+            match PgPoolOptions::new().max_connections(10).connect(&url).await {
+                Ok(pool) => {
+                    if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
+                        error!("Failed to run migrations: {e}");
+                        return Err(rocket);
+                    }
+                    Ok(rocket.manage(pool))
+                }
                 Err(e) => {
                     error!("Failed to connect to PostgreSQL: {e}");
                     Err(rocket)
@@ -87,11 +89,7 @@ fn rocket() -> _ {
         // ── Routes ───────────────────────────────────────────────────────────
         .mount(
             "/",
-            routes![
-                get_messages,
-                ws_handler::subscribe,
-                webrtc::signal,
-            ],
+            routes![get_messages, ws_handler::subscribe, webrtc::signal,],
         )
         // ── Background: Jetstream consumer ───────────────────────────────────
         .attach(AdHoc::on_liftoff("Jetstream Consumer", |rocket| {

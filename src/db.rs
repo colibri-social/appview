@@ -2,8 +2,9 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::models::{message::Message, user::UserStatus};
+use crate::models::{message::Message};
 
+/// Saves a given message to the database.
 pub async fn save_message(
     pool: &PgPool,
     rkey: &str,
@@ -14,11 +15,11 @@ pub async fn save_message(
 ) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
-        INSERT INTO messages (rkey, author_did, text, channel, created_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (author_did, rkey) DO NOTHING
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at
-        "#,
+    INSERT INTO messages (rkey, author_did, text, channel, created_at)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (author_did, rkey) DO NOTHING
+    RETURNING id, rkey, author_did, text, channel, created_at, indexed_at
+    "#,
     )
     .bind(rkey)
     .bind(author_did)
@@ -31,6 +32,7 @@ pub async fn save_message(
     Ok(msg)
 }
 
+/// Removes a message from the database.
 pub async fn delete_message(pool: &PgPool, author_did: &str, rkey: &str) -> Result<()> {
     sqlx::query("DELETE FROM messages WHERE author_did = $1 AND rkey = $2")
         .bind(author_did)
@@ -40,6 +42,7 @@ pub async fn delete_message(pool: &PgPool, author_did: &str, rkey: &str) -> Resu
     Ok(())
 }
 
+/// Returns a number of messages in a certain window.
 pub async fn get_messages(
     pool: &PgPool,
     channel: &str,
@@ -49,12 +52,12 @@ pub async fn get_messages(
     let messages = if let Some(before) = before {
         sqlx::query_as::<_, Message>(
             r#"
-            SELECT id, rkey, author_did, text, channel, created_at, indexed_at
-            FROM messages
-            WHERE channel = $1 AND created_at < $2
-            ORDER BY created_at DESC
-            LIMIT $3
-            "#,
+      SELECT id, rkey, author_did, text, channel, created_at, indexed_at
+      FROM messages
+      WHERE channel = $1 AND created_at < $2
+      ORDER BY created_at DESC
+      LIMIT $3
+      "#,
         )
         .bind(channel)
         .bind(before)
@@ -64,12 +67,12 @@ pub async fn get_messages(
     } else {
         sqlx::query_as::<_, Message>(
             r#"
-            SELECT id, rkey, author_did, text, channel, created_at, indexed_at
-            FROM messages
-            WHERE channel = $1
-            ORDER BY created_at DESC
-            LIMIT $2
-            "#,
+      SELECT id, rkey, author_did, text, channel, created_at, indexed_at
+      FROM messages
+      WHERE channel = $1
+      ORDER BY created_at DESC
+      LIMIT $2
+      "#,
         )
         .bind(channel)
         .bind(limit)
@@ -78,21 +81,4 @@ pub async fn get_messages(
     };
 
     Ok(messages)
-}
-
-pub async fn upsert_user_status(pool: &PgPool, did: &str, status: &str) -> Result<UserStatus> {
-    let user_status = sqlx::query_as::<_, UserStatus>(
-        r#"
-        INSERT INTO user_status (did, status)
-        VALUES ($1, $2)
-        ON CONFLICT (did) DO UPDATE SET status = EXCLUDED.status, updated_at = NOW()
-        RETURNING did, status, updated_at
-        "#,
-    )
-    .bind(did)
-    .bind(status)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(user_status)
 }

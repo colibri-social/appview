@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::models::{message::Message, user::UserStatus};
+use crate::models::{message::Message};
 
 /// All events that can be broadcast to connected clients.
 /// Add new variants here to extend the event system.
@@ -9,7 +9,6 @@ use crate::models::{message::Message, user::UserStatus};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AppEvent {
     Message(Message),
-    UserStatus(UserStatus),
 }
 
 pub type EventBus = broadcast::Sender<AppEvent>;
