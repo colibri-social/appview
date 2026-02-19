@@ -129,7 +129,7 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>) -> ws::Channel<'stati
                                             }
                                             "heartbeat" => {
                                                 ServerMessage::Ack {
-                                                    message: format!("", req.event_type),
+                                                    message: format!(""),
                                                 }
                                             }
                                             other => ServerMessage::Error {
