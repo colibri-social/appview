@@ -42,11 +42,16 @@ impl Fairing for CORS {
             "POST, GET, PATCH, OPTIONS",
         ));
         response.set_header(Header::new("Access-Control-Allow-Headers", "*"));
-        response.set_header(Header::new("Access-Control-Allow-Credentials", "true"));
     }
 }
 
 // ── REST endpoints ────────────────────────────────────────────────────────────
+
+/// Catch-all handler for CORS preflight requests.
+#[options("/<_..>")]
+fn preflight() -> Status {
+    Status::NoContent
+}
 
 /// Retrieve messages for a channel, newest first.
 ///
@@ -119,7 +124,12 @@ fn rocket() -> _ {
         // ── Routes ───────────────────────────────────────────────────────────
         .mount(
             "/",
-            routes![get_messages, ws_handler::subscribe, webrtc::signal,],
+            routes![
+                get_messages,
+                ws_handler::subscribe,
+                webrtc::signal,
+                preflight
+            ],
         )
         // ── Background: Jetstream consumer ───────────────────────────────────
         .attach(AdHoc::on_liftoff("Jetstream Consumer", |rocket| {
@@ -129,5 +139,5 @@ fn rocket() -> _ {
                 rocket::tokio::spawn(jetstream::run(pool, bus));
             })
         }))
-       	.attach(CORS)
+        .attach(CORS)
 }
