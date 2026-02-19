@@ -1,0 +1,10 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AuthorProfile {
+    pub did: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}

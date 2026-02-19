@@ -1,6 +1,8 @@
 #[macro_use]
 extern crate rocket;
 
+mod atproto;
+mod backfill;
 mod db;
 mod events;
 mod jetstream;
@@ -13,7 +15,7 @@ use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
-use models::message::Message;
+use models::{author::AuthorProfile, message::MessageWithAuthor};
 use webrtc::RoomState;
 
 // Source - https://stackoverflow.com/a/64904947
@@ -53,7 +55,7 @@ fn preflight() -> Status {
     Status::NoContent
 }
 
-/// Retrieve messages for a channel, newest first.
+/// Retrieve messages for a channel, newest first, with author profile included.
 ///
 /// Query params:
 /// - `channel` (required)
@@ -65,7 +67,7 @@ async fn get_messages(
     limit: Option<i64>,
     before: Option<&str>,
     pool: &State<sqlx::PgPool>,
-) -> Result<Json<Vec<Message>>, Status> {
+) -> Result<Json<Vec<MessageWithAuthor>>, Status> {
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let before: Option<DateTime<Utc>> = before
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -78,6 +80,31 @@ async fn get_messages(
             error!("get_messages error: {e}");
             Status::InternalServerError
         })
+}
+
+/// Retrieve the cached profile for a specific author DID.
+///
+/// Query param: `did` (required)
+#[get("/api/authors?<did>")]
+async fn get_author(
+    did: &str,
+    pool: &State<sqlx::PgPool>,
+    http: &State<reqwest::Client>,
+) -> Result<Json<AuthorProfile>, Status> {
+    // Serve from cache; fetch from ATProto if not yet cached.
+    match db::get_author_profile(pool, did).await {
+        Ok(Some(profile)) => return Ok(Json(profile)),
+        Ok(None) => {}
+        Err(e) => {
+            error!("get_author DB error: {e}");
+            return Err(Status::InternalServerError);
+        }
+    }
+
+    match jetstream::ensure_profile_cached(pool, http, did).await {
+        Some(profile) => Ok(Json(profile)),
+        None => Err(Status::NotFound),
+    }
 }
 
 // ── Rocket launch ─────────────────────────────────────────────────────────────
@@ -121,11 +148,13 @@ fn rocket() -> _ {
         // ── Shared application state ─────────────────────────────────────────
         .manage(events::create_event_bus(4096))
         .manage(RoomState::new())
+        .manage(reqwest::Client::new())
         // ── Routes ───────────────────────────────────────────────────────────
         .mount(
             "/",
             routes![
                 get_messages,
+                get_author,
                 ws_handler::subscribe,
                 webrtc::signal,
                 preflight
@@ -135,8 +164,17 @@ fn rocket() -> _ {
         .attach(AdHoc::on_liftoff("Jetstream Consumer", |rocket| {
             Box::pin(async move {
                 let pool = rocket.state::<sqlx::PgPool>().unwrap().clone();
+                let http = rocket.state::<reqwest::Client>().unwrap().clone();
                 let bus = rocket.state::<events::EventBus>().unwrap().clone();
-                rocket::tokio::spawn(jetstream::run(pool, bus));
+                rocket::tokio::spawn(jetstream::run(pool, http, bus));
+            })
+        }))
+        // ── Background: Backfill task ─────────────────────────────────────────
+        .attach(AdHoc::on_liftoff("Backfill", |rocket| {
+            Box::pin(async move {
+                let pool = rocket.state::<sqlx::PgPool>().unwrap().clone();
+                let http = rocket.state::<reqwest::Client>().unwrap().clone();
+                rocket::tokio::spawn(backfill::run(pool, http));
             })
         }))
         .attach(CORS)
