@@ -15,6 +15,7 @@ services:
         condition: service_healthy
     networks:
       - internal
+      - dokploy-network
 
   postgres:
     image: postgres:18-alpine
@@ -40,3 +41,5 @@ volumes:
 networks:
   internal:
     driver: bridge
+  dokploy-network:
+    external: true
