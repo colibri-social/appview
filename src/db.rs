@@ -136,7 +136,7 @@ pub async fn get_author_profile(pool: &PgPool, did: &str) -> Result<Option<Autho
 pub async fn is_caught_up(pool: &PgPool) -> Result<bool> {
     let avg_lag: Option<f64> = sqlx::query_scalar(
         r#"
-        SELECT AVG(EXTRACT(EPOCH FROM (indexed_at - created_at)))
+        SELECT AVG(EXTRACT(EPOCH FROM (indexed_at - created_at)))::FLOAT8
         FROM (
             SELECT indexed_at, created_at
             FROM messages
