@@ -50,9 +50,6 @@ struct Subscriptions {
     /// `Some(None)`   = subscribed to messages in *all* channels.
     /// `Some(Some(s))`= subscribed to messages only in the listed channels.
     messages: Option<Option<HashSet<String>>>,
-
-    /// Same three-way semantics as `messages`, but keyed on author DID.
-    user_status: Option<Option<HashSet<String>>>,
 }
 
 impl Subscriptions {
@@ -68,15 +65,6 @@ impl Subscriptions {
                 }
                 None => self.messages = Some(None),
             },
-            "user_status" => match param {
-                Some(did) => {
-                    let set = self.user_status.get_or_insert_with(|| Some(HashSet::new()));
-                    if let Some(inner) = set {
-                        inner.insert(did);
-                    }
-                }
-                None => self.user_status = Some(None),
-            },
             other => debug!("Unknown event_type in subscribe: {other}"),
         }
     }
@@ -90,14 +78,6 @@ impl Subscriptions {
                     }
                 }
                 None => self.messages = None,
-            },
-            "user_status" => match param {
-                Some(did) => {
-                    if let Some(Some(set)) = &mut self.user_status {
-                        set.remove(&did);
-                    }
-                }
-                None => self.user_status = None,
             },
             other => debug!("Unknown event_type in unsubscribe: {other}"),
         }
@@ -145,6 +125,11 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>) -> ws::Channel<'stati
                                                 subs.unsubscribe(&req.event_type, param);
                                                 ServerMessage::Ack {
                                                     message: format!("Unsubscribed from {}", req.event_type),
+                                                }
+                                            }
+                                            "heartbeat" => {
+                                                ServerMessage::Ack {
+                                                    message: format!("", req.event_type),
                                                 }
                                             }
                                             other => ServerMessage::Error {
