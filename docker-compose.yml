@@ -5,7 +5,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgres://colibri:${POSTGRES_PASSWORD}@postgres:5432/colibri
+      DATABASE_URL: ${DATABASE_URL}
       ROCKET_ADDRESS: 0.0.0.0
       ROCKET_PORT: 8000
       RUST_LOG: ${RUST_LOG:-colibri_appview=info,rocket=info}
@@ -20,13 +20,13 @@ services:
     image: postgres:18-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: colibri
+      POSTGRES_USER: ${POSTGRES_USER:-colibri}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: colibri
+      POSTGRES_DB: ${POSTGRES_DB:-colibri}
     volumes:
       - postgres:/var/lib/postgres
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U colibri -d colibri"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-colibri} -d ${POSTGRES_DB:-colibri}"]
       interval: 5s
       timeout: 5s
       retries: 10
