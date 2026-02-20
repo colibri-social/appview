@@ -1,30 +1,38 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use std::collections::{HashMap, HashSet};
 use sqlx::PgPool;
 
-use crate::models::{author::AuthorProfile, message::{Message, MessageWithAuthor}};
+use crate::models::{
+    author::AuthorProfile,
+    message::{Message, MessageResponse, MessageWithAuthor},
+};
 
-/// Saves a given message to the database.
+// ── Messages ──────────────────────────────────────────────────────────────────
+
+/// Insert a new message (no-op on duplicate author_did+rkey).
 pub async fn save_message(
     pool: &PgPool,
     rkey: &str,
     author_did: &str,
     text: &str,
     channel: &str,
+    parent: Option<&str>,
     created_at: DateTime<Utc>,
 ) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
-    INSERT INTO messages (rkey, author_did, text, channel, created_at)
-    VALUES ($1, $2, $3, $4, $5)
-    ON CONFLICT (author_did, rkey) DO NOTHING
-    RETURNING id, rkey, author_did, text, channel, created_at, indexed_at
-    "#,
+        INSERT INTO messages (rkey, author_did, text, channel, parent, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (author_did, rkey) DO NOTHING
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent
+        "#,
     )
     .bind(rkey)
     .bind(author_did)
     .bind(text)
     .bind(channel)
+    .bind(parent)
     .bind(created_at)
     .fetch_optional(pool)
     .await?;
@@ -32,27 +40,67 @@ pub async fn save_message(
     Ok(msg)
 }
 
-/// Removes a message from the database.
-pub async fn delete_message(pool: &PgPool, author_did: &str, rkey: &str) -> Result<()> {
-    sqlx::query("DELETE FROM messages WHERE author_did = $1 AND rkey = $2")
-        .bind(author_did)
-        .bind(rkey)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// Update an existing message (edit). Sets `edited = TRUE`.
+pub async fn update_message(
+    pool: &PgPool,
+    rkey: &str,
+    author_did: &str,
+    text: &str,
+    channel: &str,
+    parent: Option<&str>,
+) -> Result<Option<Message>> {
+    let msg = sqlx::query_as::<_, Message>(
+        r#"
+        UPDATE messages
+        SET text = $1, channel = $2, parent = $3, edited = TRUE
+        WHERE author_did = $4 AND rkey = $5
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent
+        "#,
+    )
+    .bind(text)
+    .bind(channel)
+    .bind(parent)
+    .bind(author_did)
+    .bind(rkey)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(msg)
 }
 
-/// Returns messages for a channel joined with cached author profiles.
+/// Delete a message, returning the deleted row so callers can broadcast the event.
+pub async fn delete_message(
+    pool: &PgPool,
+    author_did: &str,
+    rkey: &str,
+) -> Result<Option<Message>> {
+    let msg = sqlx::query_as::<_, Message>(
+        r#"
+        DELETE FROM messages
+        WHERE author_did = $1 AND rkey = $2
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent
+        "#,
+    )
+    .bind(author_did)
+    .bind(rkey)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(msg)
+}
+
+/// Paginated messages for a channel, with author profiles and parent messages populated.
 pub async fn get_messages(
     pool: &PgPool,
     channel: &str,
     limit: i64,
     before: Option<DateTime<Utc>>,
-) -> Result<Vec<MessageWithAuthor>> {
-    let messages = if let Some(before) = before {
+) -> Result<Vec<MessageResponse>> {
+    let messages: Vec<MessageWithAuthor> = if let Some(before) = before {
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
-            SELECT m.id, m.rkey, m.author_did, m.text, m.channel, m.created_at, m.indexed_at,
+            SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
+                   m.created_at, m.indexed_at, m.edited, m.parent,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -69,7 +117,8 @@ pub async fn get_messages(
     } else {
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
-            SELECT m.id, m.rkey, m.author_did, m.text, m.channel, m.created_at, m.indexed_at,
+            SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
+                   m.created_at, m.indexed_at, m.edited, m.parent,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -84,7 +133,86 @@ pub async fn get_messages(
         .await?
     };
 
-    Ok(messages)
+    populate_parents(pool, messages).await
+}
+
+/// Look up a single message by rkey (first match), with author profile.
+pub async fn get_message_by_rkey(
+    pool: &PgPool,
+    rkey: &str,
+) -> Result<Option<MessageWithAuthor>> {
+    let msg = sqlx::query_as::<_, MessageWithAuthor>(
+        r#"
+        SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
+               m.created_at, m.indexed_at, m.edited, m.parent,
+               a.display_name, a.avatar_url
+        FROM messages m
+        LEFT JOIN author_profiles a ON m.author_did = a.did
+        WHERE m.rkey = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(rkey)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(msg)
+}
+
+/// Batch-fetch parent messages and attach them to the given list.
+pub async fn populate_parents(
+    pool: &PgPool,
+    messages: Vec<MessageWithAuthor>,
+) -> Result<Vec<MessageResponse>> {
+    let parent_rkeys: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.parent.as_deref())
+        .map(|p| extract_rkey(p).to_string())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    if parent_rkeys.is_empty() {
+        return Ok(messages
+            .into_iter()
+            .map(|m| MessageResponse { message: m, parent_message: None })
+            .collect());
+    }
+
+    let parents: Vec<MessageWithAuthor> = sqlx::query_as::<_, MessageWithAuthor>(
+        r#"
+        SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
+               m.created_at, m.indexed_at, m.edited, m.parent,
+               a.display_name, a.avatar_url
+        FROM messages m
+        LEFT JOIN author_profiles a ON m.author_did = a.did
+        WHERE m.rkey = ANY($1)
+        "#,
+    )
+    .bind(&parent_rkeys[..])
+    .fetch_all(pool)
+    .await?;
+
+    let parent_map: HashMap<String, MessageWithAuthor> =
+        parents.into_iter().map(|p| (p.rkey.clone(), p)).collect();
+
+    Ok(messages
+        .into_iter()
+        .map(|m| {
+            let parent_message = m
+                .parent
+                .as_deref()
+                .and_then(|p| parent_map.get(extract_rkey(p)))
+                .cloned()
+                .map(Box::new);
+            MessageResponse { message: m, parent_message }
+        })
+        .collect())
+}
+
+/// Extract the rkey tail from an AT-URI (`at://did/collection/rkey`) or return as-is.
+pub fn extract_rkey(s: &str) -> &str {
+    s.rsplit('/').next().unwrap_or(s)
 }
 
 // ── Author profiles ───────────────────────────────────────────────────────────
@@ -130,9 +258,8 @@ pub async fn get_author_profile(pool: &PgPool, did: &str) -> Result<Option<Autho
 
 // ── Backfill helpers ──────────────────────────────────────────────────────────
 
-/// Returns true when the appview is caught up with real-time: the average lag
-/// between `created_at` and `indexed_at` across the 20 most recently indexed
-/// messages is less than 60 seconds.
+/// Returns true when the appview is caught up with real-time: average lag across
+/// the 20 most recently indexed messages is less than 60 seconds.
 pub async fn is_caught_up(pool: &PgPool) -> Result<bool> {
     let avg_lag: Option<f64> = sqlx::query_scalar(
         r#"
@@ -148,7 +275,6 @@ pub async fn is_caught_up(pool: &PgPool) -> Result<bool> {
     .fetch_one(pool)
     .await?;
 
-    // No messages yet → assume not caught up
     Ok(avg_lag.unwrap_or(f64::MAX) < 60.0)
 }
 
@@ -173,7 +299,6 @@ pub async fn get_next_backfill_did(pool: &PgPool) -> Result<Option<String>> {
 
 /// Return the stored cursor for a DID's backfill (`None` = start from the top).
 pub async fn get_backfill_cursor(pool: &PgPool, did: &str) -> Result<Option<String>> {
-    // fetch_optional on a nullable column gives Option<Option<String>>.
     let cursor: Option<Option<String>> = sqlx::query_scalar::<_, Option<String>>(
         "SELECT cursor FROM backfill_state WHERE did = $1 AND completed = FALSE",
     )

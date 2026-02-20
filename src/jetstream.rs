@@ -10,7 +10,7 @@ use crate::{
     atproto,
     db,
     events::{AppEvent, EventBus},
-    models::message::MessageWithAuthor,
+    models::message::{MessageResponse, MessageWithAuthor},
 };
 
 const DEFAULT_JETSTREAM_URL: &str =
@@ -18,7 +18,7 @@ const DEFAULT_JETSTREAM_URL: &str =
      ?wantedCollections=social.colibri.message\
      &wantedCollections=app.bsky.actor.profile";
 
-// ── Jetstream wire types ─────────────────────────────────────────────────────
+// ── Jetstream wire types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct JetstreamEvent {
@@ -42,13 +42,16 @@ struct ColibriRecord {
     text: String,
     created_at: String,
     channel: String,
+    #[serde(default)]
+    parent: Option<String>,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Runs forever, reconnecting on any error.
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
-    let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
+    let url =
+        std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
 
     loop {
         if let Err(e) = connect_and_consume(&url, &pool, &http, &bus).await {
@@ -109,12 +112,8 @@ async fn handle_event(
     };
 
     match commit.collection.as_str() {
-        "social.colibri.message" => {
-            handle_message(commit, &event.did, pool, http, bus).await
-        }
-        "app.bsky.actor.profile" => {
-            handle_profile_update(&event.did, pool, http).await
-        }
+        "social.colibri.message" => handle_message(commit, &event.did, pool, http, bus).await,
+        "app.bsky.actor.profile" => handle_profile_update(&event.did, pool, http).await,
         _ => Ok(()),
     }
 }
@@ -128,12 +127,11 @@ async fn handle_message(
 ) -> Result<()> {
     match commit.operation.as_str() {
         "create" => {
-            let record: ColibriRecord = match commit.record.and_then(|v| {
-                serde_json::from_value(v).ok()
-            }) {
-                Some(r) => r,
-                None => return Ok(()),
-            };
+            let record: ColibriRecord =
+                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
+                    Some(r) => r,
+                    None => return Ok(()),
+                };
 
             let created_at = DateTime::parse_from_rfc3339(&record.created_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -145,6 +143,7 @@ async fn handle_message(
                 did,
                 &record.text,
                 &record.channel,
+                record.parent.as_deref(),
                 created_at,
             )
             .await
@@ -157,15 +156,61 @@ async fn handle_message(
                 }
             };
 
-            // Fetch and cache the author profile if we don't have it yet.
             let profile = ensure_profile_cached(pool, http, did).await;
+            let msg_with_author = MessageWithAuthor::from((message, profile));
+            let parent_message = fetch_parent(pool, &msg_with_author).await;
+            let _ = bus.send(AppEvent::Message(MessageResponse {
+                message: msg_with_author,
+                parent_message,
+            }));
+        }
 
-            let _ = bus.send(AppEvent::Message(MessageWithAuthor::from((message, profile))));
+        "update" => {
+            let record: ColibriRecord =
+                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
+                    Some(r) => r,
+                    None => return Ok(()),
+                };
+
+            let message = match db::update_message(
+                pool,
+                &commit.rkey,
+                did,
+                &record.text,
+                &record.channel,
+                record.parent.as_deref(),
+            )
+            .await
+            {
+                Ok(Some(m)) => m,
+                Ok(None) => return Ok(()), // message not in our DB
+                Err(e) => {
+                    error!("DB error updating message: {e}");
+                    return Ok(());
+                }
+            };
+
+            let profile = ensure_profile_cached(pool, http, did).await;
+            let msg_with_author = MessageWithAuthor::from((message, profile));
+            let parent_message = fetch_parent(pool, &msg_with_author).await;
+            let _ = bus.send(AppEvent::Message(MessageResponse {
+                message: msg_with_author,
+                parent_message,
+            }));
         }
 
         "delete" => {
-            if let Err(e) = db::delete_message(pool, did, &commit.rkey).await {
-                error!("DB error deleting message: {e}");
+            match db::delete_message(pool, did, &commit.rkey).await {
+                Ok(Some(msg)) => {
+                    let _ = bus.send(AppEvent::MessageDeleted {
+                        id: msg.id,
+                        rkey: msg.rkey,
+                        author_did: msg.author_did,
+                        channel: msg.channel,
+                    });
+                }
+                Ok(None) => {} // message wasn't indexed
+                Err(e) => error!("DB error deleting message: {e}"),
             }
         }
 
@@ -176,10 +221,8 @@ async fn handle_message(
 }
 
 /// Handle a `app.bsky.actor.profile` (self) commit.
-/// Only refreshes the cached profile if we already have an entry for this DID —
-/// no new rows are inserted, no polling occurs.
+/// Only refreshes the cached profile if we already have an entry for this DID.
 async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client) -> Result<()> {
-    // Only act if this author is already in our cache.
     match db::get_author_profile(pool, did).await {
         Ok(None) => return Ok(()),
         Ok(Some(_)) => {}
@@ -211,18 +254,29 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
     Ok(())
 }
 
+/// Look up the parent message for a reply, if present.
+async fn fetch_parent(
+    pool: &PgPool,
+    msg: &MessageWithAuthor,
+) -> Option<Box<MessageWithAuthor>> {
+    let parent_rkey = db::extract_rkey(msg.parent.as_deref()?);
+    db::get_message_by_rkey(pool, parent_rkey)
+        .await
+        .ok()
+        .flatten()
+        .map(Box::new)
+}
+
 /// Return the cached profile for `did`, fetching from the ATProto API if absent.
 pub async fn ensure_profile_cached(
     pool: &PgPool,
     http: &reqwest::Client,
     did: &str,
 ) -> Option<crate::models::author::AuthorProfile> {
-    // Return cached copy if we already have one.
     if let Ok(Some(profile)) = db::get_author_profile(pool, did).await {
         return Some(profile);
     }
 
-    // Fetch from the public Bluesky API.
     match atproto::fetch_profile(http, did).await {
         Ok(Some(data)) => {
             match db::upsert_author_profile(

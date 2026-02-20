@@ -15,7 +15,7 @@ use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
-use models::{author::AuthorProfile, message::MessageWithAuthor};
+use models::{author::AuthorProfile, message::MessageResponse};
 use webrtc::RoomState;
 
 // Source - https://stackoverflow.com/a/64904947
@@ -67,7 +67,7 @@ async fn get_messages(
     limit: Option<i64>,
     before: Option<&str>,
     pool: &State<sqlx::PgPool>,
-) -> Result<Json<Vec<MessageWithAuthor>>, Status> {
+) -> Result<Json<Vec<MessageResponse>>, Status> {
     let limit = limit.unwrap_or(50).clamp(1, 100);
     let before: Option<DateTime<Utc>> = before
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())

@@ -71,7 +71,7 @@ async fn backfill_did(pool: &PgPool, http: &reqwest::Client, did: &str) -> anyho
                 .unwrap_or_else(|_| chrono::Utc::now());
 
             if let Err(e) =
-                db::save_message(pool, &record.rkey, did, &record.text, &record.channel, created_at)
+                db::save_message(pool, &record.rkey, did, &record.text, &record.channel, record.parent.as_deref(), created_at)
                     .await
             {
                 error!("Backfill: DB error saving message {}: {e}", record.rkey);

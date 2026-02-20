@@ -85,10 +85,15 @@ impl Subscriptions {
 
     fn matches(&self, event: &AppEvent) -> bool {
         match event {
-            AppEvent::Message(msg) => match &self.messages {
+            AppEvent::Message(resp) => match &self.messages {
                 None => false,
                 Some(None) => true,
-                Some(Some(channels)) => channels.contains(&msg.channel),
+                Some(Some(channels)) => channels.contains(&resp.message.channel),
+            },
+            AppEvent::MessageDeleted { channel, .. } => match &self.messages {
+                None => false,
+                Some(None) => true,
+                Some(Some(channels)) => channels.contains(channel),
             },
         }
     }

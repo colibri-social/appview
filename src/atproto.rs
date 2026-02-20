@@ -14,6 +14,7 @@ pub struct RawRecord {
     pub text: String,
     pub created_at: String,
     pub channel: String,
+    pub parent: Option<String>,
 }
 
 // ── Wire types ────────────────────────────────────────────────────────────────
@@ -43,6 +44,8 @@ struct ColibriRecord {
     text: Option<String>,
     created_at: Option<String>,
     channel: Option<String>,
+    #[serde(default)]
+    parent: Option<String>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -141,6 +144,7 @@ pub async fn list_message_records(
                 text: val.text?,
                 created_at: val.created_at?,
                 channel: val.channel?,
+                parent: val.parent,
             })
         })
         .collect();

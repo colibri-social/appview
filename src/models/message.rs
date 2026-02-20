@@ -13,10 +13,11 @@ pub struct Message {
     pub channel: String,
     pub created_at: DateTime<Utc>,
     pub indexed_at: DateTime<Utc>,
+    pub edited: bool,
+    pub parent: Option<String>,
 }
 
-/// A message with the author's cached profile fields flattened in.
-/// Used for all API responses and WebSocket broadcasts.
+/// A message with the author's cached profile fields flattened in, mapped from DB rows.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MessageWithAuthor {
     pub id: Uuid,
@@ -26,8 +27,19 @@ pub struct MessageWithAuthor {
     pub channel: String,
     pub created_at: DateTime<Utc>,
     pub indexed_at: DateTime<Utc>,
+    pub edited: bool,
+    pub parent: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+/// Full API / WebSocket response type: message + author + optional parent message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageResponse {
+    #[serde(flatten)]
+    pub message: MessageWithAuthor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_message: Option<Box<MessageWithAuthor>>,
 }
 
 impl From<(Message, Option<AuthorProfile>)> for MessageWithAuthor {
@@ -40,6 +52,8 @@ impl From<(Message, Option<AuthorProfile>)> for MessageWithAuthor {
             channel: msg.channel,
             created_at: msg.created_at,
             indexed_at: msg.indexed_at,
+            edited: msg.edited,
+            parent: msg.parent,
             display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
             avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
         }
