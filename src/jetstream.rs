@@ -16,6 +16,7 @@ use crate::{
 const DEFAULT_JETSTREAM_URL: &str =
     "wss://jetstream2.us-east.bsky.network/subscribe\
      ?wantedCollections=social.colibri.message\
+     &wantedCollections=social.colibri.reaction\
      &wantedCollections=app.bsky.actor.profile";
 
 // ── Jetstream wire types ──────────────────────────────────────────────────────
@@ -35,10 +36,9 @@ struct CommitData {
     record: Option<serde_json::Value>,
 }
 
-/// ATProto lexicon: social.colibri.message
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ColibriRecord {
+struct ColibriMessage {
     text: String,
     created_at: String,
     channel: String,
@@ -46,9 +46,15 @@ struct ColibriRecord {
     parent: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColibriReaction {
+    emoji: String,
+    target_message: String,
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Runs forever, reconnecting on any error.
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
     let url =
         std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
@@ -113,10 +119,13 @@ async fn handle_event(
 
     match commit.collection.as_str() {
         "social.colibri.message" => handle_message(commit, &event.did, pool, http, bus).await,
+        "social.colibri.reaction" => handle_reaction(commit, &event.did, pool, bus).await,
         "app.bsky.actor.profile" => handle_profile_update(&event.did, pool, http).await,
         _ => Ok(()),
     }
 }
+
+// ── Message handler ───────────────────────────────────────────────────────────
 
 async fn handle_message(
     commit: CommitData,
@@ -127,7 +136,7 @@ async fn handle_message(
 ) -> Result<()> {
     match commit.operation.as_str() {
         "create" => {
-            let record: ColibriRecord =
+            let record: ColibriMessage =
                 match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
                     Some(r) => r,
                     None => return Ok(()),
@@ -162,11 +171,12 @@ async fn handle_message(
             let _ = bus.send(AppEvent::Message(MessageResponse {
                 message: msg_with_author,
                 parent_message,
+                reactions: vec![],
             }));
         }
 
         "update" => {
-            let record: ColibriRecord =
+            let record: ColibriMessage =
                 match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
                     Some(r) => r,
                     None => return Ok(()),
@@ -183,7 +193,7 @@ async fn handle_message(
             .await
             {
                 Ok(Some(m)) => m,
-                Ok(None) => return Ok(()), // message not in our DB
+                Ok(None) => return Ok(()),
                 Err(e) => {
                     error!("DB error updating message: {e}");
                     return Ok(());
@@ -193,9 +203,17 @@ async fn handle_message(
             let profile = ensure_profile_cached(pool, http, did).await;
             let msg_with_author = MessageWithAuthor::from((message, profile));
             let parent_message = fetch_parent(pool, &msg_with_author).await;
+            // Fetch current reactions so the update event has the full picture.
+            let reactions = db::enrich_messages(pool, vec![msg_with_author.clone()])
+                .await
+                .ok()
+                .and_then(|mut v| v.pop())
+                .map(|r| r.reactions)
+                .unwrap_or_default();
             let _ = bus.send(AppEvent::Message(MessageResponse {
                 message: msg_with_author,
                 parent_message,
+                reactions,
             }));
         }
 
@@ -209,7 +227,7 @@ async fn handle_message(
                         channel: msg.channel,
                     });
                 }
-                Ok(None) => {} // message wasn't indexed
+                Ok(None) => {} // not indexed
                 Err(e) => error!("DB error deleting message: {e}"),
             }
         }
@@ -220,8 +238,82 @@ async fn handle_message(
     Ok(())
 }
 
-/// Handle a `app.bsky.actor.profile` (self) commit.
-/// Only refreshes the cached profile if we already have an entry for this DID.
+// ── Reaction handler ──────────────────────────────────────────────────────────
+
+async fn handle_reaction(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
+    match commit.operation.as_str() {
+        "create" => {
+            let record: ColibriReaction =
+                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
+                    Some(r) => r,
+                    None => return Ok(()),
+                };
+
+            let reaction = match db::save_reaction(
+                pool,
+                &commit.rkey,
+                did,
+                &record.emoji,
+                &record.target_message,
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                Ok(Some(r)) => r,
+                Ok(None) => return Ok(()), // duplicate
+                Err(e) => {
+                    error!("DB error saving reaction: {e}");
+                    return Ok(());
+                }
+            };
+
+            // Only broadcast if we know the target message's channel.
+            if let Ok(Some(channel)) =
+                db::get_message_channel(pool, &record.target_message).await
+            {
+                let _ = bus.send(AppEvent::ReactionAdded {
+                    rkey: reaction.rkey,
+                    author_did: reaction.author_did,
+                    emoji: reaction.emoji,
+                    target_rkey: reaction.target_rkey,
+                    channel,
+                });
+            }
+        }
+
+        "delete" => {
+            match db::delete_reaction(pool, did, &commit.rkey).await {
+                Ok(Some(reaction)) => {
+                    if let Ok(Some(channel)) =
+                        db::get_message_channel(pool, &reaction.target_rkey).await
+                    {
+                        let _ = bus.send(AppEvent::ReactionRemoved {
+                            rkey: reaction.rkey,
+                            author_did: reaction.author_did,
+                            emoji: reaction.emoji,
+                            target_rkey: reaction.target_rkey,
+                            channel,
+                        });
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => error!("DB error deleting reaction: {e}"),
+            }
+        }
+
+        _ => {}
+    }
+
+    Ok(())
+}
+
+// ── Profile handler ───────────────────────────────────────────────────────────
+
 async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client) -> Result<()> {
     match db::get_author_profile(pool, did).await {
         Ok(None) => return Ok(()),
@@ -254,11 +346,9 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
     Ok(())
 }
 
-/// Look up the parent message for a reply, if present.
-async fn fetch_parent(
-    pool: &PgPool,
-    msg: &MessageWithAuthor,
-) -> Option<Box<MessageWithAuthor>> {
+// ── Shared helpers ────────────────────────────────────────────────────────────
+
+async fn fetch_parent(pool: &PgPool, msg: &MessageWithAuthor) -> Option<Box<MessageWithAuthor>> {
     let parent_rkey = db::extract_rkey(msg.parent.as_deref()?);
     db::get_message_by_rkey(pool, parent_rkey)
         .await

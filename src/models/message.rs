@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::author::AuthorProfile;
+use super::reaction::ReactionSummary;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Message {
@@ -33,13 +34,14 @@ pub struct MessageWithAuthor {
     pub avatar_url: Option<String>,
 }
 
-/// Full API / WebSocket response type: message + author + optional parent message.
+/// Full API / WebSocket response: message + author profile + parent + reactions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageResponse {
     #[serde(flatten)]
     pub message: MessageWithAuthor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_message: Option<Box<MessageWithAuthor>>,
+    pub reactions: Vec<ReactionSummary>,
 }
 
 impl From<(Message, Option<AuthorProfile>)> for MessageWithAuthor {

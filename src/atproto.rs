@@ -17,6 +17,12 @@ pub struct RawRecord {
     pub parent: Option<String>,
 }
 
+pub struct RawReaction {
+    pub rkey: String,
+    pub emoji: String,
+    pub target_rkey: String,
+}
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -41,11 +47,15 @@ struct RecordEntry {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ColibriRecord {
+    // social.colibri.message fields
     text: Option<String>,
     created_at: Option<String>,
     channel: Option<String>,
     #[serde(default)]
     parent: Option<String>,
+    // social.colibri.reaction fields
+    emoji: Option<String>,
+    target_message: Option<String>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -146,6 +156,50 @@ pub async fn list_message_records(
                 channel: val.channel?,
                 parent: val.parent,
             })
+        })
+        .collect();
+
+    Ok((records, body.cursor))
+}
+
+/// List `social.colibri.reaction` records from a PDS for the given DID.
+pub async fn list_reaction_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<RawReaction>, Option<String>)> {
+    let mut url = format!(
+        "{}/xrpc/com.atproto.repo.listRecords?repo={}&collection=social.colibri.reaction&limit=100",
+        pds_url.trim_end_matches('/'),
+        did
+    );
+    if let Some(c) = cursor {
+        url.push_str("&cursor=");
+        url.push_str(c);
+    }
+
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "list_reaction_records: HTTP {} for {}",
+            resp.status(),
+            did
+        ));
+    }
+
+    let body: ListRecordsResponse = resp.json().await?;
+
+    let records = body
+        .records
+        .into_iter()
+        .filter_map(|entry| {
+            let rkey = entry.uri.rsplit('/').next()?.to_string();
+            let val = entry.value?;
+            // Reactions use emoji + targetMessage fields
+            let emoji = val.emoji?;
+            let target_rkey = val.target_message?;
+            Some(RawReaction { rkey, emoji, target_rkey })
         })
         .collect();
 

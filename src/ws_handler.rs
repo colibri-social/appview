@@ -90,7 +90,9 @@ impl Subscriptions {
                 Some(None) => true,
                 Some(Some(channels)) => channels.contains(&resp.message.channel),
             },
-            AppEvent::MessageDeleted { channel, .. } => match &self.messages {
+            AppEvent::MessageDeleted { channel, .. }
+            | AppEvent::ReactionAdded { channel, .. }
+            | AppEvent::ReactionRemoved { channel, .. } => match &self.messages {
                 None => false,
                 Some(None) => true,
                 Some(Some(channels)) => channels.contains(channel),

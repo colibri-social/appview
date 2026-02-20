@@ -16,6 +16,20 @@ pub enum AppEvent {
         author_did: String,
         channel: String,
     },
+    ReactionAdded {
+        rkey: String,
+        author_did: String,
+        emoji: String,
+        target_rkey: String,
+        channel: String,
+    },
+    ReactionRemoved {
+        rkey: String,
+        author_did: String,
+        emoji: String,
+        target_rkey: String,
+        channel: String,
+    },
 }
 
 pub type EventBus = broadcast::Sender<AppEvent>;
