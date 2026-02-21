@@ -4,6 +4,7 @@ extern crate rocket;
 mod atproto;
 mod backfill;
 mod db;
+mod emoji;
 mod events;
 mod jetstream;
 mod models;

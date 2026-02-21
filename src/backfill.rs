@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
-use crate::{atproto, db, jetstream};
+use crate::{atproto, db, emoji, jetstream};
 
 /// Runs as a background task.
 ///
@@ -147,6 +147,9 @@ async fn backfill_reactions(
             atproto::list_reaction_records(http, pds_url, did, cursor.as_deref()).await?;
 
         for record in records {
+            if !emoji::is_valid_emoji(&record.emoji) {
+                continue;
+            }
             match db::save_reaction(
                 pool,
                 &record.rkey,

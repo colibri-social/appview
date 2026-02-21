@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 use crate::{
     atproto,
     db,
+    emoji,
     events::{AppEvent, EventBus},
     models::message::{MessageResponse, MessageWithAuthor},
 };
@@ -253,6 +254,10 @@ async fn handle_reaction(
                     Some(r) => r,
                     None => return Ok(()),
                 };
+
+            if !emoji::is_valid_emoji(&record.emoji) {
+                return Ok(());
+            }
 
             let reaction = match db::save_reaction(
                 pool,
