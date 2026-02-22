@@ -85,7 +85,6 @@ async fn connect_and_consume(
                 // Spawn each event so the read loop is never blocked by DB/HTTP work.
                 // Without this, high-volume collections (e.g. app.bsky.actor.profile)
                 // stall the reader and the server drops the connection.
-                debug!(text);
                 let pool = pool.clone();
                 let http = http.clone();
                 let bus = bus.clone();
