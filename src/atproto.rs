@@ -196,9 +196,18 @@ pub async fn list_reaction_records(
         .filter_map(|entry| {
             let rkey = entry.uri.rsplit('/').next()?.to_string();
             let val = entry.value?;
-            // Reactions use emoji + targetMessage fields
+            // Reactions use emoji + targetMessage fields.
+            // targetMessage is an AT-URI (at://did/collection/rkey); extract just the rkey.
             let emoji = val.emoji?;
-            let target_rkey = val.target_message?;
+            let target_rkey = val
+                .target_message?
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if target_rkey.is_empty() {
+                return None;
+            }
             Some(RawReaction { rkey, emoji, target_rkey })
         })
         .collect();

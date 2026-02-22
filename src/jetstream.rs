@@ -298,18 +298,20 @@ async fn handle_reaction(
                 return Ok(());
             }
 
+            let target_rkey = db::extract_rkey(&record.target_message).to_owned();
+
             let reaction = match db::save_reaction(
                 pool,
                 &commit.rkey,
                 did,
                 &record.emoji,
-                &record.target_message,
+                &target_rkey,
                 chrono::Utc::now(),
             )
             .await
             {
                 Ok(Some(r)) => {
-                    info!(did, rkey = %commit.rkey, emoji = %record.emoji, target = %record.target_message, "Reaction indexed");
+                    info!(did, rkey = %commit.rkey, emoji = %record.emoji, target = %target_rkey, "Reaction indexed");
                     r
                 }
                 Ok(None) => {
@@ -323,7 +325,7 @@ async fn handle_reaction(
             };
 
             if let Ok(Some(channel)) =
-                db::get_message_channel(pool, &record.target_message).await
+                db::get_message_channel(pool, &target_rkey).await
             {
                 let _ = bus.send(AppEvent::ReactionAdded {
                     rkey: reaction.rkey,
