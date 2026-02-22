@@ -129,7 +129,7 @@ async fn handle_event(
             handle_reaction(commit, &event.did, pool, bus).await
         }
         "app.bsky.actor.profile" => {
-            debug!(did = %event.did, op = %commit.operation, "Dispatching profile event");
+            trace!(did = %event.did, op = %commit.operation, "Dispatching profile event");
             handle_profile_update(&event.did, pool, http).await
         }
         other => {
@@ -392,7 +392,7 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
             {
                 error!("Failed to update profile for {did}: {e}");
             } else {
-                info!("Profile updated for {did}");
+                trace!("Profile updated for {did}");
             }
         }
         Ok(None) => {}
