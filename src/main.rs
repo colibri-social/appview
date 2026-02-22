@@ -16,7 +16,7 @@ use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
-use models::{author::AuthorProfile, message::MessageResponse};
+use models::{author::AuthorProfile, message::MessageResponse, reaction::ReactionSummary};
 use webrtc::RoomState;
 
 // Source - https://stackoverflow.com/a/64904947
@@ -83,8 +83,7 @@ async fn get_messages(
         })
 }
 
-/// Retrieve the cached profile for a specific author DID.
-///
+/// Retrieve the cached profile for a specific author DID.///
 /// Query param: `did` (required)
 #[get("/api/authors?<did>")]
 async fn get_author(
@@ -108,7 +107,39 @@ async fn get_author(
     }
 }
 
-// ── Rocket launch ─────────────────────────────────────────────────────────────
+/// Retrieve reactions for a specific message, grouped by emoji.
+///
+/// Query param: `message` (required) — the record key of the target message
+#[get("/api/reactions?<message>")]
+async fn get_reactions_for_message(
+    message: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Vec<ReactionSummary>>, Status> {
+    db::get_reactions_for_message(pool, message)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_reactions_for_message error: {e}");
+            Status::InternalServerError
+        })
+}
+
+/// Retrieve all reactions in a channel, keyed by target message rkey.
+///
+/// Query param: `channel` (required)
+#[get("/api/reactions/channel?<channel>")]
+async fn get_reactions_for_channel(
+    channel: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<std::collections::HashMap<String, Vec<ReactionSummary>>>, Status> {
+    db::get_reactions_for_channel(pool, channel)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_reactions_for_channel error: {e}");
+            Status::InternalServerError
+        })
+}
 
 #[launch]
 fn rocket() -> _ {
@@ -156,6 +187,8 @@ fn rocket() -> _ {
             routes![
                 get_messages,
                 get_author,
+                get_reactions_for_message,
+                get_reactions_for_channel,
                 ws_handler::subscribe,
                 webrtc::signal,
                 preflight

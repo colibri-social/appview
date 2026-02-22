@@ -316,6 +316,75 @@ pub async fn delete_reaction(
     Ok(r)
 }
 
+/// Grouped reactions for a single message.
+pub async fn get_reactions_for_message(
+    pool: &PgPool,
+    target_rkey: &str,
+) -> Result<Vec<ReactionSummary>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        emoji: String,
+        count: i64,
+        authors: Vec<String>,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT emoji,
+               COUNT(*)::BIGINT AS count,
+               ARRAY_AGG(author_did ORDER BY created_at) AS authors
+        FROM reactions
+        WHERE target_rkey = $1
+        GROUP BY emoji
+        ORDER BY count DESC
+        "#,
+    )
+    .bind(target_rkey)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|r| ReactionSummary { emoji: r.emoji, count: r.count, authors: r.authors }).collect())
+}
+
+/// All reactions in a channel, grouped by target message rkey then by emoji.
+/// Returns a map of `target_rkey → Vec<ReactionSummary>`.
+pub async fn get_reactions_for_channel(
+    pool: &PgPool,
+    channel: &str,
+) -> Result<HashMap<String, Vec<ReactionSummary>>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        target_rkey: String,
+        emoji: String,
+        count: i64,
+        authors: Vec<String>,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT r.target_rkey, r.emoji,
+               COUNT(*)::BIGINT AS count,
+               ARRAY_AGG(r.author_did ORDER BY r.created_at) AS authors
+        FROM reactions r
+        INNER JOIN messages m ON m.rkey = r.target_rkey
+        WHERE m.channel = $1
+        GROUP BY r.target_rkey, r.emoji
+        ORDER BY r.target_rkey, count DESC
+        "#,
+    )
+    .bind(channel)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<String, Vec<ReactionSummary>> = HashMap::new();
+    for row in rows {
+        map.entry(row.target_rkey)
+            .or_default()
+            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors });
+    }
+    Ok(map)
+}
+
 // ── Author profiles ───────────────────────────────────────────────────────────
 
 /// Insert or refresh a cached author profile.

@@ -1,7 +1,7 @@
 use chrono::DateTime;
 use sqlx::PgPool;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{atproto, db, emoji, jetstream};
 
@@ -26,6 +26,7 @@ pub async fn run(pool: PgPool, http: reqwest::Client) {
         };
 
         if !caught_up {
+            debug!("Backfill: not caught up yet, waiting");
             continue;
         }
 
@@ -36,7 +37,9 @@ pub async fn run(pool: PgPool, http: reqwest::Client) {
                     error!("Backfill: failed {collection} for {did}: {e}");
                 }
             }
-            Ok(None) => {} // all known DIDs are done
+            Ok(None) => {
+                debug!("Backfill: no pending items, all DIDs complete");
+            } // all known DIDs are done
             Err(e) => error!("Backfill: get_next_backfill_item failed: {e}"),
         }
     }
@@ -51,7 +54,10 @@ async fn backfill_item(
     collection: &str,
 ) -> anyhow::Result<()> {
     let pds_url = match atproto::resolve_pds(http, did).await {
-        Ok(u) => u,
+        Ok(u) => {
+            debug!(did, pds = %u, "Resolved PDS for backfill");
+            u
+        }
         Err(e) => {
             warn!("Backfill: cannot resolve PDS for {did}: {e} — marking complete");
             db::mark_backfill_complete(pool, did, collection).await?;
@@ -86,10 +92,16 @@ async fn backfill_messages(
 ) -> anyhow::Result<()> {
     let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
     let mut total: usize = 0;
+    let mut page: usize = 0;
 
     loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching message page");
         let (records, next_cursor) =
             atproto::list_message_records(http, pds_url, did, cursor.as_deref()).await?;
+
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing message records");
 
         for record in records {
             let created_at = DateTime::parse_from_rfc3339(&record.created_at)
@@ -107,9 +119,14 @@ async fn backfill_messages(
             )
             .await
             {
-                Ok(Some(_)) => total += 1,
-                Ok(None) => {} // already present
-                Err(e) => error!("Backfill: DB error saving message {}: {e}", record.rkey),
+                Ok(Some(_)) => {
+                    debug!(did, rkey = %record.rkey, "Backfill: message inserted");
+                    total += 1;
+                }
+                Ok(None) => {
+                    debug!(did, rkey = %record.rkey, "Backfill: message already present, skipping");
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving message: {e}"),
             }
         }
 
@@ -117,13 +134,13 @@ async fn backfill_messages(
             Some(c) => {
                 cursor = Some(c.clone());
                 if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
-                    error!("Backfill: failed to save cursor for {did}: {e}");
+                    error!(did, "Backfill: failed to save cursor: {e}");
                 }
                 sleep(Duration::from_millis(200)).await;
             }
             None => {
                 db::mark_backfill_complete(pool, did, collection).await?;
-                info!("Backfill: messages complete for {did} ({total} inserted)");
+                info!(did, total, pages = page, "Backfill: messages complete");
                 break;
             }
         }
@@ -141,13 +158,22 @@ async fn backfill_reactions(
 ) -> anyhow::Result<()> {
     let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
     let mut total: usize = 0;
+    let mut skipped: usize = 0;
+    let mut page: usize = 0;
 
     loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching reaction page");
         let (records, next_cursor) =
             atproto::list_reaction_records(http, pds_url, did, cursor.as_deref()).await?;
 
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing reaction records");
+
         for record in records {
             if !emoji::is_valid_emoji(&record.emoji) {
+                debug!(did, rkey = %record.rkey, emoji = %record.emoji, "Backfill: reaction rejected, not a valid emoji");
+                skipped += 1;
                 continue;
             }
             match db::save_reaction(
@@ -160,9 +186,14 @@ async fn backfill_reactions(
             )
             .await
             {
-                Ok(Some(_)) => total += 1,
-                Ok(None) => {} // already present
-                Err(e) => error!("Backfill: DB error saving reaction {}: {e}", record.rkey),
+                Ok(Some(_)) => {
+                    debug!(did, rkey = %record.rkey, emoji = %record.emoji, "Backfill: reaction inserted");
+                    total += 1;
+                }
+                Ok(None) => {
+                    debug!(did, rkey = %record.rkey, "Backfill: reaction already present, skipping");
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving reaction: {e}"),
             }
         }
 
@@ -170,13 +201,13 @@ async fn backfill_reactions(
             Some(c) => {
                 cursor = Some(c.clone());
                 if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
-                    error!("Backfill: failed to save cursor for {did}: {e}");
+                    error!(did, "Backfill: failed to save cursor: {e}");
                 }
                 sleep(Duration::from_millis(200)).await;
             }
             None => {
                 db::mark_backfill_complete(pool, did, collection).await?;
-                info!("Backfill: reactions complete for {did} ({total} inserted)");
+                info!(did, total, skipped, pages = page, "Backfill: reactions complete");
                 break;
             }
         }
