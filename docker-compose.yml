@@ -9,7 +9,7 @@ services:
       ROCKET_ADDRESS: 0.0.0.0
       ROCKET_PORT: 8000
       RUST_LOG: ${RUST_LOG:-colibri_appview=info,rocket=info}
-      # JETSTREAM_URL: wss://jetstream2.us-east.bsky.network/subscribe
+      JETSTREAM_URL: wss://jetstream.colibri.social/subscribe?wantedCollections=social.colibri.message&wantedCollections=social.colibri.reaction&wantedCollections=app.bsky.actor.profile
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,7 +27,11 @@ services:
     volumes:
       - postgres:/var/lib/postgres
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-colibri} -d ${POSTGRES_DB:-colibri}"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-colibri} -d ${POSTGRES_DB:-colibri}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
