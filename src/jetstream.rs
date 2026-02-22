@@ -60,11 +60,6 @@ struct ColibriReaction {
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
     let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
 
-    debug!(
-        "{}",
-        std::env::var("JETSTREAM_URL").unwrap_or_else(|_| "No URL via ENV given".to_string())
-    );
-
     // Load persisted cursor so we can replay missed events after a restart.
     let initial_ts = db::get_jetstream_cursor(&pool).await.unwrap_or(0);
     let cursor = Arc::new(AtomicI64::new(initial_ts));
