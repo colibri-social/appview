@@ -21,6 +21,7 @@ pub enum AppEvent {
         author_did: String,
         emoji: String,
         target_rkey: String,
+        target_author_did: String,
         channel: String,
     },
     ReactionRemoved {
@@ -28,6 +29,7 @@ pub enum AppEvent {
         author_did: String,
         emoji: String,
         target_rkey: String,
+        target_author_did: String,
         channel: String,
     },
 }

@@ -19,4 +19,6 @@ pub struct ReactionSummary {
     pub count: i64,
     /// DIDs of all users who reacted with this emoji.
     pub authors: Vec<String>,
+    /// Record keys of each reaction, parallel to `authors`.
+    pub rkeys: Vec<String>,
 }

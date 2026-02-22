@@ -161,14 +161,17 @@ pub async fn get_message_by_rkey(
     Ok(msg)
 }
 
-/// Return the channel of a message by its rkey, or None if not found.
-pub async fn get_message_channel(pool: &PgPool, rkey: &str) -> Result<Option<String>> {
-    let channel: Option<String> =
-        sqlx::query_scalar("SELECT channel FROM messages WHERE rkey = $1 LIMIT 1")
-            .bind(rkey)
-            .fetch_optional(pool)
-            .await?;
-    Ok(channel)
+/// Return the channel and author_did of a message by its rkey, or None if not found.
+pub async fn get_message_channel(pool: &PgPool, rkey: &str) -> Result<Option<(String, String)>> {
+    #[derive(sqlx::FromRow)]
+    struct Row { channel: String, author_did: String }
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT channel, author_did FROM messages WHERE rkey = $1 LIMIT 1"
+    )
+    .bind(rkey)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| (r.channel, r.author_did)))
 }
 
 /// Populate parent messages and reactions for a batch, producing full MessageResponses.
@@ -219,13 +222,15 @@ pub async fn enrich_messages(
         emoji: String,
         count: i64,
         authors: Vec<String>,
+        rkeys: Vec<String>,
     }
 
     let reaction_rows: Vec<ReactionGroupRow> = sqlx::query_as::<_, ReactionGroupRow>(
         r#"
         SELECT target_rkey, emoji,
                COUNT(*)::BIGINT AS count,
-               ARRAY_AGG(author_did ORDER BY created_at) AS authors
+               ARRAY_AGG(author_did ORDER BY created_at) AS authors,
+               ARRAY_AGG(rkey ORDER BY created_at) AS rkeys
         FROM reactions
         WHERE target_rkey = ANY($1)
         GROUP BY target_rkey, emoji
@@ -241,7 +246,7 @@ pub async fn enrich_messages(
         reaction_map
             .entry(row.target_rkey)
             .or_default()
-            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors });
+            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors, rkeys: row.rkeys });
     }
 
     // ── Assemble responses ────────────────────────────────────────────────────
@@ -326,13 +331,15 @@ pub async fn get_reactions_for_message(
         emoji: String,
         count: i64,
         authors: Vec<String>,
+        rkeys: Vec<String>,
     }
 
     let rows = sqlx::query_as::<_, Row>(
         r#"
         SELECT emoji,
                COUNT(*)::BIGINT AS count,
-               ARRAY_AGG(author_did ORDER BY created_at) AS authors
+               ARRAY_AGG(author_did ORDER BY created_at) AS authors,
+               ARRAY_AGG(rkey ORDER BY created_at) AS rkeys
         FROM reactions
         WHERE target_rkey = $1
         GROUP BY emoji
@@ -343,7 +350,7 @@ pub async fn get_reactions_for_message(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| ReactionSummary { emoji: r.emoji, count: r.count, authors: r.authors }).collect())
+    Ok(rows.into_iter().map(|r| ReactionSummary { emoji: r.emoji, count: r.count, authors: r.authors, rkeys: r.rkeys }).collect())
 }
 
 /// All reactions in a channel, grouped by target message rkey then by emoji.
@@ -358,13 +365,15 @@ pub async fn get_reactions_for_channel(
         emoji: String,
         count: i64,
         authors: Vec<String>,
+        rkeys: Vec<String>,
     }
 
     let rows = sqlx::query_as::<_, Row>(
         r#"
         SELECT r.target_rkey, r.emoji,
                COUNT(*)::BIGINT AS count,
-               ARRAY_AGG(r.author_did ORDER BY r.created_at) AS authors
+               ARRAY_AGG(r.author_did ORDER BY r.created_at) AS authors,
+               ARRAY_AGG(r.rkey ORDER BY r.created_at) AS rkeys
         FROM reactions r
         INNER JOIN messages m ON m.rkey = r.target_rkey
         WHERE m.channel = $1
@@ -380,7 +389,7 @@ pub async fn get_reactions_for_channel(
     for row in rows {
         map.entry(row.target_rkey)
             .or_default()
-            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors });
+            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors, rkeys: row.rkeys });
     }
     Ok(map)
 }

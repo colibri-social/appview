@@ -397,12 +397,15 @@ async fn handle_reaction(
                 }
             };
 
-            if let Ok(Some(channel)) = db::get_message_channel(pool, &target_rkey).await {
+            if let Ok(Some((channel, target_author_did))) =
+                db::get_message_channel(pool, &target_rkey).await
+            {
                 let _ = bus.send(AppEvent::ReactionAdded {
                     rkey: reaction.rkey,
                     author_did: reaction.author_did,
                     emoji: reaction.emoji,
                     target_rkey: reaction.target_rkey,
+                    target_author_did,
                     channel,
                 });
             }
@@ -411,7 +414,7 @@ async fn handle_reaction(
         "delete" => match db::delete_reaction(pool, did, &commit.rkey).await {
             Ok(Some(reaction)) => {
                 info!(did, rkey = %commit.rkey, emoji = %reaction.emoji, target = %reaction.target_rkey, "Reaction deleted");
-                if let Ok(Some(channel)) =
+                if let Ok(Some((channel, target_author_did))) =
                     db::get_message_channel(pool, &reaction.target_rkey).await
                 {
                     let _ = bus.send(AppEvent::ReactionRemoved {
@@ -419,6 +422,7 @@ async fn handle_reaction(
                         author_did: reaction.author_did,
                         emoji: reaction.emoji,
                         target_rkey: reaction.target_rkey,
+                        target_author_did,
                         channel,
                     });
                 }
