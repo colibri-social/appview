@@ -121,7 +121,7 @@ async fn connect_and_consume(
     };
 
     let (ws_stream, _) = connect_async(connect_url.as_str()).await?;
-    info!("Jetstream connection established");
+    info!("Jetstream connection established. URL: {}", connect_url);
 
     let (_, mut read) = ws_stream.split();
 
@@ -136,7 +136,10 @@ async fn connect_and_consume(
                     }
                     // Jetstream can send error events (e.g. stale cursor); log and continue.
                     if v["kind"].as_str() == Some("error") {
-                        warn!("Jetstream error event: {}", v["error"].as_str().unwrap_or("unknown"));
+                        warn!(
+                            "Jetstream error event: {}",
+                            v["error"].as_str().unwrap_or("unknown")
+                        );
                         continue;
                     }
                 }
