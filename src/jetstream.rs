@@ -3,6 +3,10 @@ use chrono::DateTime;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::sync::{
+    atomic::{AtomicI64, Ordering},
+    Arc,
+};
 use tokio_tungstenite::connect_async;
 use tracing::{debug, error, info, trace, warn};
 
@@ -56,8 +60,33 @@ struct ColibriReaction {
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
     let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
 
+    // Load persisted cursor so we can replay missed events after a restart.
+    let initial_ts = db::get_jetstream_cursor(&pool).await.unwrap_or(0);
+    let cursor = Arc::new(AtomicI64::new(initial_ts));
+    if initial_ts > 0 {
+        info!("Jetstream: loaded persisted cursor {initial_ts}");
+    }
+
+    // Flush the in-memory cursor to DB every 5 s so restarts lose at most 5 s.
+    {
+        let pool_f = pool.clone();
+        let cursor_f = cursor.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                let ts = cursor_f.load(Ordering::Relaxed);
+                if ts > 0 {
+                    if let Err(e) = db::set_jetstream_cursor(&pool_f, ts).await {
+                        error!("Jetstream: failed to persist cursor: {e}");
+                    }
+                }
+            }
+        });
+    }
+
     loop {
-        if let Err(e) = connect_and_consume(&url, &pool, &http, &bus).await {
+        let ts = cursor.load(Ordering::Relaxed);
+        if let Err(e) = connect_and_consume(&url, &pool, &http, &bus, &cursor, ts).await {
             error!("Jetstream error: {e}");
         }
         warn!("Reconnecting to Jetstream in 5 s…");
@@ -72,9 +101,26 @@ async fn connect_and_consume(
     pool: &PgPool,
     http: &reqwest::Client,
     bus: &EventBus,
+    cursor: &Arc<AtomicI64>,
+    cursor_ts: i64,
 ) -> Result<()> {
-    info!("Connecting to Jetstream at {url}");
-    let (ws_stream, _) = connect_async(url).await?;
+    // Append cursor to URL only if recent enough — Jetstream's replay window is ~72 h,
+    // we use 24 h to stay safely within it.
+    let connect_url = if cursor_ts > 0 {
+        let age_secs = chrono::Utc::now().timestamp() - cursor_ts / 1_000_000;
+        if age_secs < 86_400 {
+            info!("Jetstream: connecting with cursor (age {age_secs}s)");
+            format!("{url}&cursor={cursor_ts}")
+        } else {
+            warn!("Jetstream: cursor too old ({age_secs}s), connecting without cursor");
+            url.to_string()
+        }
+    } else {
+        info!("Connecting to Jetstream at {url}");
+        url.to_string()
+    };
+
+    let (ws_stream, _) = connect_async(connect_url.as_str()).await?;
     info!("Jetstream connection established");
 
     let (_, mut read) = ws_stream.split();
@@ -82,9 +128,22 @@ async fn connect_and_consume(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                // Update the cursor atomically before spawning — cheap and keeps
+                // the read loop unblocked.
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(ts) = v["time_us"].as_i64() {
+                        cursor.store(ts, Ordering::Relaxed);
+                    }
+                    // Jetstream can send error events (e.g. stale cursor); log and continue.
+                    if v["kind"].as_str() == Some("error") {
+                        warn!("Jetstream error event: {}", v["error"].as_str().unwrap_or("unknown"));
+                        continue;
+                    }
+                }
+
                 // Spawn each event so the read loop is never blocked by DB/HTTP work.
                 // Without this, high-volume collections (e.g. app.bsky.actor.profile)
-                // stall the reader and the server drops the connection.
+                // stall the reader and the server eventually drops the connection.
                 let pool = pool.clone();
                 let http = http.clone();
                 let bus = bus.clone();

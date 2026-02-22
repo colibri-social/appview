@@ -541,3 +541,44 @@ pub async fn mark_backfill_complete(
     .await?;
     Ok(())
 }
+
+// ── Jetstream cursor ──────────────────────────────────────────────────────────
+
+/// Read the persisted Jetstream `time_us` cursor (0 = none stored yet).
+pub async fn get_jetstream_cursor(pool: &PgPool) -> Result<i64> {
+    let ts: i64 = sqlx::query_scalar("SELECT time_us FROM jetstream_cursor WHERE id = TRUE")
+        .fetch_one(pool)
+        .await?;
+    Ok(ts)
+}
+
+/// Persist the latest Jetstream `time_us` cursor.
+pub async fn set_jetstream_cursor(pool: &PgPool, time_us: i64) -> Result<()> {
+    sqlx::query(
+        "UPDATE jetstream_cursor SET time_us = $1, updated_at = NOW() WHERE id = TRUE",
+    )
+    .bind(time_us)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── Sweep helpers ─────────────────────────────────────────────────────────────
+
+/// Timestamp of the most recently indexed message (for lag detection).
+pub async fn get_last_indexed_at(pool: &PgPool) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let ts: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT MAX(indexed_at) FROM messages")
+            .fetch_one(pool)
+            .await?;
+    Ok(ts)
+}
+
+/// All distinct author DIDs we have ever indexed a message for.
+pub async fn get_all_known_dids(pool: &PgPool) -> Result<Vec<String>> {
+    let dids: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT author_did FROM messages ORDER BY author_did")
+            .fetch_all(pool)
+            .await?;
+    Ok(dids)
+}
