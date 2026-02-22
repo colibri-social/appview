@@ -444,7 +444,8 @@ pub async fn is_caught_up(pool: &PgPool) -> Result<bool> {
     .fetch_one(pool)
     .await?;
 
-    Ok(avg_lag.unwrap_or(f64::MAX) < 60.0)
+    // No messages yet → treat as caught up so backfill can start immediately.
+    Ok(avg_lag.unwrap_or(0.0) < 60.0)
 }
 
 /// Return the next (did, collection) pair that still needs backfilling.

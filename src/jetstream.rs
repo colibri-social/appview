@@ -86,19 +86,30 @@ async fn connect_and_consume(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                trace!(raw = %text, "Jetstream event received");
-                if let Err(e) = handle_event(text.as_str(), pool, http, bus).await {
-                    error!("Failed to handle Jetstream event: {e}");
-                }
+                // Spawn each event so the read loop is never blocked by DB/HTTP work.
+                // Without this, high-volume collections (e.g. app.bsky.actor.profile)
+                // stall the reader and the server drops the connection.
+                let pool = pool.clone();
+                let http = http.clone();
+                let bus = bus.clone();
+                tokio::spawn(async move {
+                    trace!(raw = %text, "Jetstream event received");
+                    if let Err(e) = handle_event(text.as_str(), &pool, &http, &bus).await {
+                        error!("Failed to handle Jetstream event: {e}");
+                    }
+                });
+            }
+            Ok(other) => {
+                trace!("Jetstream: ignoring non-text frame: {other:?}");
             }
             Err(e) => {
                 error!("Jetstream WebSocket error: {e}");
                 break;
             }
-            _ => {}
         }
     }
 
+    info!("Jetstream stream ended, will reconnect");
     Ok(())
 }
 
