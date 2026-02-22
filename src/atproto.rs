@@ -55,17 +55,13 @@ struct ColibriRecord {
     parent: Option<String>,
     // social.colibri.reaction fields
     emoji: Option<String>,
-    target_message: Option<String>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Fetch a Bluesky actor profile from the public AppView API.
 /// Returns `None` if the DID is not found or the request fails.
-pub async fn fetch_profile(
-    client: &reqwest::Client,
-    did: &str,
-) -> Result<Option<ProfileData>> {
+pub async fn fetch_profile(client: &reqwest::Client, did: &str) -> Result<Option<ProfileData>> {
     let url = format!(
         "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={}",
         did
@@ -200,7 +196,7 @@ pub async fn list_reaction_records(
             // targetMessage is an AT-URI (at://did/collection/rkey); extract just the rkey.
             let emoji = val.emoji?;
             let target_rkey = val
-                .target_message?
+                .parent?
                 .rsplit('/')
                 .next()
                 .unwrap_or_default()
@@ -208,7 +204,11 @@ pub async fn list_reaction_records(
             if target_rkey.is_empty() {
                 return None;
             }
-            Some(RawReaction { rkey, emoji, target_rkey })
+            Some(RawReaction {
+                rkey,
+                emoji,
+                target_rkey,
+            })
         })
         .collect();
 

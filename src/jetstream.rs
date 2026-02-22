@@ -7,15 +7,12 @@ use tokio_tungstenite::connect_async;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    atproto,
-    db,
-    emoji,
+    atproto, db, emoji,
     events::{AppEvent, EventBus},
     models::message::{MessageResponse, MessageWithAuthor},
 };
 
-const DEFAULT_JETSTREAM_URL: &str =
-    "wss://jetstream2.us-east.bsky.network/subscribe\
+const DEFAULT_JETSTREAM_URL: &str = "wss://jetstream2.us-east.bsky.network/subscribe\
      ?wantedCollections=social.colibri.message\
      &wantedCollections=social.colibri.reaction\
      &wantedCollections=app.bsky.actor.profile";
@@ -51,14 +48,13 @@ struct ColibriMessage {
 #[serde(rename_all = "camelCase")]
 struct ColibriReaction {
     emoji: String,
-    target_message: String,
+    parent: String,
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
-    let url =
-        std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
+    let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
 
     loop {
         if let Err(e) = connect_and_consume(&url, &pool, &http, &bus).await {
@@ -89,6 +85,7 @@ async fn connect_and_consume(
                 // Spawn each event so the read loop is never blocked by DB/HTTP work.
                 // Without this, high-volume collections (e.g. app.bsky.actor.profile)
                 // stall the reader and the server drops the connection.
+                debug!(text);
                 let pool = pool.clone();
                 let http = http.clone();
                 let bus = bus.clone();
@@ -161,14 +158,16 @@ async fn handle_message(
 ) -> Result<()> {
     match commit.operation.as_str() {
         "create" => {
-            let record: ColibriMessage =
-                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
-                    Some(r) => r,
-                    None => {
-                        debug!(did, rkey = %commit.rkey, "Message create: missing or malformed record, skipping");
-                        return Ok(());
-                    }
-                };
+            let record: ColibriMessage = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Message create: missing or malformed record, skipping");
+                    return Ok(());
+                }
+            };
 
             let created_at = DateTime::parse_from_rfc3339(&record.created_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -210,14 +209,16 @@ async fn handle_message(
         }
 
         "update" => {
-            let record: ColibriMessage =
-                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
-                    Some(r) => r,
-                    None => {
-                        debug!(did, rkey = %commit.rkey, "Message update: missing or malformed record, skipping");
-                        return Ok(());
-                    }
-                };
+            let record: ColibriMessage = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Message update: missing or malformed record, skipping");
+                    return Ok(());
+                }
+            };
 
             let message = match db::update_message(
                 pool,
@@ -259,23 +260,21 @@ async fn handle_message(
             }));
         }
 
-        "delete" => {
-            match db::delete_message(pool, did, &commit.rkey).await {
-                Ok(Some(msg)) => {
-                    info!(did, rkey = %commit.rkey, channel = %msg.channel, "Message deleted");
-                    let _ = bus.send(AppEvent::MessageDeleted {
-                        id: msg.id,
-                        rkey: msg.rkey,
-                        author_did: msg.author_did,
-                        channel: msg.channel,
-                    });
-                }
-                Ok(None) => {
-                    debug!(did, rkey = %commit.rkey, "Message delete: not indexed, ignoring");
-                }
-                Err(e) => error!(did, rkey = %commit.rkey, "DB error deleting message: {e}"),
+        "delete" => match db::delete_message(pool, did, &commit.rkey).await {
+            Ok(Some(msg)) => {
+                info!(did, rkey = %commit.rkey, channel = %msg.channel, "Message deleted");
+                let _ = bus.send(AppEvent::MessageDeleted {
+                    id: msg.id,
+                    rkey: msg.rkey,
+                    author_did: msg.author_did,
+                    channel: msg.channel,
+                });
             }
-        }
+            Ok(None) => {
+                debug!(did, rkey = %commit.rkey, "Message delete: not indexed, ignoring");
+            }
+            Err(e) => error!(did, rkey = %commit.rkey, "DB error deleting message: {e}"),
+        },
 
         other => {
             trace!(did, rkey = %commit.rkey, op = other, "Message: unhandled operation");
@@ -295,21 +294,23 @@ async fn handle_reaction(
 ) -> Result<()> {
     match commit.operation.as_str() {
         "create" => {
-            let record: ColibriReaction =
-                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
-                    Some(r) => r,
-                    None => {
-                        debug!(did, rkey = %commit.rkey, "Reaction create: missing or malformed record, skipping");
-                        return Ok(());
-                    }
-                };
+            let record: ColibriReaction = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Reaction create: missing or malformed record, skipping");
+                    return Ok(());
+                }
+            };
 
             if !emoji::is_valid_emoji(&record.emoji) {
                 debug!(did, rkey = %commit.rkey, emoji = %record.emoji, "Reaction rejected: not a valid emoji");
                 return Ok(());
             }
 
-            let target_rkey = db::extract_rkey(&record.target_message).to_owned();
+            let target_rkey = db::extract_rkey(&record.parent).to_owned();
 
             let reaction = match db::save_reaction(
                 pool,
@@ -335,9 +336,7 @@ async fn handle_reaction(
                 }
             };
 
-            if let Ok(Some(channel)) =
-                db::get_message_channel(pool, &target_rkey).await
-            {
+            if let Ok(Some(channel)) = db::get_message_channel(pool, &target_rkey).await {
                 let _ = bus.send(AppEvent::ReactionAdded {
                     rkey: reaction.rkey,
                     author_did: reaction.author_did,
@@ -348,28 +347,26 @@ async fn handle_reaction(
             }
         }
 
-        "delete" => {
-            match db::delete_reaction(pool, did, &commit.rkey).await {
-                Ok(Some(reaction)) => {
-                    info!(did, rkey = %commit.rkey, emoji = %reaction.emoji, target = %reaction.target_rkey, "Reaction deleted");
-                    if let Ok(Some(channel)) =
-                        db::get_message_channel(pool, &reaction.target_rkey).await
-                    {
-                        let _ = bus.send(AppEvent::ReactionRemoved {
-                            rkey: reaction.rkey,
-                            author_did: reaction.author_did,
-                            emoji: reaction.emoji,
-                            target_rkey: reaction.target_rkey,
-                            channel,
-                        });
-                    }
+        "delete" => match db::delete_reaction(pool, did, &commit.rkey).await {
+            Ok(Some(reaction)) => {
+                info!(did, rkey = %commit.rkey, emoji = %reaction.emoji, target = %reaction.target_rkey, "Reaction deleted");
+                if let Ok(Some(channel)) =
+                    db::get_message_channel(pool, &reaction.target_rkey).await
+                {
+                    let _ = bus.send(AppEvent::ReactionRemoved {
+                        rkey: reaction.rkey,
+                        author_did: reaction.author_did,
+                        emoji: reaction.emoji,
+                        target_rkey: reaction.target_rkey,
+                        channel,
+                    });
                 }
-                Ok(None) => {
-                    debug!(did, rkey = %commit.rkey, "Reaction delete: not indexed, ignoring");
-                }
-                Err(e) => error!(did, rkey = %commit.rkey, "DB error deleting reaction: {e}"),
             }
-        }
+            Ok(None) => {
+                debug!(did, rkey = %commit.rkey, "Reaction delete: not indexed, ignoring");
+            }
+            Err(e) => error!(did, rkey = %commit.rkey, "DB error deleting reaction: {e}"),
+        },
 
         other => {
             trace!(did, rkey = %commit.rkey, op = other, "Reaction: unhandled operation");
