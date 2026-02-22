@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use sqlx::PgPool;
 use tokio_tungstenite::connect_async;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     atproto,
@@ -86,6 +86,7 @@ async fn connect_and_consume(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                trace!(raw = %text, "Jetstream event received");
                 if let Err(e) = handle_event(text.as_str(), pool, http, bus).await {
                     error!("Failed to handle Jetstream event: {e}");
                 }
@@ -119,10 +120,22 @@ async fn handle_event(
     };
 
     match commit.collection.as_str() {
-        "social.colibri.message" => handle_message(commit, &event.did, pool, http, bus).await,
-        "social.colibri.reaction" => handle_reaction(commit, &event.did, pool, bus).await,
-        "app.bsky.actor.profile" => handle_profile_update(&event.did, pool, http).await,
-        _ => Ok(()),
+        "social.colibri.message" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching message event");
+            handle_message(commit, &event.did, pool, http, bus).await
+        }
+        "social.colibri.reaction" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching reaction event");
+            handle_reaction(commit, &event.did, pool, bus).await
+        }
+        "app.bsky.actor.profile" => {
+            debug!(did = %event.did, op = %commit.operation, "Dispatching profile event");
+            handle_profile_update(&event.did, pool, http).await
+        }
+        other => {
+            trace!(did = %event.did, collection = other, "Ignoring unhandled collection");
+            Ok(())
+        }
     }
 }
 
@@ -140,7 +153,10 @@ async fn handle_message(
             let record: ColibriMessage =
                 match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
                     Some(r) => r,
-                    None => return Ok(()),
+                    None => {
+                        debug!(did, rkey = %commit.rkey, "Message create: missing or malformed record, skipping");
+                        return Ok(());
+                    }
                 };
 
             let created_at = DateTime::parse_from_rfc3339(&record.created_at)
@@ -158,10 +174,16 @@ async fn handle_message(
             )
             .await
             {
-                Ok(Some(m)) => m,
-                Ok(None) => return Ok(()), // duplicate
+                Ok(Some(m)) => {
+                    info!(did, rkey = %commit.rkey, channel = %record.channel, "Message indexed");
+                    m
+                }
+                Ok(None) => {
+                    debug!(did, rkey = %commit.rkey, "Message already indexed, skipping duplicate");
+                    return Ok(());
+                }
                 Err(e) => {
-                    error!("DB error saving message: {e}");
+                    error!(did, rkey = %commit.rkey, "DB error saving message: {e}");
                     return Ok(());
                 }
             };
@@ -180,7 +202,10 @@ async fn handle_message(
             let record: ColibriMessage =
                 match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
                     Some(r) => r,
-                    None => return Ok(()),
+                    None => {
+                        debug!(did, rkey = %commit.rkey, "Message update: missing or malformed record, skipping");
+                        return Ok(());
+                    }
                 };
 
             let message = match db::update_message(
@@ -193,10 +218,16 @@ async fn handle_message(
             )
             .await
             {
-                Ok(Some(m)) => m,
-                Ok(None) => return Ok(()),
+                Ok(Some(m)) => {
+                    info!(did, rkey = %commit.rkey, channel = %record.channel, "Message updated");
+                    m
+                }
+                Ok(None) => {
+                    debug!(did, rkey = %commit.rkey, "Message update: not in DB, skipping");
+                    return Ok(());
+                }
                 Err(e) => {
-                    error!("DB error updating message: {e}");
+                    error!(did, rkey = %commit.rkey, "DB error updating message: {e}");
                     return Ok(());
                 }
             };
@@ -204,7 +235,6 @@ async fn handle_message(
             let profile = ensure_profile_cached(pool, http, did).await;
             let msg_with_author = MessageWithAuthor::from((message, profile));
             let parent_message = fetch_parent(pool, &msg_with_author).await;
-            // Fetch current reactions so the update event has the full picture.
             let reactions = db::enrich_messages(pool, vec![msg_with_author.clone()])
                 .await
                 .ok()
@@ -221,6 +251,7 @@ async fn handle_message(
         "delete" => {
             match db::delete_message(pool, did, &commit.rkey).await {
                 Ok(Some(msg)) => {
+                    info!(did, rkey = %commit.rkey, channel = %msg.channel, "Message deleted");
                     let _ = bus.send(AppEvent::MessageDeleted {
                         id: msg.id,
                         rkey: msg.rkey,
@@ -228,12 +259,16 @@ async fn handle_message(
                         channel: msg.channel,
                     });
                 }
-                Ok(None) => {} // not indexed
-                Err(e) => error!("DB error deleting message: {e}"),
+                Ok(None) => {
+                    debug!(did, rkey = %commit.rkey, "Message delete: not indexed, ignoring");
+                }
+                Err(e) => error!(did, rkey = %commit.rkey, "DB error deleting message: {e}"),
             }
         }
 
-        _ => {}
+        other => {
+            trace!(did, rkey = %commit.rkey, op = other, "Message: unhandled operation");
+        }
     }
 
     Ok(())
@@ -252,10 +287,14 @@ async fn handle_reaction(
             let record: ColibriReaction =
                 match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
                     Some(r) => r,
-                    None => return Ok(()),
+                    None => {
+                        debug!(did, rkey = %commit.rkey, "Reaction create: missing or malformed record, skipping");
+                        return Ok(());
+                    }
                 };
 
             if !emoji::is_valid_emoji(&record.emoji) {
+                debug!(did, rkey = %commit.rkey, emoji = %record.emoji, "Reaction rejected: not a valid emoji");
                 return Ok(());
             }
 
@@ -269,15 +308,20 @@ async fn handle_reaction(
             )
             .await
             {
-                Ok(Some(r)) => r,
-                Ok(None) => return Ok(()), // duplicate
+                Ok(Some(r)) => {
+                    info!(did, rkey = %commit.rkey, emoji = %record.emoji, target = %record.target_message, "Reaction indexed");
+                    r
+                }
+                Ok(None) => {
+                    debug!(did, rkey = %commit.rkey, "Reaction already indexed, skipping duplicate");
+                    return Ok(());
+                }
                 Err(e) => {
-                    error!("DB error saving reaction: {e}");
+                    error!(did, rkey = %commit.rkey, "DB error saving reaction: {e}");
                     return Ok(());
                 }
             };
 
-            // Only broadcast if we know the target message's channel.
             if let Ok(Some(channel)) =
                 db::get_message_channel(pool, &record.target_message).await
             {
@@ -294,6 +338,7 @@ async fn handle_reaction(
         "delete" => {
             match db::delete_reaction(pool, did, &commit.rkey).await {
                 Ok(Some(reaction)) => {
+                    info!(did, rkey = %commit.rkey, emoji = %reaction.emoji, target = %reaction.target_rkey, "Reaction deleted");
                     if let Ok(Some(channel)) =
                         db::get_message_channel(pool, &reaction.target_rkey).await
                     {
@@ -306,12 +351,16 @@ async fn handle_reaction(
                         });
                     }
                 }
-                Ok(None) => {}
-                Err(e) => error!("DB error deleting reaction: {e}"),
+                Ok(None) => {
+                    debug!(did, rkey = %commit.rkey, "Reaction delete: not indexed, ignoring");
+                }
+                Err(e) => error!(did, rkey = %commit.rkey, "DB error deleting reaction: {e}"),
             }
         }
 
-        _ => {}
+        other => {
+            trace!(did, rkey = %commit.rkey, op = other, "Reaction: unhandled operation");
+        }
     }
 
     Ok(())
