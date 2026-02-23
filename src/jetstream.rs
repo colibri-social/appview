@@ -46,6 +46,8 @@ struct ColibriMessage {
     channel: String,
     #[serde(default)]
     parent: Option<String>,
+    #[serde(default)]
+    facets: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,6 +243,7 @@ async fn handle_message(
                 &record.text,
                 &record.channel,
                 record.parent.as_deref(),
+                record.facets.as_ref(),
                 created_at,
             )
             .await
@@ -288,6 +291,7 @@ async fn handle_message(
                 &record.text,
                 &record.channel,
                 record.parent.as_deref(),
+                record.facets.as_ref(),
             )
             .await
             {

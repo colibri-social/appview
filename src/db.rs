@@ -19,14 +19,15 @@ pub async fn save_message(
     text: &str,
     channel: &str,
     parent: Option<&str>,
+    facets: Option<&serde_json::Value>,
     created_at: DateTime<Utc>,
 ) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
-        INSERT INTO messages (rkey, author_did, text, channel, parent, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO messages (rkey, author_did, text, channel, parent, facets, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (author_did, rkey) DO NOTHING
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets
         "#,
     )
     .bind(rkey)
@@ -34,6 +35,7 @@ pub async fn save_message(
     .bind(text)
     .bind(channel)
     .bind(parent)
+    .bind(facets.map(|f| sqlx::types::Json(f)))
     .bind(created_at)
     .fetch_optional(pool)
     .await?;
@@ -49,18 +51,20 @@ pub async fn update_message(
     text: &str,
     channel: &str,
     parent: Option<&str>,
+    facets: Option<&serde_json::Value>,
 ) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
         UPDATE messages
-        SET text = $1, channel = $2, parent = $3, edited = TRUE
-        WHERE author_did = $4 AND rkey = $5
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent
+        SET text = $1, channel = $2, parent = $3, facets = $4, edited = TRUE
+        WHERE author_did = $5 AND rkey = $6
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets
         "#,
     )
     .bind(text)
     .bind(channel)
     .bind(parent)
+    .bind(facets.map(|f| sqlx::types::Json(f)))
     .bind(author_did)
     .bind(rkey)
     .fetch_optional(pool)
@@ -79,7 +83,7 @@ pub async fn delete_message(
         r#"
         DELETE FROM messages
         WHERE author_did = $1 AND rkey = $2
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets
         "#,
     )
     .bind(author_did)
@@ -102,7 +106,7 @@ pub async fn get_messages(
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -120,7 +124,7 @@ pub async fn get_messages(
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -146,7 +150,7 @@ pub async fn get_message_by_rkey(
     let msg = sqlx::query_as::<_, MessageWithAuthor>(
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-               m.created_at, m.indexed_at, m.edited, m.parent,
+               m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
                a.display_name, a.avatar_url
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -159,6 +163,37 @@ pub async fn get_message_by_rkey(
     .await?;
 
     Ok(msg)
+}
+
+/// Look up a single message by author DID + rkey, fully enriched.
+pub async fn get_message_by_author_and_rkey(
+    pool: &PgPool,
+    author_did: &str,
+    rkey: &str,
+) -> Result<Option<MessageResponse>> {
+    let msg = sqlx::query_as::<_, MessageWithAuthor>(
+        r#"
+        SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
+               m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+               a.display_name, a.avatar_url
+        FROM messages m
+        LEFT JOIN author_profiles a ON m.author_did = a.did
+        WHERE m.author_did = $1 AND m.rkey = $2
+        LIMIT 1
+        "#,
+    )
+    .bind(author_did)
+    .bind(rkey)
+    .fetch_optional(pool)
+    .await?;
+
+    match msg {
+        None => Ok(None),
+        Some(m) => {
+            let mut enriched = enrich_messages(pool, vec![m]).await?;
+            Ok(enriched.pop())
+        }
+    }
 }
 
 /// Return the channel and author_did of a message by its rkey, or None if not found.

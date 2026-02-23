@@ -107,6 +107,25 @@ async fn get_author(
     }
 }
 
+/// Retrieve a single message by author DID and record key, fully enriched.
+///
+/// Query params: `author` (required), `rkey` (required)
+#[get("/api/message?<author>&<rkey>")]
+async fn get_message(
+    author: &str,
+    rkey: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<MessageResponse>, Status> {
+    match db::get_message_by_author_and_rkey(pool, author, rkey).await {
+        Ok(Some(msg)) => Ok(Json(msg)),
+        Ok(None) => Err(Status::NotFound),
+        Err(e) => {
+            error!("get_message error: {e}");
+            Err(Status::InternalServerError)
+        }
+    }
+}
+
 /// Retrieve reactions for a specific message, grouped by emoji.
 ///
 /// Query param: `message` (required) — the record key of the target message
@@ -186,6 +205,7 @@ fn rocket() -> _ {
             "/",
             routes![
                 get_messages,
+                get_message,
                 get_author,
                 get_reactions_for_message,
                 get_reactions_for_channel,

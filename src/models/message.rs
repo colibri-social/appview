@@ -16,6 +16,7 @@ pub struct Message {
     pub indexed_at: DateTime<Utc>,
     pub edited: bool,
     pub parent: Option<String>,
+    pub facets: Option<sqlx::types::Json<serde_json::Value>>,
 }
 
 /// A message with the author's cached profile fields flattened in, mapped from DB rows.
@@ -30,6 +31,7 @@ pub struct MessageWithAuthor {
     pub indexed_at: DateTime<Utc>,
     pub edited: bool,
     pub parent: Option<String>,
+    pub facets: Option<sqlx::types::Json<serde_json::Value>>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
 }
@@ -56,6 +58,7 @@ impl From<(Message, Option<AuthorProfile>)> for MessageWithAuthor {
             indexed_at: msg.indexed_at,
             edited: msg.edited,
             parent: msg.parent,
+            facets: msg.facets,
             display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
             avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
         }

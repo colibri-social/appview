@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 rocket = { version = "0.5", features = ["json"] }
 rocket_ws = "0.1"
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 serde = { version = "1", features = ["derive"] }

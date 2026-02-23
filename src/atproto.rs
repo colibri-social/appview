@@ -15,6 +15,7 @@ pub struct RawRecord {
     pub created_at: String,
     pub channel: String,
     pub parent: Option<String>,
+    pub facets: Option<serde_json::Value>,
 }
 
 pub struct RawReaction {
@@ -53,6 +54,8 @@ struct ColibriRecord {
     channel: Option<String>,
     #[serde(default)]
     parent: Option<String>,
+    #[serde(default)]
+    facets: Option<serde_json::Value>,
     // social.colibri.reaction fields
     emoji: Option<String>,
 }
@@ -151,6 +154,7 @@ pub async fn list_message_records(
                 created_at: val.created_at?,
                 channel: val.channel?,
                 parent: val.parent,
+                facets: val.facets,
             })
         })
         .collect();
