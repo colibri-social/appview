@@ -233,7 +233,7 @@ pub async fn enrich_messages(
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
