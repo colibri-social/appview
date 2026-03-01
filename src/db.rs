@@ -528,8 +528,14 @@ pub async fn get_next_backfill_item(pool: &PgPool) -> Result<Option<(String, Str
 
     let row = sqlx::query_as::<_, Row>(
         r#"
-        SELECT DISTINCT m.author_did, c.collection
-        FROM messages m
+        SELECT DISTINCT known.did AS author_did, c.collection
+        FROM (
+            SELECT author_did AS did FROM messages
+            UNION
+            SELECT owner_did  AS did FROM communities
+            UNION
+            SELECT did        AS did FROM author_profiles
+        ) AS known
         CROSS JOIN (
             VALUES ('social.colibri.message'),
                    ('social.colibri.reaction'),
@@ -540,7 +546,7 @@ pub async fn get_next_backfill_item(pool: &PgPool) -> Result<Option<(String, Str
         ) AS c(collection)
         WHERE NOT EXISTS (
             SELECT 1 FROM backfill_state bs
-            WHERE bs.did = m.author_did
+            WHERE bs.did = known.did
               AND bs.collection = c.collection
               AND bs.completed = TRUE
         )
@@ -640,12 +646,22 @@ pub async fn get_last_indexed_at(pool: &PgPool) -> Result<Option<chrono::DateTim
     Ok(ts)
 }
 
-/// All distinct author DIDs we have ever indexed a message for.
+/// All distinct DIDs we know about: message authors + community owners + cached profiles.
 pub async fn get_all_known_dids(pool: &PgPool) -> Result<Vec<String>> {
-    let dids: Vec<String> =
-        sqlx::query_scalar("SELECT DISTINCT author_did FROM messages ORDER BY author_did")
-            .fetch_all(pool)
-            .await?;
+    let dids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT did FROM (
+            SELECT author_did AS did FROM messages
+            UNION
+            SELECT owner_did  AS did FROM communities
+            UNION
+            SELECT did        AS did FROM author_profiles
+        ) AS known
+        ORDER BY did
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(dids)
 }
 
