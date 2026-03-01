@@ -643,13 +643,18 @@ pub async fn save_community(
     rkey: &str,
     name: &str,
     description: Option<&str>,
+    image: Option<&serde_json::Value>,
+    category_order: Option<&serde_json::Value>,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO communities (uri, owner_did, rkey, name, description)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO communities (uri, owner_did, rkey, name, description, image, category_order)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (uri) DO UPDATE
-          SET name = EXCLUDED.name, description = EXCLUDED.description
+          SET name           = EXCLUDED.name,
+              description    = EXCLUDED.description,
+              image          = EXCLUDED.image,
+              category_order = EXCLUDED.category_order
         "#,
     )
     .bind(uri)
@@ -657,6 +662,8 @@ pub async fn save_community(
     .bind(rkey)
     .bind(name)
     .bind(description)
+    .bind(image.map(|v| sqlx::types::Json(v)))
+    .bind(category_order.map(|v| sqlx::types::Json(v)))
     .execute(pool)
     .await?;
     Ok(())
@@ -839,7 +846,7 @@ pub async fn get_communities_for_user(
     did: &str,
 ) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(
-        "SELECT uri, owner_did, rkey, name, description FROM communities WHERE owner_did = $1",
+        "SELECT uri, owner_did, rkey, name, description, image, category_order FROM communities WHERE owner_did = $1",
     )
     .bind(did)
     .fetch_all(pool)
@@ -847,7 +854,7 @@ pub async fn get_communities_for_user(
 
     let joined = sqlx::query_as::<_, Community>(
         r#"
-        SELECT c.uri, c.owner_did, c.rkey, c.name, c.description
+        SELECT c.uri, c.owner_did, c.rkey, c.name, c.description, c.image, c.category_order
           FROM communities c
           JOIN community_members cm ON cm.community_uri = c.uri
          WHERE cm.member_did = $1
@@ -921,13 +928,16 @@ pub async fn get_invite_code(
         c_rkey: String,
         c_name: String,
         c_description: Option<String>,
+        c_image: Option<sqlx::types::Json<serde_json::Value>>,
+        c_category_order: Option<sqlx::types::Json<serde_json::Value>>,
     }
 
     let row = sqlx::query_as::<_, Row>(
         r#"
         SELECT i.code, i.community_uri, i.created_by_did, i.max_uses, i.use_count, i.active,
                c.uri AS c_uri, c.owner_did AS c_owner_did, c.rkey AS c_rkey,
-               c.name AS c_name, c.description AS c_description
+               c.name AS c_name, c.description AS c_description,
+               c.image AS c_image, c.category_order AS c_category_order
           FROM invite_codes i
           JOIN communities c ON c.uri = i.community_uri
          WHERE i.code = $1
@@ -953,6 +963,8 @@ pub async fn get_invite_code(
                 rkey: r.c_rkey,
                 name: r.c_name,
                 description: r.c_description,
+                image: r.c_image,
+                category_order: r.c_category_order,
             },
         )
     }))
@@ -1014,4 +1026,47 @@ pub async fn use_invite_code(pool: &PgPool, code: &str) -> Result<bool> {
         .await?;
 
     Ok(true)
+}
+
+/// Return all channels for a community, ordered by name.
+pub async fn get_channels_for_community(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<crate::models::community::Channel>> {
+    let channels = sqlx::query_as::<_, crate::models::community::Channel>(
+        r#"
+        SELECT uri, rkey, community_uri, name, description, channel_type, category_rkey
+          FROM channels
+         WHERE community_uri = $1
+         ORDER BY name
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(channels)
+}
+
+/// Return all members (pending + approved) for a community, enriched with
+/// cached profile data where available.
+pub async fn get_members_for_community(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<crate::models::community::CommunityMember>> {
+    let members = sqlx::query_as::<_, crate::models::community::CommunityMember>(
+        r#"
+        SELECT cm.member_did,
+               cm.status,
+               ap.display_name,
+               ap.avatar_url
+          FROM community_members cm
+          LEFT JOIN author_profiles ap ON ap.did = cm.member_did
+         WHERE cm.community_uri = $1
+         ORDER BY cm.created_at
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(members)
 }

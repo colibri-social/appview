@@ -16,7 +16,7 @@ use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
-use models::{author::AuthorProfile, community::{CommunitiesResponse, CreateInviteRequest}, message::MessageResponse, reaction::ReactionSummary};
+use models::{author::AuthorProfile, community::{Channel, CommunitiesResponse, CommunityMember, CreateInviteRequest}, message::MessageResponse, reaction::ReactionSummary};
 use webrtc::RoomState;
 
 // Source - https://stackoverflow.com/a/64904947
@@ -160,6 +160,40 @@ async fn get_reactions_for_channel(
         })
 }
 
+/// Retrieve all channels for a community.
+///
+/// Query param: `community` (required) — the full AT-URI of the community
+#[get("/api/channels?<community>")]
+async fn get_channels(
+    community: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Vec<Channel>>, Status> {
+    db::get_channels_for_community(pool, community)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_channels error: {e}");
+            Status::InternalServerError
+        })
+}
+
+/// Retrieve all members of a community, enriched with cached profile data.
+///
+/// Query param: `community` (required) — the full AT-URI of the community
+#[get("/api/members?<community>")]
+async fn get_members(
+    community: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Vec<CommunityMember>>, Status> {
+    db::get_members_for_community(pool, community)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_members error: {e}");
+            Status::InternalServerError
+        })
+}
+
 /// Retrieve all communities for a user (both owned and joined) in one roundtrip.
 ///
 /// Query param: `did` (required)
@@ -290,6 +324,8 @@ fn rocket() -> _ {
                 get_reactions_for_message,
                 get_reactions_for_channel,
                 get_communities,
+                get_channels,
+                get_members,
                 get_invite,
                 create_invite,
                 revoke_invite,

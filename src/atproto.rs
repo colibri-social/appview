@@ -29,6 +29,8 @@ pub struct RawCommunity {
     pub uri: String,
     pub name: String,
     pub description: Option<String>,
+    pub image: Option<serde_json::Value>,
+    pub category_order: Option<serde_json::Value>,
 }
 
 pub struct RawChannel {
@@ -98,6 +100,9 @@ struct ColibriRecord {
     category: Option<String>,
     /// Used as community rkey in channel records, and as community AT-URI in membership records.
     community: Option<String>,
+    // social.colibri.community extra fields
+    image: Option<serde_json::Value>,
+    category_order: Option<serde_json::Value>,
     // social.colibri.approval fields
     membership: Option<String>,
 }
@@ -281,6 +286,8 @@ pub async fn list_community_records(
                 uri,
                 name: val.name?,
                 description: val.description,
+                image: val.image,
+                category_order: val.category_order,
             })
         })
         .collect();

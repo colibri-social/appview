@@ -67,6 +67,10 @@ struct ColibriCommunity {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    image: Option<serde_json::Value>,
+    #[serde(default)]
+    category_order: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,6 +591,8 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool) -> Resul
                 &commit.rkey,
                 &record.name,
                 record.description.as_deref(),
+                record.image.as_ref(),
+                record.category_order.as_ref(),
             )
             .await
             {

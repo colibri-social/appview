@@ -170,6 +170,8 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     &record.rkey,
                     &record.name,
                     record.description.as_deref(),
+                    record.image.as_ref(),
+                    record.category_order.as_ref(),
                 )
                 .await
                 {
@@ -469,6 +471,8 @@ async fn backfill_communities(
                 &record.rkey,
                 &record.name,
                 record.description.as_deref(),
+                record.image.as_ref(),
+                record.category_order.as_ref(),
             )
             .await
             {
