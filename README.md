@@ -169,8 +169,8 @@ All communities for a user — both owned and joined — in a single roundtrip.
       "rkey": "3mxxx",
       "name": "My Community",
       "description": "...",
-      "image": { ... },
-      "category_order": [ ... ]
+      "picture": { "$type": "blob", "ref": { ... }, "mimeType": "image/jpeg", "size": 12345 },
+      "category_order": [ "3mcat1", "3mcat2" ]
     }
   ],
   "joined": [ ... ]
@@ -185,7 +185,7 @@ All channels for a community.
 |-----------|----------|-------------|
 | `community` | ✅ | Community AT-URI (`at://did:plc:xxx/social.colibri.community/rkey`) |
 
-**Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`.
+**Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`, `community_uri`.
 
 #### `GET /api/sidebar`
 
@@ -203,10 +203,10 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
       "uri": "at://...",
       "rkey": "3mxxx",
       "name": "General",
-      "emoji": "💬",
-      "parent_rkey": null,
+      "channel_order": ["3mch1", "3mch2"],
       "channels": [
-        { "uri": "...", "rkey": "...", "name": "announcements", "channel_type": "text", "category_rkey": "3mxxx" }
+        { "uri": "...", "rkey": "3mch1", "name": "announcements", "channel_type": "text", "category_rkey": "3mxxx" },
+        { "uri": "...", "rkey": "3mch2", "name": "general", "channel_type": "text", "category_rkey": "3mxxx" }
       ]
     }
   ],
@@ -359,8 +359,8 @@ A community was created or its metadata updated.
   "rkey": "3mxxx",
   "name": "My Community",
   "description": "...",
-  "image": { ... },
-  "category_order": [ ... ]
+  "picture": { "$type": "blob", "ref": { ... }, "mimeType": "image/jpeg", "size": 12345 },
+  "category_order": ["3mcat1", "3mcat2"]
 }
 ```
 
@@ -378,6 +378,7 @@ A channel was created or updated.
   "uri": "at://did:plc:xxx/social.colibri.channel/3mxxx",
   "rkey": "3mxxx",
   "name": "announcements",
+  "description": "Important announcements",
   "channel_type": "text",
   "category_rkey": "3mcat"
 }
@@ -397,8 +398,7 @@ A category was created or updated.
   "uri": "at://did:plc:xxx/social.colibri.category/3mxxx",
   "rkey": "3mxxx",
   "name": "General",
-  "emoji": "💬",
-  "parent_rkey": null
+  "channel_order": ["3mch1", "3mch2"]
 }
 ```
 
@@ -457,12 +457,12 @@ The server notifies all room members when a peer joins or leaves.
 | Collection | Description |
 |------------|-------------|
 | `social.colibri.message` | Chat messages (`text`, `channel`, `createdAt`, optional `parent`, `facets`) |
-| `social.colibri.reaction` | Emoji reactions (`emoji`, `parent` AT-URI) |
-| `social.colibri.community` | Community records (`name`, `description`, `image`, `categoryOrder`) |
-| `social.colibri.channel` | Channel records (`name`, `description`, `type`, `community` rkey, optional `category` rkey) |
-| `social.colibri.category` | Category records (`name`, `emoji`, `community` rkey, optional `parent` rkey) |
+| `social.colibri.reaction` | Emoji reactions (`emoji`, `targetMessage` record-key) |
+| `social.colibri.community` | Community records (`name`, `description`, `picture` blob, `categoryOrder`) |
+| `social.colibri.channel` | Channel records (`name`, `description`, `type`, `community` rkey, `category` rkey) |
+| `social.colibri.category` | Category records (`name`, `channelOrder`, `community` rkey) |
 | `social.colibri.membership` | Membership requests (`community` AT-URI) |
-| `social.colibri.approval` | Owner approvals (`membership` AT-URI) |
+| `social.colibri.approval` | Owner approvals (`membership` AT-URI, `community` AT-URI) |
 | `app.bsky.actor.profile` | Bluesky profiles — watched for display name / avatar updates |
 
 ---
