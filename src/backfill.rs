@@ -170,7 +170,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     &record.rkey,
                     &record.name,
                     record.description.as_deref(),
-                    record.image.as_ref(),
+                    record.picture.as_ref(),
                     record.category_order.as_ref(),
                 )
                 .await
@@ -180,6 +180,34 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         total_inserted += 1;
                     }
                     Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error community: {e}"),
+                }
+            }
+        }
+
+        if let Ok((records, _)) =
+            atproto::list_category_records(http, &pds_url, did, None).await
+        {
+            for record in records {
+                let community_uri = format!(
+                    "at://{}/social.colibri.community/{}",
+                    did, record.community_rkey
+                );
+                match db::save_category(
+                    pool,
+                    &record.uri,
+                    did,
+                    &record.rkey,
+                    &community_uri,
+                    &record.name,
+                    record.channel_order.as_ref(),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        debug!(did, rkey = %record.rkey, "Backfill/sweep: category upserted");
+                        total_inserted += 1;
+                    }
+                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error category: {e}"),
                 }
             }
         }
@@ -291,6 +319,9 @@ async fn backfill_item(
         }
         "social.colibri.community" => {
             backfill_communities(pool, http, did, &pds_url, collection).await
+        }
+        "social.colibri.category" => {
+            backfill_categories(pool, http, did, &pds_url, collection).await
         }
         "social.colibri.channel" => {
             backfill_channels(pool, http, did, &pds_url, collection).await
@@ -471,7 +502,7 @@ async fn backfill_communities(
                 &record.rkey,
                 &record.name,
                 record.description.as_deref(),
-                record.image.as_ref(),
+                record.picture.as_ref(),
                 record.category_order.as_ref(),
             )
             .await
@@ -495,6 +526,69 @@ async fn backfill_communities(
             None => {
                 db::mark_backfill_complete(pool, did, collection).await?;
                 info!(did, total, pages = page, "Backfill: communities complete");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn backfill_categories(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    did: &str,
+    pds_url: &str,
+    collection: &str,
+) -> anyhow::Result<()> {
+    let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
+    let mut total: usize = 0;
+    let mut page: usize = 0;
+
+    loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching category page");
+        let (records, next_cursor) =
+            atproto::list_category_records(http, pds_url, did, cursor.as_deref()).await?;
+
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing category records");
+
+        for record in records {
+            let community_uri = format!(
+                "at://{}/social.colibri.community/{}",
+                did, record.community_rkey
+            );
+            match db::save_category(
+                pool,
+                &record.uri,
+                did,
+                &record.rkey,
+                &community_uri,
+                &record.name,
+                record.channel_order.as_ref(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    debug!(did, rkey = %record.rkey, name = %record.name, "Backfill: category upserted");
+                    total += 1;
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving category: {e}"),
+            }
+        }
+
+        match next_cursor {
+            Some(c) => {
+                cursor = Some(c.clone());
+                if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
+                    error!(did, "Backfill: failed to save cursor: {e}");
+                }
+                sleep(Duration::from_millis(200)).await;
+            }
+            None => {
+                db::mark_backfill_complete(pool, did, collection).await?;
+                info!(did, total, pages = page, "Backfill: categories complete");
                 break;
             }
         }

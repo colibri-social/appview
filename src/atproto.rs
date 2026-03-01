@@ -29,7 +29,7 @@ pub struct RawCommunity {
     pub uri: String,
     pub name: String,
     pub description: Option<String>,
-    pub image: Option<serde_json::Value>,
+    pub picture: Option<serde_json::Value>,
     pub category_order: Option<serde_json::Value>,
 }
 
@@ -40,6 +40,15 @@ pub struct RawChannel {
     pub description: Option<String>,
     pub channel_type: String,
     pub category_rkey: Option<String>,
+    /// rkey of the community on the same PDS.
+    pub community_rkey: String,
+}
+
+pub struct RawCategory {
+    pub rkey: String,
+    pub uri: String,
+    pub name: String,
+    pub channel_order: Option<serde_json::Value>,
     /// rkey of the community on the same PDS.
     pub community_rkey: String,
 }
@@ -86,23 +95,30 @@ struct ColibriRecord {
     text: Option<String>,
     created_at: Option<String>,
     channel: Option<String>,
+    /// Parent message rkey (reply thread).
     #[serde(default)]
     parent: Option<String>,
     #[serde(default)]
     facets: Option<serde_json::Value>,
     // social.colibri.reaction fields
     emoji: Option<String>,
-    // social.colibri.community / social.colibri.channel
+    /// targetMessage rkey (reaction target — lexicon field name is `targetMessage`).
+    #[serde(default)]
+    target_message: Option<String>,
+    // social.colibri.community / social.colibri.channel / social.colibri.category
     name: Option<String>,
     description: Option<String>,
     #[serde(rename = "type")]
     channel_type: Option<String>,
+    /// category rkey (channel → category) or community rkey (channel/category → community).
     category: Option<String>,
-    /// Used as community rkey in channel records, and as community AT-URI in membership records.
+    /// community rkey (channel/category) or community AT-URI (membership).
     community: Option<String>,
     // social.colibri.community extra fields
-    image: Option<serde_json::Value>,
+    picture: Option<serde_json::Value>,
     category_order: Option<serde_json::Value>,
+    // social.colibri.category extra field
+    channel_order: Option<serde_json::Value>,
     // social.colibri.approval fields
     membership: Option<String>,
 }
@@ -243,15 +259,9 @@ pub async fn list_reaction_records(
         .filter_map(|entry| {
             let rkey = entry.uri.rsplit('/').next()?.to_string();
             let val = entry.value?;
-            // Reactions use emoji + targetMessage fields.
-            // targetMessage is an AT-URI (at://did/collection/rkey); extract just the rkey.
+            // Reactions use emoji + targetMessage (record-key of the target message).
             let emoji = val.emoji?;
-            let target_rkey = val
-                .parent?
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .to_string();
+            let target_rkey = val.target_message?;
             if target_rkey.is_empty() {
                 return None;
             }
@@ -286,8 +296,35 @@ pub async fn list_community_records(
                 uri,
                 name: val.name?,
                 description: val.description,
-                image: val.image,
+                picture: val.picture,
                 category_order: val.category_order,
+            })
+        })
+        .collect();
+    Ok((records, body.cursor))
+}
+
+/// List `social.colibri.category` records from a PDS for the given DID.
+pub async fn list_category_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<RawCategory>, Option<String>)> {
+    let body = fetch_records(client, pds_url, did, "social.colibri.category", cursor).await?;
+    let records = body
+        .records
+        .into_iter()
+        .filter_map(|entry| {
+            let rkey = entry.uri.rsplit('/').next()?.to_string();
+            let uri = entry.uri;
+            let val = entry.value?;
+            Some(RawCategory {
+                rkey,
+                uri,
+                name: val.name?,
+                channel_order: val.channel_order,
+                community_rkey: val.community?,
             })
         })
         .collect();

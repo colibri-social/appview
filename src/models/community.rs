@@ -8,7 +8,7 @@ pub struct Community {
     pub rkey: String,
     pub name: String,
     pub description: Option<String>,
-    pub image: Option<sqlx::types::Json<serde_json::Value>>,
+    pub picture: Option<sqlx::types::Json<serde_json::Value>>,
     pub category_order: Option<sqlx::types::Json<serde_json::Value>>,
 }
 
@@ -24,8 +24,7 @@ pub struct Category {
     pub rkey: String,
     pub community_uri: String,
     pub name: String,
-    pub emoji: String,
-    pub parent_rkey: Option<String>,
+    pub channel_order: Option<sqlx::types::Json<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -45,8 +44,7 @@ pub struct SidebarCategory {
     pub uri: String,
     pub rkey: String,
     pub name: String,
-    pub emoji: String,
-    pub parent_rkey: Option<String>,
+    pub channel_order: Option<sqlx::types::Json<serde_json::Value>>,
     pub channels: Vec<Channel>,
 }
 

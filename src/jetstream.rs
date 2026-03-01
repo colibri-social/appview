@@ -59,18 +59,16 @@ struct ColibriMessage {
 #[serde(rename_all = "camelCase")]
 struct ColibriReaction {
     emoji: String,
-    parent: String,
+    target_message: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ColibriCategory {
     name: String,
-    emoji: String,
+    channel_order: Option<Vec<String>>,
     /// rkey of the community this category belongs to.
     community: String,
-    #[serde(default)]
-    parent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +78,7 @@ struct ColibriCommunity {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    image: Option<serde_json::Value>,
+    picture: Option<serde_json::Value>,
     #[serde(default)]
     category_order: Option<serde_json::Value>,
 }
@@ -478,7 +476,7 @@ async fn handle_reaction(
                 return Ok(());
             }
 
-            let target_rkey = db::extract_rkey(&record.parent).to_owned();
+            let target_rkey = db::extract_rkey(&record.target_message).to_owned();
 
             let reaction = match db::save_reaction(
                 pool,
@@ -607,7 +605,7 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool, bus: &Ev
                 &commit.rkey,
                 &record.name,
                 record.description.as_deref(),
-                record.image.as_ref(),
+                record.picture.as_ref(),
                 record.category_order.as_ref(),
             )
             .await
@@ -621,7 +619,7 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool, bus: &Ev
                     rkey: commit.rkey,
                     name: record.name,
                     description: record.description,
-                    image: record.image,
+                    picture: record.picture,
                     category_order: record.category_order,
                 });
             }
@@ -734,6 +732,12 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
                 "at://{}/social.colibri.community/{}",
                 did, record.community
             );
+            // Convert Vec<String> channelOrder into a serde_json::Value array for storage.
+            let channel_order_json: Option<serde_json::Value> = record
+                .channel_order
+                .as_ref()
+                .map(|v| serde_json::Value::Array(v.iter().map(|s| serde_json::Value::String(s.clone())).collect()));
+
             if let Err(e) = db::save_category(
                 pool,
                 &uri,
@@ -741,8 +745,7 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
                 &commit.rkey,
                 &community_uri,
                 &record.name,
-                &record.emoji,
-                record.parent.as_deref(),
+                channel_order_json.as_ref(),
             )
             .await
             {
@@ -754,8 +757,7 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
                     uri,
                     rkey: commit.rkey,
                     name: record.name,
-                    emoji: record.emoji,
-                    parent_rkey: record.parent,
+                    channel_order: record.channel_order,
                 });
             }
         }

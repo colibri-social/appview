@@ -55,9 +55,8 @@ pub enum AppEvent {
         uri: String,
         rkey: String,
         name: String,
-        emoji: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        parent_rkey: Option<String>,
+        channel_order: Option<Vec<String>>,
     },
     CategoryDeleted {
         community_uri: String,
@@ -90,7 +89,7 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        image: Option<serde_json::Value>,
+        picture: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         category_order: Option<serde_json::Value>,
     },

@@ -540,6 +540,7 @@ pub async fn get_next_backfill_item(pool: &PgPool) -> Result<Option<(String, Str
             VALUES ('social.colibri.message'),
                    ('social.colibri.reaction'),
                    ('social.colibri.community'),
+                   ('social.colibri.category'),
                    ('social.colibri.channel'),
                    ('social.colibri.membership'),
                    ('social.colibri.approval')
@@ -675,17 +676,17 @@ pub async fn save_community(
     rkey: &str,
     name: &str,
     description: Option<&str>,
-    image: Option<&serde_json::Value>,
+    picture: Option<&serde_json::Value>,
     category_order: Option<&serde_json::Value>,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO communities (uri, owner_did, rkey, name, description, image, category_order)
+        INSERT INTO communities (uri, owner_did, rkey, name, description, picture, category_order)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (uri) DO UPDATE
           SET name           = EXCLUDED.name,
               description    = EXCLUDED.description,
-              image          = EXCLUDED.image,
+              picture        = EXCLUDED.picture,
               category_order = EXCLUDED.category_order
         "#,
     )
@@ -694,7 +695,7 @@ pub async fn save_community(
     .bind(rkey)
     .bind(name)
     .bind(description)
-    .bind(image.map(|v| sqlx::types::Json(v)))
+    .bind(picture.map(|v| sqlx::types::Json(v)))
     .bind(category_order.map(|v| sqlx::types::Json(v)))
     .execute(pool)
     .await?;
@@ -911,7 +912,7 @@ pub async fn is_approved_member(pool: &PgPool, community_uri: &str, did: &str) -
 /// Return all communities owned by or joined (approved) by a DID.
 pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(
-        "SELECT uri, owner_did, rkey, name, description, image, category_order FROM communities WHERE owner_did = $1",
+        "SELECT uri, owner_did, rkey, name, description, picture, category_order FROM communities WHERE owner_did = $1",
     )
     .bind(did)
     .fetch_all(pool)
@@ -919,7 +920,7 @@ pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<Commun
 
     let joined = sqlx::query_as::<_, Community>(
         r#"
-        SELECT c.uri, c.owner_did, c.rkey, c.name, c.description, c.image, c.category_order
+        SELECT c.uri, c.owner_did, c.rkey, c.name, c.description, c.picture, c.category_order
           FROM communities c
           JOIN community_members cm ON cm.community_uri = c.uri
          WHERE cm.member_did = $1
@@ -993,7 +994,7 @@ pub async fn get_invite_code(
         c_rkey: String,
         c_name: String,
         c_description: Option<String>,
-        c_image: Option<sqlx::types::Json<serde_json::Value>>,
+        c_picture: Option<sqlx::types::Json<serde_json::Value>>,
         c_category_order: Option<sqlx::types::Json<serde_json::Value>>,
     }
 
@@ -1002,7 +1003,7 @@ pub async fn get_invite_code(
         SELECT i.code, i.community_uri, i.created_by_did, i.max_uses, i.use_count, i.active,
                c.uri AS c_uri, c.owner_did AS c_owner_did, c.rkey AS c_rkey,
                c.name AS c_name, c.description AS c_description,
-               c.image AS c_image, c.category_order AS c_category_order
+               c.picture AS c_picture, c.category_order AS c_category_order
           FROM invite_codes i
           JOIN communities c ON c.uri = i.community_uri
          WHERE i.code = $1
@@ -1028,7 +1029,7 @@ pub async fn get_invite_code(
                 rkey: r.c_rkey,
                 name: r.c_name,
                 description: r.c_description,
-                image: r.c_image,
+                picture: r.c_picture,
                 category_order: r.c_category_order,
             },
         )
@@ -1117,17 +1118,15 @@ pub async fn save_category(
     rkey: &str,
     community_uri: &str,
     name: &str,
-    emoji: &str,
-    parent_rkey: Option<&str>,
+    channel_order: Option<&serde_json::Value>,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO categories (uri, owner_did, rkey, community_uri, name, emoji, parent_rkey)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO categories (uri, owner_did, rkey, community_uri, name, channel_order)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (uri) DO UPDATE
-           SET name        = EXCLUDED.name,
-               emoji       = EXCLUDED.emoji,
-               parent_rkey = EXCLUDED.parent_rkey
+           SET name          = EXCLUDED.name,
+               channel_order = EXCLUDED.channel_order
         "#,
     )
     .bind(uri)
@@ -1135,8 +1134,7 @@ pub async fn save_category(
     .bind(rkey)
     .bind(community_uri)
     .bind(name)
-    .bind(emoji)
-    .bind(parent_rkey)
+    .bind(channel_order.map(|v| sqlx::types::Json(v)))
     .execute(pool)
     .await?;
     Ok(())
@@ -1157,7 +1155,7 @@ pub async fn get_categories_for_community(
 ) -> Result<Vec<crate::models::community::Category>> {
     let cats = sqlx::query_as::<_, crate::models::community::Category>(
         r#"
-        SELECT uri, rkey, community_uri, name, emoji, parent_rkey
+        SELECT uri, rkey, community_uri, name, channel_order
           FROM categories
          WHERE community_uri = $1
          ORDER BY name
@@ -1170,6 +1168,7 @@ pub async fn get_categories_for_community(
 }
 
 /// Return channels and categories combined into a sidebar-ready structure.
+/// Channels within each category are ordered by the category's `channelOrder` array.
 pub async fn get_sidebar_for_community(
     pool: &PgPool,
     community_uri: &str,
@@ -1179,28 +1178,36 @@ pub async fn get_sidebar_for_community(
     let categories = get_categories_for_community(pool, community_uri).await?;
     let channels = get_channels_for_community(pool, community_uri).await?;
 
-    let mut sidebar_cats: Vec<SidebarCategory> = categories
+    let sidebar_cats: Vec<SidebarCategory> = categories
         .into_iter()
-        .map(|cat| SidebarCategory {
-            uri: cat.uri,
-            rkey: cat.rkey.clone(),
-            name: cat.name,
-            emoji: cat.emoji,
-            parent_rkey: cat.parent_rkey,
-            channels: channels
+        .map(|cat| {
+            // Build the ordered channel list using channelOrder if present.
+            let mut cat_channels: Vec<_> = channels
                 .iter()
                 .filter(|ch| ch.category_rkey.as_deref() == Some(&cat.rkey))
                 .cloned()
-                .collect(),
+                .collect();
+
+            if let Some(order) = cat.channel_order.as_ref().and_then(|j| j.as_array()) {
+                let order_map: std::collections::HashMap<&str, usize> = order
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| v.as_str().map(|s| (s, i)))
+                    .collect();
+                cat_channels.sort_by_key(|ch| {
+                    order_map.get(ch.rkey.as_str()).copied().unwrap_or(usize::MAX)
+                });
+            }
+
+            SidebarCategory {
+                uri: cat.uri,
+                rkey: cat.rkey,
+                name: cat.name,
+                channel_order: cat.channel_order,
+                channels: cat_channels,
+            }
         })
         .collect();
-
-    // Sort categories: top-level first, then children, both alphabetically.
-    sidebar_cats.sort_by(|a, b| {
-        let a_top = a.parent_rkey.is_none();
-        let b_top = b.parent_rkey.is_none();
-        b_top.cmp(&a_top).then(a.name.cmp(&b.name))
-    });
 
     let uncategorized = channels
         .into_iter()
@@ -1212,7 +1219,6 @@ pub async fn get_sidebar_for_community(
         uncategorized,
     })
 }
-
 /// Return all members (pending + approved) for a community, enriched with
 /// cached profile data where available. The community owner is always included.
 pub async fn get_members_for_community(
