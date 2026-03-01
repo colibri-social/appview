@@ -1048,13 +1048,24 @@ pub async fn get_channels_for_community(
 }
 
 /// Return all members (pending + approved) for a community, enriched with
-/// cached profile data where available.
+/// cached profile data where available. The community owner is always included.
 pub async fn get_members_for_community(
     pool: &PgPool,
     community_uri: &str,
 ) -> Result<Vec<crate::models::community::CommunityMember>> {
     let members = sqlx::query_as::<_, crate::models::community::CommunityMember>(
         r#"
+        -- Always include the owner (status = 'owner'), then approved/pending members.
+        SELECT co.owner_did  AS member_did,
+               'owner'       AS status,
+               ap.display_name,
+               ap.avatar_url
+          FROM communities co
+          LEFT JOIN author_profiles ap ON ap.did = co.owner_did
+         WHERE co.uri = $1
+
+        UNION ALL
+
         SELECT cm.member_did,
                cm.status,
                ap.display_name,
@@ -1062,9 +1073,10 @@ pub async fn get_members_for_community(
           FROM community_members cm
           LEFT JOIN author_profiles ap ON ap.did = cm.member_did
          WHERE cm.community_uri = $1
-         ORDER BY cm.created_at
+         ORDER BY status, member_did
         "#,
     )
+    .bind(community_uri)
     .bind(community_uri)
     .fetch_all(pool)
     .await?;
