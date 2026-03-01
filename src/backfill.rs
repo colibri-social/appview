@@ -159,6 +159,97 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
             }
         }
 
+        if let Ok((records, _)) =
+            atproto::list_community_records(http, &pds_url, did, None).await
+        {
+            for record in records {
+                match db::save_community(
+                    pool,
+                    &record.uri,
+                    did,
+                    &record.rkey,
+                    &record.name,
+                    record.description.as_deref(),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        debug!(did, rkey = %record.rkey, "Backfill/sweep: community upserted");
+                        total_inserted += 1;
+                    }
+                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error community: {e}"),
+                }
+            }
+        }
+
+        if let Ok((records, _)) =
+            atproto::list_channel_records(http, &pds_url, did, None).await
+        {
+            for record in records {
+                let community_uri = format!(
+                    "at://{}/social.colibri.community/{}",
+                    did, record.community_rkey
+                );
+                match db::save_channel(
+                    pool,
+                    &record.uri,
+                    did,
+                    &record.rkey,
+                    &community_uri,
+                    &record.name,
+                    record.description.as_deref(),
+                    &record.channel_type,
+                    record.category_rkey.as_deref(),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        debug!(did, rkey = %record.rkey, "Backfill/sweep: channel upserted");
+                        total_inserted += 1;
+                    }
+                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error channel: {e}"),
+                }
+            }
+        }
+
+        if let Ok((records, _)) =
+            atproto::list_membership_records(http, &pds_url, did, None).await
+        {
+            for record in records {
+                match db::save_membership(
+                    pool,
+                    &record.uri,
+                    &record.community_uri,
+                    did,
+                    &record.rkey,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        debug!(did, rkey = %record.rkey, "Backfill/sweep: membership upserted");
+                        total_inserted += 1;
+                    }
+                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error membership: {e}"),
+                }
+            }
+        }
+
+        if let Ok((records, _)) =
+            atproto::list_approval_records(http, &pds_url, did, None).await
+        {
+            for record in records {
+                match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey)
+                    .await
+                {
+                    Ok(_) => {
+                        debug!(did, rkey = %record.rkey, "Backfill/sweep: approval upserted");
+                        total_inserted += 1;
+                    }
+                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error approval: {e}"),
+                }
+            }
+        }
+
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -195,6 +286,18 @@ async fn backfill_item(
         }
         "social.colibri.reaction" => {
             backfill_reactions(pool, http, did, &pds_url, collection).await
+        }
+        "social.colibri.community" => {
+            backfill_communities(pool, http, did, &pds_url, collection).await
+        }
+        "social.colibri.channel" => {
+            backfill_channels(pool, http, did, &pds_url, collection).await
+        }
+        "social.colibri.membership" => {
+            backfill_memberships(pool, http, did, &pds_url, collection).await
+        }
+        "social.colibri.approval" => {
+            backfill_approvals(pool, http, did, &pds_url, collection).await
         }
         other => {
             warn!("Backfill: unknown collection {other} — marking complete");
@@ -330,6 +433,236 @@ async fn backfill_reactions(
             None => {
                 db::mark_backfill_complete(pool, did, collection).await?;
                 info!(did, total, skipped, pages = page, "Backfill: reactions complete");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn backfill_communities(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    did: &str,
+    pds_url: &str,
+    collection: &str,
+) -> anyhow::Result<()> {
+    let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
+    let mut total: usize = 0;
+    let mut page: usize = 0;
+
+    loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching community page");
+        let (records, next_cursor) =
+            atproto::list_community_records(http, pds_url, did, cursor.as_deref()).await?;
+
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing community records");
+
+        for record in records {
+            match db::save_community(
+                pool,
+                &record.uri,
+                did,
+                &record.rkey,
+                &record.name,
+                record.description.as_deref(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    debug!(did, rkey = %record.rkey, name = %record.name, "Backfill: community upserted");
+                    total += 1;
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving community: {e}"),
+            }
+        }
+
+        match next_cursor {
+            Some(c) => {
+                cursor = Some(c.clone());
+                if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
+                    error!(did, "Backfill: failed to save cursor: {e}");
+                }
+                sleep(Duration::from_millis(200)).await;
+            }
+            None => {
+                db::mark_backfill_complete(pool, did, collection).await?;
+                info!(did, total, pages = page, "Backfill: communities complete");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn backfill_channels(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    did: &str,
+    pds_url: &str,
+    collection: &str,
+) -> anyhow::Result<()> {
+    let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
+    let mut total: usize = 0;
+    let mut page: usize = 0;
+
+    loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching channel page");
+        let (records, next_cursor) =
+            atproto::list_channel_records(http, pds_url, did, cursor.as_deref()).await?;
+
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing channel records");
+
+        for record in records {
+            let community_uri = format!(
+                "at://{}/social.colibri.community/{}",
+                did, record.community_rkey
+            );
+            match db::save_channel(
+                pool,
+                &record.uri,
+                did,
+                &record.rkey,
+                &community_uri,
+                &record.name,
+                record.description.as_deref(),
+                &record.channel_type,
+                record.category_rkey.as_deref(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    debug!(did, rkey = %record.rkey, name = %record.name, "Backfill: channel upserted");
+                    total += 1;
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving channel: {e}"),
+            }
+        }
+
+        match next_cursor {
+            Some(c) => {
+                cursor = Some(c.clone());
+                if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
+                    error!(did, "Backfill: failed to save cursor: {e}");
+                }
+                sleep(Duration::from_millis(200)).await;
+            }
+            None => {
+                db::mark_backfill_complete(pool, did, collection).await?;
+                info!(did, total, pages = page, "Backfill: channels complete");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn backfill_memberships(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    did: &str,
+    pds_url: &str,
+    collection: &str,
+) -> anyhow::Result<()> {
+    let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
+    let mut total: usize = 0;
+    let mut page: usize = 0;
+
+    loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching membership page");
+        let (records, next_cursor) =
+            atproto::list_membership_records(http, pds_url, did, cursor.as_deref()).await?;
+
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing membership records");
+
+        for record in records {
+            match db::save_membership(
+                pool,
+                &record.uri,
+                &record.community_uri,
+                did,
+                &record.rkey,
+            )
+            .await
+            {
+                Ok(_) => {
+                    debug!(did, rkey = %record.rkey, "Backfill: membership upserted");
+                    total += 1;
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving membership: {e}"),
+            }
+        }
+
+        match next_cursor {
+            Some(c) => {
+                cursor = Some(c.clone());
+                if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
+                    error!(did, "Backfill: failed to save cursor: {e}");
+                }
+                sleep(Duration::from_millis(200)).await;
+            }
+            None => {
+                db::mark_backfill_complete(pool, did, collection).await?;
+                info!(did, total, pages = page, "Backfill: memberships complete");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn backfill_approvals(
+    pool: &PgPool,
+    http: &reqwest::Client,
+    did: &str,
+    pds_url: &str,
+    collection: &str,
+) -> anyhow::Result<()> {
+    let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
+    let mut total: usize = 0;
+    let mut page: usize = 0;
+
+    loop {
+        page += 1;
+        debug!(did, page, cursor = ?cursor, "Backfill: fetching approval page");
+        let (records, next_cursor) =
+            atproto::list_approval_records(http, pds_url, did, cursor.as_deref()).await?;
+
+        let page_count = records.len();
+        debug!(did, page, count = page_count, "Backfill: processing approval records");
+
+        for record in records {
+            match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey).await
+            {
+                Ok(_) => {
+                    debug!(did, rkey = %record.rkey, "Backfill: approval upserted");
+                    total += 1;
+                }
+                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving approval: {e}"),
+            }
+        }
+
+        match next_cursor {
+            Some(c) => {
+                cursor = Some(c.clone());
+                if let Err(e) = db::set_backfill_cursor(pool, did, collection, &c).await {
+                    error!(did, "Backfill: failed to save cursor: {e}");
+                }
+                sleep(Duration::from_millis(200)).await;
+            }
+            None => {
+                db::mark_backfill_complete(pool, did, collection).await?;
+                info!(did, total, pages = page, "Backfill: approvals complete");
                 break;
             }
         }

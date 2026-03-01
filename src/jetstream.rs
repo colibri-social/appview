@@ -19,6 +19,10 @@ use crate::{
 const DEFAULT_JETSTREAM_URL: &str = "wss://jetstream2.us-east.bsky.network/subscribe\
      ?wantedCollections=social.colibri.message\
      &wantedCollections=social.colibri.reaction\
+     &wantedCollections=social.colibri.community\
+     &wantedCollections=social.colibri.channel\
+     &wantedCollections=social.colibri.membership\
+     &wantedCollections=social.colibri.approval\
      &wantedCollections=app.bsky.actor.profile";
 
 // ── Jetstream wire types ──────────────────────────────────────────────────────
@@ -57,7 +61,41 @@ struct ColibriReaction {
     parent: String,
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColibriCommunity {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColibriChannel {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "type")]
+    channel_type: String,
+    #[serde(default)]
+    category: Option<String>,
+    /// rkey of the community record on the same PDS as this channel.
+    community: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColibriMembership {
+    /// AT-URI of the community the member wants to join.
+    community: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColibriApproval {
+    /// AT-URI of the member's social.colibri.membership record.
+    membership: String,
+}
 
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
     let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
@@ -199,6 +237,22 @@ async fn handle_event(
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching reaction event");
             handle_reaction(commit, &event.did, pool, bus).await
         }
+        "social.colibri.community" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching community event");
+            handle_community(commit, &event.did, pool).await
+        }
+        "social.colibri.channel" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching channel event");
+            handle_channel(commit, &event.did, pool).await
+        }
+        "social.colibri.membership" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching membership event");
+            handle_membership(commit, &event.did, pool).await
+        }
+        "social.colibri.approval" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching approval event");
+            handle_approval(commit, &event.did, pool).await
+        }
         "app.bsky.actor.profile" => {
             trace!(did = %event.did, op = %commit.operation, "Dispatching profile event");
             handle_profile_update(&event.did, pool, http).await
@@ -235,6 +289,21 @@ async fn handle_message(
             let created_at = DateTime::parse_from_rfc3339(&record.created_at)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now());
+
+            // Gate: only index messages from community members/owners.
+            // If the channel is not yet indexed, allow through (lenient).
+            if let Ok(Some((community_uri, owner_did))) =
+                db::get_community_for_channel(pool, &record.channel).await
+            {
+                if did != owner_did
+                    && !db::is_approved_member(pool, &community_uri, did)
+                        .await
+                        .unwrap_or(false)
+                {
+                    debug!(did, channel = %record.channel, "Message dropped: not a community member");
+                    return Ok(());
+                }
+            }
 
             let message = match db::save_message(
                 pool,
@@ -283,6 +352,20 @@ async fn handle_message(
                     return Ok(());
                 }
             };
+
+            // Gate: only allow updates from members/owners.
+            if let Ok(Some((community_uri, owner_did))) =
+                db::get_community_for_channel(pool, &record.channel).await
+            {
+                if did != owner_did
+                    && !db::is_approved_member(pool, &community_uri, did)
+                        .await
+                        .unwrap_or(false)
+                {
+                    debug!(did, channel = %record.channel, "Message update dropped: not a community member");
+                    return Ok(());
+                }
+            }
 
             let message = match db::update_message(
                 pool,
@@ -480,6 +563,178 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
+
+// ── Community handler ─────────────────────────────────────────────────────────
+
+async fn handle_community(commit: CommitData, did: &str, pool: &PgPool) -> Result<()> {
+    let uri = format!("at://{}/social.colibri.community/{}", did, commit.rkey);
+    match commit.operation.as_str() {
+        "create" | "update" => {
+            let record: ColibriCommunity = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Community: missing/malformed record, skipping");
+                    return Ok(());
+                }
+            };
+            if let Err(e) = db::save_community(
+                pool,
+                &uri,
+                did,
+                &commit.rkey,
+                &record.name,
+                record.description.as_deref(),
+            )
+            .await
+            {
+                error!(did, rkey = %commit.rkey, "DB error saving community: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, name = %record.name, "Community indexed");
+            }
+        }
+        "delete" => {
+            if let Err(e) = db::delete_community(pool, &uri).await {
+                error!(did, rkey = %commit.rkey, "DB error deleting community: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, "Community deleted");
+            }
+        }
+        other => trace!(did, op = other, "Community: unhandled operation"),
+    }
+    Ok(())
+}
+
+// ── Channel handler ───────────────────────────────────────────────────────────
+
+async fn handle_channel(commit: CommitData, did: &str, pool: &PgPool) -> Result<()> {
+    let uri = format!("at://{}/social.colibri.channel/{}", did, commit.rkey);
+    match commit.operation.as_str() {
+        "create" | "update" => {
+            let record: ColibriChannel = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Channel: missing/malformed record, skipping");
+                    return Ok(());
+                }
+            };
+            // Reconstruct the community AT-URI from the owner DID + community rkey.
+            let community_uri = format!(
+                "at://{}/social.colibri.community/{}",
+                did, record.community
+            );
+            if let Err(e) = db::save_channel(
+                pool,
+                &uri,
+                did,
+                &commit.rkey,
+                &community_uri,
+                &record.name,
+                record.description.as_deref(),
+                &record.channel_type,
+                record.category.as_deref(),
+            )
+            .await
+            {
+                error!(did, rkey = %commit.rkey, "DB error saving channel: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, name = %record.name, "Channel indexed");
+            }
+        }
+        "delete" => {
+            if let Err(e) = db::delete_channel(pool, &uri).await {
+                error!(did, rkey = %commit.rkey, "DB error deleting channel: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, "Channel deleted");
+            }
+        }
+        other => trace!(did, op = other, "Channel: unhandled operation"),
+    }
+    Ok(())
+}
+
+// ── Membership handler ────────────────────────────────────────────────────────
+
+async fn handle_membership(commit: CommitData, did: &str, pool: &PgPool) -> Result<()> {
+    let membership_uri = format!("at://{}/social.colibri.membership/{}", did, commit.rkey);
+    match commit.operation.as_str() {
+        "create" => {
+            let record: ColibriMembership = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Membership: missing/malformed record, skipping");
+                    return Ok(());
+                }
+            };
+            if let Err(e) = db::save_membership(
+                pool,
+                &membership_uri,
+                &record.community,
+                did,
+                &commit.rkey,
+            )
+            .await
+            {
+                error!(did, rkey = %commit.rkey, "DB error saving membership: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, community = %record.community, "Membership indexed (pending)");
+            }
+        }
+        "delete" => {
+            if let Err(e) = db::delete_membership(pool, &membership_uri).await {
+                error!(did, rkey = %commit.rkey, "DB error deleting membership: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, "Membership deleted");
+            }
+        }
+        other => trace!(did, op = other, "Membership: unhandled operation"),
+    }
+    Ok(())
+}
+
+// ── Approval handler ──────────────────────────────────────────────────────────
+
+async fn handle_approval(commit: CommitData, did: &str, pool: &PgPool) -> Result<()> {
+    let approval_uri = format!("at://{}/social.colibri.approval/{}", did, commit.rkey);
+    match commit.operation.as_str() {
+        "create" => {
+            let record: ColibriApproval = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Approval: missing/malformed record, skipping");
+                    return Ok(());
+                }
+            };
+            if let Err(e) =
+                db::save_approval(pool, &approval_uri, &record.membership, &commit.rkey).await
+            {
+                error!(did, rkey = %commit.rkey, "DB error saving approval: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, membership = %record.membership, "Approval indexed → member approved");
+            }
+        }
+        "delete" => {
+            if let Err(e) = db::delete_approval(pool, &approval_uri).await {
+                error!(did, rkey = %commit.rkey, "DB error deleting approval: {e}");
+            } else {
+                info!(did, rkey = %commit.rkey, "Approval deleted → member reverted to pending");
+            }
+        }
+        other => trace!(did, op = other, "Approval: unhandled operation"),
+    }
+    Ok(())
+}
 
 async fn fetch_parent(pool: &PgPool, msg: &MessageWithAuthor) -> Option<Box<MessageWithAuthor>> {
     let parent_rkey = db::extract_rkey(msg.parent.as_deref()?);

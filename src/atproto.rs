@@ -24,6 +24,38 @@ pub struct RawReaction {
     pub target_rkey: String,
 }
 
+pub struct RawCommunity {
+    pub rkey: String,
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+pub struct RawChannel {
+    pub rkey: String,
+    pub uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub channel_type: String,
+    pub category_rkey: Option<String>,
+    /// rkey of the community on the same PDS.
+    pub community_rkey: String,
+}
+
+pub struct RawMembership {
+    pub rkey: String,
+    pub uri: String,
+    /// AT-URI of the community the member wants to join.
+    pub community_uri: String,
+}
+
+pub struct RawApproval {
+    pub rkey: String,
+    pub uri: String,
+    /// AT-URI of the member's social.colibri.membership record.
+    pub membership_uri: String,
+}
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -58,6 +90,16 @@ struct ColibriRecord {
     facets: Option<serde_json::Value>,
     // social.colibri.reaction fields
     emoji: Option<String>,
+    // social.colibri.community / social.colibri.channel
+    name: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "type")]
+    channel_type: Option<String>,
+    category: Option<String>,
+    /// Used as community rkey in channel records, and as community AT-URI in membership records.
+    community: Option<String>,
+    // social.colibri.approval fields
+    membership: Option<String>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -217,4 +259,140 @@ pub async fn list_reaction_records(
         .collect();
 
     Ok((records, body.cursor))
+}
+
+/// List `social.colibri.community` records from a PDS for the given DID.
+pub async fn list_community_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<RawCommunity>, Option<String>)> {
+    let body = fetch_records(client, pds_url, did, "social.colibri.community", cursor).await?;
+    let records = body
+        .records
+        .into_iter()
+        .filter_map(|entry| {
+            let rkey = entry.uri.rsplit('/').next()?.to_string();
+            let uri = entry.uri;
+            let val = entry.value?;
+            Some(RawCommunity {
+                rkey,
+                uri,
+                name: val.name?,
+                description: val.description,
+            })
+        })
+        .collect();
+    Ok((records, body.cursor))
+}
+
+/// List `social.colibri.channel` records from a PDS for the given DID.
+pub async fn list_channel_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<RawChannel>, Option<String>)> {
+    let body = fetch_records(client, pds_url, did, "social.colibri.channel", cursor).await?;
+    let records = body
+        .records
+        .into_iter()
+        .filter_map(|entry| {
+            let rkey = entry.uri.rsplit('/').next()?.to_string();
+            let uri = entry.uri;
+            let val = entry.value?;
+            Some(RawChannel {
+                rkey,
+                uri,
+                name: val.name?,
+                description: val.description,
+                channel_type: val.channel_type.unwrap_or_else(|| "text".to_string()),
+                category_rkey: val.category,
+                community_rkey: val.community?,
+            })
+        })
+        .collect();
+    Ok((records, body.cursor))
+}
+
+/// List `social.colibri.membership` records from a PDS for the given DID.
+pub async fn list_membership_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<RawMembership>, Option<String>)> {
+    let body = fetch_records(client, pds_url, did, "social.colibri.membership", cursor).await?;
+    let records = body
+        .records
+        .into_iter()
+        .filter_map(|entry| {
+            let rkey = entry.uri.rsplit('/').next()?.to_string();
+            let uri = entry.uri;
+            let val = entry.value?;
+            Some(RawMembership {
+                rkey,
+                uri,
+                community_uri: val.community?,
+            })
+        })
+        .collect();
+    Ok((records, body.cursor))
+}
+
+/// List `social.colibri.approval` records from a PDS for the given DID.
+pub async fn list_approval_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    cursor: Option<&str>,
+) -> Result<(Vec<RawApproval>, Option<String>)> {
+    let body = fetch_records(client, pds_url, did, "social.colibri.approval", cursor).await?;
+    let records = body
+        .records
+        .into_iter()
+        .filter_map(|entry| {
+            let rkey = entry.uri.rsplit('/').next()?.to_string();
+            let uri = entry.uri;
+            let val = entry.value?;
+            Some(RawApproval {
+                rkey,
+                uri,
+                membership_uri: val.membership?,
+            })
+        })
+        .collect();
+    Ok((records, body.cursor))
+}
+
+// ── Shared fetch helper ───────────────────────────────────────────────────────
+
+async fn fetch_records(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+    collection: &str,
+    cursor: Option<&str>,
+) -> Result<ListRecordsResponse> {
+    let mut url = format!(
+        "{}/xrpc/com.atproto.repo.listRecords?repo={}&collection={}&limit=100",
+        pds_url.trim_end_matches('/'),
+        did,
+        collection
+    );
+    if let Some(c) = cursor {
+        url.push_str("&cursor=");
+        url.push_str(c);
+    }
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "fetch_records({}): HTTP {} for {}",
+            collection,
+            resp.status(),
+            did
+        ));
+    }
+    Ok(resp.json().await?)
 }

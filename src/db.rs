@@ -2,9 +2,11 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::models::{
     author::AuthorProfile,
+    community::{CommunitiesResponse, Community, InviteCodeInfo},
     message::{Message, MessageResponse, MessageWithAuthor},
     reaction::{Reaction, ReactionSummary},
 };
@@ -508,7 +510,11 @@ pub async fn get_next_backfill_item(pool: &PgPool) -> Result<Option<(String, Str
         FROM messages m
         CROSS JOIN (
             VALUES ('social.colibri.message'),
-                   ('social.colibri.reaction')
+                   ('social.colibri.reaction'),
+                   ('social.colibri.community'),
+                   ('social.colibri.channel'),
+                   ('social.colibri.membership'),
+                   ('social.colibri.approval')
         ) AS c(collection)
         WHERE NOT EXISTS (
             SELECT 1 FROM backfill_state bs
@@ -625,4 +631,387 @@ pub async fn get_all_known_dids(pool: &PgPool) -> Result<Vec<String>> {
             .fetch_all(pool)
             .await?;
     Ok(dids)
+}
+
+// ── Communities ───────────────────────────────────────────────────────────────
+
+/// Insert or replace a community record.
+pub async fn save_community(
+    pool: &PgPool,
+    uri: &str,
+    owner_did: &str,
+    rkey: &str,
+    name: &str,
+    description: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO communities (uri, owner_did, rkey, name, description)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (uri) DO UPDATE
+          SET name = EXCLUDED.name, description = EXCLUDED.description
+        "#,
+    )
+    .bind(uri)
+    .bind(owner_did)
+    .bind(rkey)
+    .bind(name)
+    .bind(description)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Delete a community record.
+pub async fn delete_community(pool: &PgPool, uri: &str) -> Result<()> {
+    sqlx::query("DELETE FROM communities WHERE uri = $1")
+        .bind(uri)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ── Channels ──────────────────────────────────────────────────────────────────
+
+/// Insert or replace a channel record.
+pub async fn save_channel(
+    pool: &PgPool,
+    uri: &str,
+    owner_did: &str,
+    rkey: &str,
+    community_uri: &str,
+    name: &str,
+    description: Option<&str>,
+    channel_type: &str,
+    category_rkey: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channels (uri, owner_did, rkey, community_uri, name, description, channel_type, category_rkey)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (uri) DO UPDATE
+          SET name = EXCLUDED.name,
+              description = EXCLUDED.description,
+              channel_type = EXCLUDED.channel_type,
+              category_rkey = EXCLUDED.category_rkey
+        "#,
+    )
+    .bind(uri)
+    .bind(owner_did)
+    .bind(rkey)
+    .bind(community_uri)
+    .bind(name)
+    .bind(description)
+    .bind(channel_type)
+    .bind(category_rkey)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Delete a channel record.
+pub async fn delete_channel(pool: &PgPool, uri: &str) -> Result<()> {
+    sqlx::query("DELETE FROM channels WHERE uri = $1")
+        .bind(uri)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Look up the community URI and owner DID for a channel by its rkey.
+/// Returns None if the channel is not yet indexed.
+pub async fn get_community_for_channel(
+    pool: &PgPool,
+    channel_rkey: &str,
+) -> Result<Option<(String, String)>> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT community_uri, owner_did FROM channels WHERE rkey = $1 LIMIT 1",
+    )
+    .bind(channel_rkey)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+// ── Membership ────────────────────────────────────────────────────────────────
+
+/// Record a pending membership request (from the member's PDS).
+pub async fn save_membership(
+    pool: &PgPool,
+    membership_uri: &str,
+    community_uri: &str,
+    member_did: &str,
+    membership_rkey: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO community_members
+            (community_uri, member_did, membership_rkey, membership_uri, status)
+        VALUES ($1, $2, $3, $4, 'pending')
+        ON CONFLICT (community_uri, member_did) DO NOTHING
+        "#,
+    )
+    .bind(community_uri)
+    .bind(member_did)
+    .bind(membership_rkey)
+    .bind(membership_uri)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a membership row when the member's record is deleted.
+pub async fn delete_membership(pool: &PgPool, membership_uri: &str) -> Result<()> {
+    sqlx::query("DELETE FROM community_members WHERE membership_uri = $1")
+        .bind(membership_uri)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Upgrade a pending membership to approved when the owner writes an approval.
+pub async fn save_approval(
+    pool: &PgPool,
+    approval_uri: &str,
+    membership_uri: &str,
+    approval_rkey: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE community_members
+           SET approval_uri  = $1,
+               approval_rkey = $2,
+               status        = 'approved'
+         WHERE membership_uri = $3
+        "#,
+    )
+    .bind(approval_uri)
+    .bind(approval_rkey)
+    .bind(membership_uri)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Revert an approval to pending when the owner deletes their approval record.
+pub async fn delete_approval(pool: &PgPool, approval_uri: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE community_members
+           SET approval_uri  = NULL,
+               approval_rkey = NULL,
+               status        = 'pending'
+         WHERE approval_uri = $1
+        "#,
+    )
+    .bind(approval_uri)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Return true if `did` has an approved membership in `community_uri`.
+pub async fn is_approved_member(
+    pool: &PgPool,
+    community_uri: &str,
+    did: &str,
+) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM community_members
+             WHERE community_uri = $1
+               AND member_did    = $2
+               AND status        = 'approved'
+        )
+        "#,
+    )
+    .bind(community_uri)
+    .bind(did)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
+}
+
+/// Return all communities owned by or joined (approved) by a DID.
+pub async fn get_communities_for_user(
+    pool: &PgPool,
+    did: &str,
+) -> Result<CommunitiesResponse> {
+    let owned = sqlx::query_as::<_, Community>(
+        "SELECT uri, owner_did, rkey, name, description FROM communities WHERE owner_did = $1",
+    )
+    .bind(did)
+    .fetch_all(pool)
+    .await?;
+
+    let joined = sqlx::query_as::<_, Community>(
+        r#"
+        SELECT c.uri, c.owner_did, c.rkey, c.name, c.description
+          FROM communities c
+          JOIN community_members cm ON cm.community_uri = c.uri
+         WHERE cm.member_did = $1
+           AND cm.status     = 'approved'
+        "#,
+    )
+    .bind(did)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(CommunitiesResponse { owned, joined })
+}
+
+// ── Invite codes ──────────────────────────────────────────────────────────────
+
+/// Create a new invite code for a community.  Returns the generated code.
+/// Verifies that `owner_did` is the registered owner of `community_uri`.
+pub async fn create_invite_code(
+    pool: &PgPool,
+    community_uri: &str,
+    owner_did: &str,
+    max_uses: Option<i32>,
+) -> Result<Option<String>> {
+    // Verify ownership.
+    let is_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM communities WHERE uri = $1 AND owner_did = $2)",
+    )
+    .bind(community_uri)
+    .bind(owner_did)
+    .fetch_one(pool)
+    .await?;
+
+    if !is_owner {
+        return Ok(None);
+    }
+
+    let code = Uuid::new_v4().to_string().replace('-', "")[..16].to_string();
+
+    sqlx::query(
+        r#"
+        INSERT INTO invite_codes (code, community_uri, created_by_did, max_uses)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(&code)
+    .bind(community_uri)
+    .bind(owner_did)
+    .bind(max_uses)
+    .execute(pool)
+    .await?;
+
+    Ok(Some(code))
+}
+
+/// Fetch invite code details along with the community info.
+pub async fn get_invite_code(
+    pool: &PgPool,
+    code: &str,
+) -> Result<Option<(InviteCodeInfo, Community)>> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        code: String,
+        community_uri: String,
+        created_by_did: String,
+        max_uses: Option<i32>,
+        use_count: i32,
+        active: bool,
+        // community fields
+        c_uri: String,
+        c_owner_did: String,
+        c_rkey: String,
+        c_name: String,
+        c_description: Option<String>,
+    }
+
+    let row = sqlx::query_as::<_, Row>(
+        r#"
+        SELECT i.code, i.community_uri, i.created_by_did, i.max_uses, i.use_count, i.active,
+               c.uri AS c_uri, c.owner_did AS c_owner_did, c.rkey AS c_rkey,
+               c.name AS c_name, c.description AS c_description
+          FROM invite_codes i
+          JOIN communities c ON c.uri = i.community_uri
+         WHERE i.code = $1
+        "#,
+    )
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        (
+            InviteCodeInfo {
+                code: r.code,
+                community_uri: r.community_uri,
+                created_by_did: r.created_by_did,
+                max_uses: r.max_uses,
+                use_count: r.use_count,
+                active: r.active,
+            },
+            Community {
+                uri: r.c_uri,
+                owner_did: r.c_owner_did,
+                rkey: r.c_rkey,
+                name: r.c_name,
+                description: r.c_description,
+            },
+        )
+    }))
+}
+
+/// Deactivate an invite code.  Returns false if the code doesn't exist or
+/// `owner_did` is not the owner.
+pub async fn revoke_invite_code(
+    pool: &PgPool,
+    code: &str,
+    owner_did: &str,
+) -> Result<bool> {
+    let rows_affected = sqlx::query(
+        "UPDATE invite_codes SET active = FALSE WHERE code = $1 AND created_by_did = $2",
+    )
+    .bind(code)
+    .bind(owner_did)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(rows_affected > 0)
+}
+
+/// Increment the use counter for a code and return whether it is still usable.
+/// Returns false if the code is inactive or has hit max_uses.
+pub async fn use_invite_code(pool: &PgPool, code: &str) -> Result<bool> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        active: bool,
+        max_uses: Option<i32>,
+        use_count: i32,
+    }
+
+    let row = sqlx::query_as::<_, Row>(
+        "SELECT active, max_uses, use_count FROM invite_codes WHERE code = $1",
+    )
+    .bind(code)
+    .fetch_optional(pool)
+    .await?;
+
+    let row = match row {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+
+    if !row.active {
+        return Ok(false);
+    }
+    if let Some(max) = row.max_uses {
+        if row.use_count >= max {
+            return Ok(false);
+        }
+    }
+
+    sqlx::query("UPDATE invite_codes SET use_count = use_count + 1 WHERE code = $1")
+        .bind(code)
+        .execute(pool)
+        .await?;
+
+    Ok(true)
 }

@@ -16,7 +16,7 @@ use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
-use models::{author::AuthorProfile, message::MessageResponse, reaction::ReactionSummary};
+use models::{author::AuthorProfile, community::{CommunitiesResponse, CreateInviteRequest}, message::MessageResponse, reaction::ReactionSummary};
 use webrtc::RoomState;
 
 // Source - https://stackoverflow.com/a/64904947
@@ -160,6 +160,86 @@ async fn get_reactions_for_channel(
         })
 }
 
+/// Retrieve all communities for a user (both owned and joined) in one roundtrip.
+///
+/// Query param: `did` (required)
+#[get("/api/communities?<did>")]
+async fn get_communities(
+    did: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<CommunitiesResponse>, Status> {
+    db::get_communities_for_user(pool, did)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_communities error: {e}");
+            Status::InternalServerError
+        })
+}
+
+/// Look up an invite code and return community info.
+///
+/// Path param: `code`
+#[get("/api/invite/<code>")]
+async fn get_invite(
+    code: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<serde_json::Value>, Status> {
+    match db::get_invite_code(pool, code).await {
+        Ok(Some((invite, community))) => Ok(Json(serde_json::json!({
+            "code": invite.code,
+            "community_uri": invite.community_uri,
+            "created_by_did": invite.created_by_did,
+            "max_uses": invite.max_uses,
+            "use_count": invite.use_count,
+            "active": invite.active,
+            "community": community,
+        }))),
+        Ok(None) => Err(Status::NotFound),
+        Err(e) => {
+            error!("get_invite error: {e}");
+            Err(Status::InternalServerError)
+        }
+    }
+}
+
+/// Create a new invite code for a community.
+///
+/// Body: `{ "community_uri": "...", "owner_did": "...", "max_uses": null }`
+#[post("/api/invite", data = "<body>")]
+async fn create_invite(
+    body: Json<CreateInviteRequest>,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<serde_json::Value>, Status> {
+    match db::create_invite_code(pool, &body.community_uri, &body.owner_did, body.max_uses).await {
+        Ok(Some(code)) => Ok(Json(serde_json::json!({ "code": code }))),
+        Ok(None) => Err(Status::Forbidden),
+        Err(e) => {
+            error!("create_invite error: {e}");
+            Err(Status::InternalServerError)
+        }
+    }
+}
+
+/// Revoke (deactivate) an invite code.
+///
+/// Path param: `code`, query param: `owner_did` (required)
+#[delete("/api/invite/<code>?<owner_did>")]
+async fn revoke_invite(
+    code: &str,
+    owner_did: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Status, Status> {
+    match db::revoke_invite_code(pool, code, owner_did).await {
+        Ok(true) => Ok(Status::NoContent),
+        Ok(false) => Err(Status::Forbidden),
+        Err(e) => {
+            error!("revoke_invite error: {e}");
+            Err(Status::InternalServerError)
+        }
+    }
+}
+
 #[launch]
 fn rocket() -> _ {
     let _ = dotenvy::dotenv();
@@ -209,6 +289,10 @@ fn rocket() -> _ {
                 get_author,
                 get_reactions_for_message,
                 get_reactions_for_channel,
+                get_communities,
+                get_invite,
+                create_invite,
+                revoke_invite,
                 ws_handler::subscribe,
                 webrtc::signal,
                 preflight
