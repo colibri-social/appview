@@ -19,6 +19,16 @@ pub struct CommunitiesResponse {
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct Category {
+    pub uri: String,
+    pub rkey: String,
+    pub community_uri: String,
+    pub name: String,
+    pub emoji: String,
+    pub parent_rkey: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Channel {
     pub uri: String,
     pub rkey: String,
@@ -27,6 +37,24 @@ pub struct Channel {
     pub description: Option<String>,
     pub channel_type: String,
     pub category_rkey: Option<String>,
+}
+
+/// A category with its channels nested inside — used for the sidebar endpoint.
+#[derive(Debug, Serialize)]
+pub struct SidebarCategory {
+    pub uri: String,
+    pub rkey: String,
+    pub name: String,
+    pub emoji: String,
+    pub parent_rkey: Option<String>,
+    pub channels: Vec<Channel>,
+}
+
+/// Full sidebar payload: categorised channels + any channels with no category.
+#[derive(Debug, Serialize)]
+pub struct SidebarResponse {
+    pub categories: Vec<SidebarCategory>,
+    pub uncategorized: Vec<Channel>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]

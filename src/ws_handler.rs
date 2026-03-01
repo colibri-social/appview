@@ -16,8 +16,7 @@ use crate::events::{AppEvent, EventBus};
 /// ```json
 /// {"action":"subscribe",  "event_type":"message",     "channel":"general"}
 /// {"action":"subscribe",  "event_type":"message"}        // all channels
-/// {"action":"subscribe",  "event_type":"user_status", "did":"did:plc:…"}
-/// {"action":"subscribe",  "event_type":"user_status"}    // all users
+/// {"action":"subscribe",  "event_type":"community", "community_uri":"at://did:plc:…/social.colibri.community/rkey"}
 /// {"action":"unsubscribe","event_type":"message",     "channel":"general"}
 /// ```
 #[derive(Debug, Deserialize)]
@@ -29,6 +28,9 @@ struct ClientRequest {
     channel: Option<String>,
     #[serde(default)]
     did: Option<String>,
+    /// Community AT-URI filter for "community" event type.
+    #[serde(default)]
+    community_uri: Option<String>,
 }
 
 // ── Server → client ───────────────────────────────────────────────────────────
@@ -50,6 +52,8 @@ struct Subscriptions {
     /// `Some(None)`   = subscribed to messages in *all* channels.
     /// `Some(Some(s))`= subscribed to messages only in the listed channels.
     messages: Option<Option<HashSet<String>>>,
+    /// Same semantics, filtered by community AT-URI.
+    community: Option<Option<HashSet<String>>>,
 }
 
 impl Subscriptions {
@@ -65,6 +69,15 @@ impl Subscriptions {
                 }
                 None => self.messages = Some(None),
             },
+            "community" => match param {
+                Some(uri) => {
+                    let set = self.community.get_or_insert_with(|| Some(HashSet::new()));
+                    if let Some(inner) = set {
+                        inner.insert(uri);
+                    }
+                }
+                None => self.community = Some(None),
+            },
             other => debug!("Unknown event_type in subscribe: {other}"),
         }
     }
@@ -78,6 +91,14 @@ impl Subscriptions {
                     }
                 }
                 None => self.messages = None,
+            },
+            "community" => match param {
+                Some(uri) => {
+                    if let Some(Some(set)) = &mut self.community {
+                        set.remove(&uri);
+                    }
+                }
+                None => self.community = None,
             },
             other => debug!("Unknown event_type in unsubscribe: {other}"),
         }
@@ -96,6 +117,17 @@ impl Subscriptions {
                 None => false,
                 Some(None) => true,
                 Some(Some(channels)) => channels.contains(channel),
+            },
+            AppEvent::ChannelCreated { community_uri, .. }
+            | AppEvent::ChannelDeleted { community_uri, .. }
+            | AppEvent::CategoryCreated { community_uri, .. }
+            | AppEvent::CategoryDeleted { community_uri, .. }
+            | AppEvent::MemberPending { community_uri, .. }
+            | AppEvent::MemberJoined { community_uri, .. }
+            | AppEvent::MemberLeft { community_uri, .. } => match &self.community {
+                None => false,
+                Some(None) => true,
+                Some(Some(uris)) => uris.contains(community_uri),
             },
         }
     }
@@ -120,7 +152,9 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>) -> ws::Channel<'stati
                             Some(Ok(ws::Message::Text(text))) => {
                                 match serde_json::from_str::<ClientRequest>(&text) {
                                     Ok(req) => {
-                                        let param = req.channel.or(req.did);
+                                        let param = req.community_uri
+                                            .or(req.channel)
+                                            .or(req.did);
                                         let reply = match req.action.as_str() {
                                             "subscribe" => {
                                                 subs.subscribe(&req.event_type, param);

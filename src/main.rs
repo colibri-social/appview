@@ -206,6 +206,31 @@ async fn get_channels(
         })
 }
 
+/// Retrieve channels and categories combined into a sidebar-ready structure.
+///
+/// Query param: `community` (required) — the full AT-URI of the community
+///
+/// Response shape:
+/// ```json
+/// {
+///   "categories": [{ "rkey", "name", "emoji", "parent_rkey", "channels": [...] }],
+///   "uncategorized": [...]
+/// }
+/// ```
+#[get("/api/sidebar?<community>")]
+async fn get_sidebar(
+    community: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<crate::models::community::SidebarResponse>, Status> {
+    db::get_sidebar_for_community(pool, community)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_sidebar error: {e}");
+            Status::InternalServerError
+        })
+}
+
 /// Retrieve all members of a community, enriched with cached profile data.
 ///
 /// Query param: `community` (required) — the full AT-URI of the community
@@ -356,6 +381,7 @@ fn rocket() -> _ {
                 get_reactions_for_channel,
                 get_communities,
                 get_channels,
+                get_sidebar,
                 get_members,
                 get_invite,
                 create_invite,

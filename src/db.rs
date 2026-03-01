@@ -749,6 +749,19 @@ pub async fn save_channel(
 }
 
 /// Delete a channel record.
+/// Fetch channel community_uri by URI (used before deleting, for event emission).
+pub async fn get_channel_community_by_uri(
+    pool: &PgPool,
+    uri: &str,
+) -> Result<Option<String>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT community_uri FROM channels WHERE uri = $1 LIMIT 1")
+            .bind(uri)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(v,)| v))
+}
+
 pub async fn delete_channel(pool: &PgPool, uri: &str) -> Result<()> {
     sqlx::query("DELETE FROM channels WHERE uri = $1")
         .bind(uri)
@@ -805,6 +818,34 @@ pub async fn delete_membership(pool: &PgPool, membership_uri: &str) -> Result<()
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Look up (community_uri, member_did) for a membership URI.
+pub async fn get_membership_info(
+    pool: &PgPool,
+    membership_uri: &str,
+) -> Result<Option<(String, String)>> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT community_uri, member_did FROM community_members WHERE membership_uri = $1 LIMIT 1",
+    )
+    .bind(membership_uri)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Look up (community_uri, member_did) by approval URI.
+pub async fn get_membership_info_by_approval(
+    pool: &PgPool,
+    approval_uri: &str,
+) -> Result<Option<(String, String)>> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT community_uri, member_did FROM community_members WHERE approval_uri = $1 LIMIT 1",
+    )
+    .bind(approval_uri)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 /// Upgrade a pending membership to approved when the owner writes an approval.
@@ -1065,6 +1106,111 @@ pub async fn get_channels_for_community(
     .fetch_all(pool)
     .await?;
     Ok(channels)
+}
+
+// ── Categories ────────────────────────────────────────────────────────────────
+
+pub async fn save_category(
+    pool: &PgPool,
+    uri: &str,
+    owner_did: &str,
+    rkey: &str,
+    community_uri: &str,
+    name: &str,
+    emoji: &str,
+    parent_rkey: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO categories (uri, owner_did, rkey, community_uri, name, emoji, parent_rkey)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (uri) DO UPDATE
+           SET name        = EXCLUDED.name,
+               emoji       = EXCLUDED.emoji,
+               parent_rkey = EXCLUDED.parent_rkey
+        "#,
+    )
+    .bind(uri)
+    .bind(owner_did)
+    .bind(rkey)
+    .bind(community_uri)
+    .bind(name)
+    .bind(emoji)
+    .bind(parent_rkey)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_category(pool: &PgPool, uri: &str) -> Result<()> {
+    sqlx::query("DELETE FROM categories WHERE uri = $1")
+        .bind(uri)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Return all categories for a community, ordered by name.
+pub async fn get_categories_for_community(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<crate::models::community::Category>> {
+    let cats = sqlx::query_as::<_, crate::models::community::Category>(
+        r#"
+        SELECT uri, rkey, community_uri, name, emoji, parent_rkey
+          FROM categories
+         WHERE community_uri = $1
+         ORDER BY name
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(cats)
+}
+
+/// Return channels and categories combined into a sidebar-ready structure.
+pub async fn get_sidebar_for_community(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<crate::models::community::SidebarResponse> {
+    use crate::models::community::{SidebarCategory, SidebarResponse};
+
+    let categories = get_categories_for_community(pool, community_uri).await?;
+    let channels = get_channels_for_community(pool, community_uri).await?;
+
+    let mut sidebar_cats: Vec<SidebarCategory> = categories
+        .into_iter()
+        .map(|cat| SidebarCategory {
+            uri: cat.uri,
+            rkey: cat.rkey.clone(),
+            name: cat.name,
+            emoji: cat.emoji,
+            parent_rkey: cat.parent_rkey,
+            channels: channels
+                .iter()
+                .filter(|ch| ch.category_rkey.as_deref() == Some(&cat.rkey))
+                .cloned()
+                .collect(),
+        })
+        .collect();
+
+    // Sort categories: top-level first, then children, both alphabetically.
+    sidebar_cats.sort_by(|a, b| {
+        let a_top = a.parent_rkey.is_none();
+        let b_top = b.parent_rkey.is_none();
+        b_top.cmp(&a_top).then(a.name.cmp(&b.name))
+    });
+
+    let uncategorized = channels
+        .into_iter()
+        .filter(|ch| ch.category_rkey.is_none())
+        .collect();
+
+    Ok(SidebarResponse {
+        categories: sidebar_cats,
+        uncategorized,
+    })
 }
 
 /// Return all members (pending + approved) for a community, enriched with
