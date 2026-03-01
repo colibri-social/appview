@@ -48,6 +48,35 @@ impl Fairing for CORS {
     }
 }
 
+// ── API key guard ─────────────────────────────────────────────────────────────
+
+/// Request guard that validates the `Authorization: Bearer <key>` header
+/// against the `INVITE_API_KEY` environment variable.
+pub struct ApiKey;
+
+#[rocket::async_trait]
+impl<'r> rocket::request::FromRequest<'r> for ApiKey {
+    type Error = ();
+
+    async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
+        let expected = match std::env::var("INVITE_API_KEY") {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                error!("INVITE_API_KEY env var is not set; rejecting request");
+                return rocket::request::Outcome::Error((Status::InternalServerError, ()));
+            }
+        };
+        let provided = req
+            .headers()
+            .get_one("Authorization")
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match provided {
+            Some(key) if key == expected => rocket::request::Outcome::Success(ApiKey),
+            _ => rocket::request::Outcome::Error((Status::Unauthorized, ())),
+        }
+    }
+}
+
 // ── REST endpoints ────────────────────────────────────────────────────────────
 
 /// Catch-all handler for CORS preflight requests.
@@ -242,6 +271,7 @@ async fn get_invite(
 /// Body: `{ "community_uri": "...", "owner_did": "...", "max_uses": null }`
 #[post("/api/invite", data = "<body>")]
 async fn create_invite(
+    _key: ApiKey,
     body: Json<CreateInviteRequest>,
     pool: &State<sqlx::PgPool>,
 ) -> Result<Json<serde_json::Value>, Status> {
@@ -260,6 +290,7 @@ async fn create_invite(
 /// Path param: `code`, query param: `owner_did` (required)
 #[delete("/api/invite/<code>?<owner_did>")]
 async fn revoke_invite(
+    _key: ApiKey,
     code: &str,
     owner_did: &str,
     pool: &State<sqlx::PgPool>,
