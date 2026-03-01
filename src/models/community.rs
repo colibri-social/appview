@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 pub struct Community {
     #[serde(skip)]
     pub uri: String,
-    #[serde(skip)]
     pub owner_did: String,
     pub rkey: String,
     pub name: String,

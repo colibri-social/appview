@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::collections::{HashMap, HashSet};
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::models::{
@@ -145,10 +145,7 @@ pub async fn get_messages(
 }
 
 /// Look up a single message by rkey (first match), with author profile.
-pub async fn get_message_by_rkey(
-    pool: &PgPool,
-    rkey: &str,
-) -> Result<Option<MessageWithAuthor>> {
+pub async fn get_message_by_rkey(pool: &PgPool, rkey: &str) -> Result<Option<MessageWithAuthor>> {
     let msg = sqlx::query_as::<_, MessageWithAuthor>(
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
@@ -201,9 +198,12 @@ pub async fn get_message_by_author_and_rkey(
 /// Return the channel and author_did of a message by its rkey, or None if not found.
 pub async fn get_message_channel(pool: &PgPool, rkey: &str) -> Result<Option<(String, String)>> {
     #[derive(sqlx::FromRow)]
-    struct Row { channel: String, author_did: String }
+    struct Row {
+        channel: String,
+        author_did: String,
+    }
     let row = sqlx::query_as::<_, Row>(
-        "SELECT channel, author_did FROM messages WHERE rkey = $1 LIMIT 1"
+        "SELECT channel, author_did FROM messages WHERE rkey = $1 LIMIT 1",
     )
     .bind(rkey)
     .fetch_optional(pool)
@@ -283,7 +283,12 @@ pub async fn enrich_messages(
         reaction_map
             .entry(row.target_rkey)
             .or_default()
-            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors, rkeys: row.rkeys });
+            .push(ReactionSummary {
+                emoji: row.emoji,
+                count: row.count,
+                authors: row.authors,
+                rkeys: row.rkeys,
+            });
     }
 
     // ── Assemble responses ────────────────────────────────────────────────────
@@ -297,7 +302,11 @@ pub async fn enrich_messages(
                 .cloned()
                 .map(Box::new);
             let reactions = reaction_map.remove(&m.rkey).unwrap_or_default();
-            MessageResponse { message: m, parent_message, reactions }
+            MessageResponse {
+                message: m,
+                parent_message,
+                reactions,
+            }
         })
         .collect())
 }
@@ -387,7 +396,15 @@ pub async fn get_reactions_for_message(
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|r| ReactionSummary { emoji: r.emoji, count: r.count, authors: r.authors, rkeys: r.rkeys }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|r| ReactionSummary {
+            emoji: r.emoji,
+            count: r.count,
+            authors: r.authors,
+            rkeys: r.rkeys,
+        })
+        .collect())
 }
 
 /// All reactions in a channel, grouped by target message rkey then by emoji.
@@ -426,7 +443,12 @@ pub async fn get_reactions_for_channel(
     for row in rows {
         map.entry(row.target_rkey)
             .or_default()
-            .push(ReactionSummary { emoji: row.emoji, count: row.count, authors: row.authors, rkeys: row.rkeys });
+            .push(ReactionSummary {
+                emoji: row.emoji,
+                count: row.count,
+                authors: row.authors,
+                rkeys: row.rkeys,
+            });
     }
     Ok(map)
 }
@@ -572,11 +594,7 @@ pub async fn set_backfill_cursor(
 }
 
 /// Mark a (did, collection) backfill as complete.
-pub async fn mark_backfill_complete(
-    pool: &PgPool,
-    did: &str,
-    collection: &str,
-) -> Result<()> {
+pub async fn mark_backfill_complete(pool: &PgPool, did: &str, collection: &str) -> Result<()> {
     sqlx::query(
         r#"
         INSERT INTO backfill_state (did, collection, completed, cursor)
@@ -604,12 +622,10 @@ pub async fn get_jetstream_cursor(pool: &PgPool) -> Result<i64> {
 
 /// Persist the latest Jetstream `time_us` cursor.
 pub async fn set_jetstream_cursor(pool: &PgPool, time_us: i64) -> Result<()> {
-    sqlx::query(
-        "UPDATE jetstream_cursor SET time_us = $1, updated_at = NOW() WHERE id = TRUE",
-    )
-    .bind(time_us)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE jetstream_cursor SET time_us = $1, updated_at = NOW() WHERE id = TRUE")
+        .bind(time_us)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -731,12 +747,11 @@ pub async fn get_community_for_channel(
     pool: &PgPool,
     channel_rkey: &str,
 ) -> Result<Option<(String, String)>> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT community_uri, owner_did FROM channels WHERE rkey = $1 LIMIT 1",
-    )
-    .bind(channel_rkey)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT community_uri, owner_did FROM channels WHERE rkey = $1 LIMIT 1")
+            .bind(channel_rkey)
+            .fetch_optional(pool)
+            .await?;
     Ok(row)
 }
 
@@ -818,11 +833,7 @@ pub async fn delete_approval(pool: &PgPool, approval_uri: &str) -> Result<()> {
 }
 
 /// Return true if `did` has an approved membership in `community_uri`.
-pub async fn is_approved_member(
-    pool: &PgPool,
-    community_uri: &str,
-    did: &str,
-) -> Result<bool> {
+pub async fn is_approved_member(pool: &PgPool, community_uri: &str, did: &str) -> Result<bool> {
     let exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
@@ -841,10 +852,7 @@ pub async fn is_approved_member(
 }
 
 /// Return all communities owned by or joined (approved) by a DID.
-pub async fn get_communities_for_user(
-    pool: &PgPool,
-    did: &str,
-) -> Result<CommunitiesResponse> {
+pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(
         "SELECT uri, owner_did, rkey, name, description, image, category_order FROM communities WHERE owner_did = $1",
     )
@@ -972,11 +980,7 @@ pub async fn get_invite_code(
 
 /// Deactivate an invite code.  Returns false if the code doesn't exist or
 /// `owner_did` is not the owner.
-pub async fn revoke_invite_code(
-    pool: &PgPool,
-    code: &str,
-    owner_did: &str,
-) -> Result<bool> {
+pub async fn revoke_invite_code(pool: &PgPool, code: &str, owner_did: &str) -> Result<bool> {
     let rows_affected = sqlx::query(
         "UPDATE invite_codes SET active = FALSE WHERE code = $1 AND created_by_did = $2",
     )
