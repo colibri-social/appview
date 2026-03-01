@@ -80,6 +80,25 @@ pub enum AppEvent {
         community_uri: String,
         member_did: String,
     },
+    // ── Owner-scoped community list events (filtered by community_uri) ───────
+    /// A community was created or fully updated.
+    CommunityUpserted {
+        community_uri: String,
+        owner_did: String,
+        rkey: String,
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        image: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        category_order: Option<serde_json::Value>,
+    },
+    CommunityDeleted {
+        community_uri: String,
+        owner_did: String,
+        rkey: String,
+    },
 }
 
 pub type EventBus = broadcast::Sender<AppEvent>;

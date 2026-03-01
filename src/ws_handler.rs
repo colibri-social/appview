@@ -14,10 +14,11 @@ use crate::events::{AppEvent, EventBus};
 ///
 /// Examples:
 /// ```json
-/// {"action":"subscribe",  "event_type":"message",     "channel":"general"}
-/// {"action":"subscribe",  "event_type":"message"}        // all channels
+/// {"action":"subscribe",  "event_type":"message",   "channel":"general"}
+/// {"action":"subscribe",  "event_type":"message"}     // all channels
 /// {"action":"subscribe",  "event_type":"community", "community_uri":"at://did:plc:…/social.colibri.community/rkey"}
-/// {"action":"unsubscribe","event_type":"message",     "channel":"general"}
+/// {"action":"subscribe",  "event_type":"owner",     "did":"did:plc:…"}
+/// {"action":"unsubscribe","event_type":"message",   "channel":"general"}
 /// ```
 #[derive(Debug, Deserialize)]
 struct ClientRequest {
@@ -65,7 +66,6 @@ impl Subscriptions {
                     if let Some(inner) = set {
                         inner.insert(ch);
                     }
-                    // If already Some(None) (all channels), keep it.
                 }
                 None => self.messages = Some(None),
             },
@@ -124,7 +124,9 @@ impl Subscriptions {
             | AppEvent::CategoryDeleted { community_uri, .. }
             | AppEvent::MemberPending { community_uri, .. }
             | AppEvent::MemberJoined { community_uri, .. }
-            | AppEvent::MemberLeft { community_uri, .. } => match &self.community {
+            | AppEvent::MemberLeft { community_uri, .. }
+            | AppEvent::CommunityUpserted { community_uri, .. }
+            | AppEvent::CommunityDeleted { community_uri, .. } => match &self.community {
                 None => false,
                 Some(None) => true,
                 Some(Some(uris)) => uris.contains(community_uri),

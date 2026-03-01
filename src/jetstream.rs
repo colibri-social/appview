@@ -255,7 +255,7 @@ async fn handle_event(
         }
         "social.colibri.community" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching community event");
-            handle_community(commit, &event.did, pool).await
+            handle_community(commit, &event.did, pool, bus).await
         }
         "social.colibri.channel" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching channel event");
@@ -586,7 +586,7 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
 
 // ── Community handler ─────────────────────────────────────────────────────────
 
-async fn handle_community(commit: CommitData, did: &str, pool: &PgPool) -> Result<()> {
+async fn handle_community(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
     let uri = format!("at://{}/social.colibri.community/{}", did, commit.rkey);
     match commit.operation.as_str() {
         "create" | "update" => {
@@ -615,6 +615,15 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool) -> Resul
                 error!(did, rkey = %commit.rkey, "DB error saving community: {e}");
             } else {
                 info!(did, rkey = %commit.rkey, name = %record.name, "Community indexed");
+                let _ = bus.send(AppEvent::CommunityUpserted {
+                    community_uri: uri,
+                    owner_did: did.to_string(),
+                    rkey: commit.rkey,
+                    name: record.name,
+                    description: record.description,
+                    image: record.image,
+                    category_order: record.category_order,
+                });
             }
         }
         "delete" => {
@@ -622,6 +631,11 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool) -> Resul
                 error!(did, rkey = %commit.rkey, "DB error deleting community: {e}");
             } else {
                 info!(did, rkey = %commit.rkey, "Community deleted");
+                let _ = bus.send(AppEvent::CommunityDeleted {
+                    community_uri: uri,
+                    owner_did: did.to_string(),
+                    rkey: commit.rkey,
+                });
             }
         }
         other => trace!(did, op = other, "Community: unhandled operation"),
