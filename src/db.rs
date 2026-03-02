@@ -115,7 +115,6 @@ pub async fn get_messages(
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1
             ORDER BY m.created_at DESC
-            LIMIT $2
             "#,
         )
         .bind(channel)
