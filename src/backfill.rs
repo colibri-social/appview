@@ -24,6 +24,11 @@ pub async fn run(pool: PgPool, http: reqwest::Client) {
     let pool2 = pool.clone();
     let http2 = http.clone();
     tokio::spawn(run_historical(pool2, http2));
+
+    // Run an immediate sweep on startup before entering the periodic loop.
+    info!("Backfill: running startup sweep");
+    sweep_all_known_dids(&pool, &http).await;
+
     run_sweep_loop(pool, http).await;
 }
 
@@ -162,7 +167,8 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         if let Ok((records, _)) =
             atproto::list_community_records(http, &pds_url, did, None).await
         {
-            for record in records {
+            let live_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
+            for record in &records {
                 match db::save_community(
                     pool,
                     &record.uri,
@@ -182,12 +188,20 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error community: {e}"),
                 }
             }
+            match db::prune_communities_for_owner(pool, did, &live_rkeys).await {
+                Ok(deleted) if !deleted.is_empty() => {
+                    info!(did, count = deleted.len(), "Backfill/sweep: pruned deleted communities");
+                }
+                Err(e) => error!(did, "Backfill/sweep: prune communities error: {e}"),
+                _ => {}
+            }
         }
 
         if let Ok((records, _)) =
             atproto::list_category_records(http, &pds_url, did, None).await
         {
-            for record in records {
+            let live_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
+            for record in &records {
                 let community_uri = format!(
                     "at://{}/social.colibri.community/{}",
                     did, record.community_rkey
@@ -210,12 +224,20 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error category: {e}"),
                 }
             }
+            match db::prune_categories_for_owner(pool, did, &live_rkeys).await {
+                Ok(deleted) if !deleted.is_empty() => {
+                    info!(did, count = deleted.len(), "Backfill/sweep: pruned deleted categories");
+                }
+                Err(e) => error!(did, "Backfill/sweep: prune categories error: {e}"),
+                _ => {}
+            }
         }
 
         if let Ok((records, _)) =
             atproto::list_channel_records(http, &pds_url, did, None).await
         {
-            for record in records {
+            let live_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
+            for record in &records {
                 let community_uri = format!(
                     "at://{}/social.colibri.community/{}",
                     did, record.community_rkey
@@ -239,6 +261,13 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     }
                     Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error channel: {e}"),
                 }
+            }
+            match db::prune_channels_for_owner(pool, did, &live_rkeys).await {
+                Ok(deleted) if !deleted.is_empty() => {
+                    info!(did, count = deleted.len(), "Backfill/sweep: pruned deleted channels");
+                }
+                Err(e) => error!(did, "Backfill/sweep: prune channels error: {e}"),
+                _ => {}
             }
         }
 
@@ -484,6 +513,7 @@ async fn backfill_communities(
     let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
     let mut total: usize = 0;
     let mut page: usize = 0;
+    let mut all_rkeys: Vec<String> = Vec::new();
 
     loop {
         page += 1;
@@ -495,6 +525,7 @@ async fn backfill_communities(
         debug!(did, page, count = page_count, "Backfill: processing community records");
 
         for record in records {
+            all_rkeys.push(record.rkey.clone());
             match db::save_community(
                 pool,
                 &record.uri,
@@ -524,6 +555,13 @@ async fn backfill_communities(
                 sleep(Duration::from_millis(200)).await;
             }
             None => {
+                match db::prune_communities_for_owner(pool, did, &all_rkeys).await {
+                    Ok(deleted) if !deleted.is_empty() => {
+                        info!(did, count = deleted.len(), "Backfill: pruned deleted communities");
+                    }
+                    Err(e) => error!(did, "Backfill: prune communities error: {e}"),
+                    _ => {}
+                }
                 db::mark_backfill_complete(pool, did, collection).await?;
                 info!(did, total, pages = page, "Backfill: communities complete");
                 break;
@@ -544,6 +582,7 @@ async fn backfill_categories(
     let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
     let mut total: usize = 0;
     let mut page: usize = 0;
+    let mut all_rkeys: Vec<String> = Vec::new();
 
     loop {
         page += 1;
@@ -555,6 +594,7 @@ async fn backfill_categories(
         debug!(did, page, count = page_count, "Backfill: processing category records");
 
         for record in records {
+            all_rkeys.push(record.rkey.clone());
             let community_uri = format!(
                 "at://{}/social.colibri.community/{}",
                 did, record.community_rkey
@@ -587,6 +627,13 @@ async fn backfill_categories(
                 sleep(Duration::from_millis(200)).await;
             }
             None => {
+                match db::prune_categories_for_owner(pool, did, &all_rkeys).await {
+                    Ok(deleted) if !deleted.is_empty() => {
+                        info!(did, count = deleted.len(), "Backfill: pruned deleted categories");
+                    }
+                    Err(e) => error!(did, "Backfill: prune categories error: {e}"),
+                    _ => {}
+                }
                 db::mark_backfill_complete(pool, did, collection).await?;
                 info!(did, total, pages = page, "Backfill: categories complete");
                 break;
@@ -607,6 +654,7 @@ async fn backfill_channels(
     let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
     let mut total: usize = 0;
     let mut page: usize = 0;
+    let mut all_rkeys: Vec<String> = Vec::new();
 
     loop {
         page += 1;
@@ -618,6 +666,7 @@ async fn backfill_channels(
         debug!(did, page, count = page_count, "Backfill: processing channel records");
 
         for record in records {
+            all_rkeys.push(record.rkey.clone());
             let community_uri = format!(
                 "at://{}/social.colibri.community/{}",
                 did, record.community_rkey
@@ -652,6 +701,13 @@ async fn backfill_channels(
                 sleep(Duration::from_millis(200)).await;
             }
             None => {
+                match db::prune_channels_for_owner(pool, did, &all_rkeys).await {
+                    Ok(deleted) if !deleted.is_empty() => {
+                        info!(did, count = deleted.len(), "Backfill: pruned deleted channels");
+                    }
+                    Err(e) => error!(did, "Backfill: prune channels error: {e}"),
+                    _ => {}
+                }
                 db::mark_backfill_complete(pool, did, collection).await?;
                 info!(did, total, pages = page, "Backfill: channels complete");
                 break;

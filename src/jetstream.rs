@@ -16,15 +16,17 @@ use crate::{
     models::message::{MessageResponse, MessageWithAuthor},
 };
 
-const DEFAULT_JETSTREAM_URL: &str = "wss://jetstream2.us-east.bsky.network/subscribe\
-     ?wantedCollections=social.colibri.message\
-     &wantedCollections=social.colibri.reaction\
-     &wantedCollections=social.colibri.community\
-     &wantedCollections=social.colibri.channel\
-     &wantedCollections=social.colibri.category\
-     &wantedCollections=social.colibri.membership\
-     &wantedCollections=social.colibri.approval\
-     &wantedCollections=app.bsky.actor.profile";
+const DEFAULT_JETSTREAM_URL: &str = concat!(
+    "wss://jetstream2.us-east.bsky.network/subscribe",
+    "?wantedCollections=social.colibri.message",
+    "&wantedCollections=social.colibri.reaction",
+    "&wantedCollections=social.colibri.community",
+    "&wantedCollections=social.colibri.channel",
+    "&wantedCollections=social.colibri.category",
+    "&wantedCollections=social.colibri.membership",
+    "&wantedCollections=social.colibri.approval",
+    "&wantedCollections=app.bsky.actor.profile"
+);
 
 // ── Jetstream wire types ──────────────────────────────────────────────────────
 
@@ -625,6 +627,7 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool, bus: &Ev
             }
         }
         "delete" => {
+            info!(did, rkey = %commit.rkey, "Community: received delete event");
             if let Err(e) = db::delete_community(pool, &uri).await {
                 error!(did, rkey = %commit.rkey, "DB error deleting community: {e}");
             } else {
@@ -689,6 +692,7 @@ async fn handle_channel(commit: CommitData, did: &str, pool: &PgPool, bus: &Even
             }
         }
         "delete" => {
+            info!(did, rkey = %commit.rkey, "Channel: received delete event");
             // Look up community_uri before deleting so we can emit the event.
             let community_uri = db::get_channel_community_by_uri(pool, &uri)
                 .await
@@ -762,6 +766,7 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
             }
         }
         "delete" => {
+            info!(did, rkey = %commit.rkey, "Category: received delete event");
             // Look up community_uri before deleting.
             let community_uri: Option<String> = sqlx::query_scalar(
                 "SELECT community_uri FROM categories WHERE uri = $1"

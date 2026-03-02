@@ -732,6 +732,24 @@ pub async fn delete_community(pool: &PgPool, uri: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete any community rows owned by `owner_did` whose rkey is NOT in `live_rkeys`.
+/// Used by backfill to prune communities deleted from the PDS.
+/// Returns the URIs of deleted communities.
+pub async fn prune_communities_for_owner(
+    pool: &PgPool,
+    owner_did: &str,
+    live_rkeys: &[String],
+) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "DELETE FROM communities WHERE owner_did = $1 AND rkey <> ALL($2) RETURNING uri",
+    )
+    .bind(owner_did)
+    .bind(live_rkeys)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(uri,)| uri).collect())
+}
+
 // ── Channels ──────────────────────────────────────────────────────────────────
 
 /// Insert or replace a channel record.
@@ -787,6 +805,23 @@ pub async fn delete_channel(pool: &PgPool, uri: &str) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Delete any channel rows owned by `owner_did` whose rkey is NOT in `live_rkeys`.
+/// Returns the URIs of deleted channels.
+pub async fn prune_channels_for_owner(
+    pool: &PgPool,
+    owner_did: &str,
+    live_rkeys: &[String],
+) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "DELETE FROM channels WHERE owner_did = $1 AND rkey <> ALL($2) RETURNING uri",
+    )
+    .bind(owner_did)
+    .bind(live_rkeys)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(uri,)| uri).collect())
 }
 
 /// Look up the community URI and owner DID for a channel by its rkey.
@@ -1164,6 +1199,23 @@ pub async fn delete_category(pool: &PgPool, uri: &str) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Delete any category rows owned by `owner_did` whose rkey is NOT in `live_rkeys`.
+/// Returns the URIs of deleted categories.
+pub async fn prune_categories_for_owner(
+    pool: &PgPool,
+    owner_did: &str,
+    live_rkeys: &[String],
+) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "DELETE FROM categories WHERE owner_did = $1 AND rkey <> ALL($2) RETURNING uri",
+    )
+    .bind(owner_did)
+    .bind(live_rkeys)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(uri,)| uri).collect())
 }
 
 /// Return all categories for a community, ordered by name.
