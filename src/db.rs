@@ -103,7 +103,28 @@ pub async fn get_messages(
     channel: &str,
     limit: i64,
     before: Option<DateTime<Utc>>,
+    all: Option<&str>,
 ) -> Result<Vec<MessageResponse>> {
+    if all.is_some() {
+        let messages: Vec<MessageWithAuthor> = sqlx::query_as::<_, MessageWithAuthor>(
+            r#"
+            SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+                   a.display_name, a.avatar_url
+            FROM messages m
+            LEFT JOIN author_profiles a ON m.author_did = a.did
+            WHERE m.channel = $1
+            ORDER BY m.created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(channel)
+        .fetch_all(pool)
+        .await?;
+
+        return enrich_messages(pool, messages).await;
+    }
+
     let messages: Vec<MessageWithAuthor> = if let Some(before) = before {
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
@@ -751,10 +772,7 @@ pub async fn save_channel(
 
 /// Delete a channel record.
 /// Fetch channel community_uri by URI (used before deleting, for event emission).
-pub async fn get_channel_community_by_uri(
-    pool: &PgPool,
-    uri: &str,
-) -> Result<Option<String>> {
+pub async fn get_channel_community_by_uri(pool: &PgPool, uri: &str) -> Result<Option<String>> {
     let row: Option<(String,)> =
         sqlx::query_as("SELECT community_uri FROM channels WHERE uri = $1 LIMIT 1")
             .bind(uri)
@@ -1195,7 +1213,10 @@ pub async fn get_sidebar_for_community(
                     .filter_map(|(i, v)| v.as_str().map(|s| (s, i)))
                     .collect();
                 cat_channels.sort_by_key(|ch| {
-                    order_map.get(ch.rkey.as_str()).copied().unwrap_or(usize::MAX)
+                    order_map
+                        .get(ch.rkey.as_str())
+                        .copied()
+                        .unwrap_or(usize::MAX)
                 });
             }
 

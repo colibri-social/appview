@@ -16,7 +16,12 @@ use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
-use models::{author::AuthorProfile, community::{Channel, CommunitiesResponse, CommunityMember, CreateInviteRequest}, message::MessageResponse, reaction::ReactionSummary};
+use models::{
+    author::AuthorProfile,
+    community::{Channel, CommunitiesResponse, CommunityMember, CreateInviteRequest},
+    message::MessageResponse,
+    reaction::ReactionSummary,
+};
 use webrtc::RoomState;
 
 // Source - https://stackoverflow.com/a/64904947
@@ -91,11 +96,12 @@ fn preflight() -> Status {
 /// - `channel` (required)
 /// - `limit`   (optional, default 50, max 100)
 /// - `before`  (optional ISO 8601 timestamp for cursor-based pagination)
-#[get("/api/messages?<channel>&<limit>&<before>")]
+#[get("/api/messages?<channel>&<limit>&<before>&<all>")]
 async fn get_messages(
     channel: &str,
     limit: Option<i64>,
     before: Option<&str>,
+    all: Option<&str>,
     pool: &State<sqlx::PgPool>,
 ) -> Result<Json<Vec<MessageResponse>>, Status> {
     let limit = limit.unwrap_or(50).clamp(1, 100);
@@ -103,7 +109,7 @@ async fn get_messages(
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc));
 
-    db::get_messages(pool, channel, limit, before)
+    db::get_messages(pool, channel, limit, before, all)
         .await
         .map(Json)
         .map_err(|e| {

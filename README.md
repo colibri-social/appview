@@ -4,13 +4,13 @@ An [ATProto](https://atproto.com/) appview for the **Colibri** social platform, 
 
 ## Overview
 
-| Feature | Details |
-|---------|---------|
-| **Jetstream consumer** | Connects to a Colibri Jetstream WebSocket and ingests all Colibri lexicon records into PostgreSQL in real time, with cursor persistence and automatic reconnect. |
-| **Backfill** | On startup, fetches historical records from each known DID's PDS so no data is missed. Triggered again automatically when the appview falls behind. |
+| Feature                  | Details                                                                                                                                                                          |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Jetstream consumer**   | Connects to a Colibri Jetstream WebSocket and ingests all Colibri lexicon records into PostgreSQL in real time, with cursor persistence and automatic reconnect.                 |
+| **Backfill**             | On startup, fetches historical records from each known DID's PDS so no data is missed. Triggered again automatically when the appview falls behind.                              |
 | **Client subscriptions** | Clients connect via WebSocket (`/api/subscribe`) and subscribe to filtered event streams — messages by channel, community events by AT-URI. Easy to extend with new event types. |
-| **WebRTC signaling** | Room-based peer-to-peer voice/video signaling over WebSocket (`/api/webrtc/signal`). |
-| **REST API** | Full set of read endpoints for messages, authors, reactions, communities, channels, categories, members, and invite codes. |
+| **WebRTC signaling**     | Room-based peer-to-peer voice/video signaling over WebSocket (`/api/webrtc/signal`).                                                                                             |
+| **REST API**             | Full set of read endpoints for messages, authors, reactions, communities, channels, categories, members, and invite codes.                                                       |
 
 ---
 
@@ -56,14 +56,14 @@ docker compose -f docker-compose.dev.yml up
 
 ## Environment variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `DATABASE_URL` | ✅ | — | PostgreSQL connection string, e.g. `postgres://user:pass@localhost:5432/colibri` |
-| `INVITE_API_KEY` | ✅ | — | Bearer token required for `POST /api/invite` and `DELETE /api/invite/<code>` |
-| `ROCKET_ADDRESS` | ❌ | `0.0.0.0` | Bind address |
-| `ROCKET_PORT` | ❌ | `8000` | Bind port |
-| `JETSTREAM_URL` | ❌ | `wss://jetstream2.us-east.bsky.network/subscribe?…` | Override Jetstream endpoint (e.g. point at a self-hosted instance) |
-| `RUST_LOG` | ❌ | `colibri_appview=info,rocket=info` | Log filter (`trace`, `debug`, `info`, `warn`, `error`) |
+| Variable         | Required | Default                                             | Description                                                                      |
+| ---------------- | -------- | --------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `DATABASE_URL`   | ✅       | —                                                   | PostgreSQL connection string, e.g. `postgres://user:pass@localhost:5432/colibri` |
+| `INVITE_API_KEY` | ✅       | —                                                   | Bearer token required for `POST /api/invite` and `DELETE /api/invite/<code>`     |
+| `ROCKET_ADDRESS` | ❌       | `0.0.0.0`                                           | Bind address                                                                     |
+| `ROCKET_PORT`    | ❌       | `8000`                                              | Bind port                                                                        |
+| `JETSTREAM_URL`  | ❌       | `wss://jetstream2.us-east.bsky.network/subscribe?…` | Override Jetstream endpoint (e.g. point at a self-hosted instance)               |
+| `RUST_LOG`       | ❌       | `colibri_appview=info,rocket=info`                  | Log filter (`trace`, `debug`, `info`, `warn`, `error`)                           |
 
 ---
 
@@ -77,11 +77,12 @@ All endpoints return JSON. CORS is open (`*`).
 
 Paginated message history for a channel, newest first. Each message includes the author profile.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `channel` | ✅ | Channel rkey |
-| `limit` | ❌ | 1–100, default 50 |
-| `before` | ❌ | ISO 8601 timestamp — returns messages older than this (pagination cursor) |
+| Parameter | Required | Description                                                               |
+| --------- | -------- | ------------------------------------------------------------------------- |
+| `channel` | ✅       | Channel rkey                                                              |
+| `limit`   | ❌       | 1–100, default 50                                                         |
+| `before`  | ❌       | ISO 8601 timestamp — returns messages older than this (pagination cursor) |
+| `all`     | ❌       | Fetch all messages from the channel                                       |
 
 ```bash
 curl "http://localhost:8000/api/messages?channel=general&limit=20"
@@ -93,9 +94,9 @@ curl "http://localhost:8000/api/messages?channel=general&before=2024-03-01T12:00
 Fetch a single message by author and record key.
 
 | Parameter | Required | Description |
-|-----------|----------|-------------|
-| `author` | ✅ | Author DID |
-| `rkey` | ✅ | Record key |
+| --------- | -------- | ----------- |
+| `author`  | ✅       | Author DID  |
+| `rkey`    | ✅       | Record key  |
 
 ```bash
 curl "http://localhost:8000/api/message?author=did:plc:xxx&rkey=3mxxx"
@@ -108,19 +109,20 @@ curl "http://localhost:8000/api/message?author=did:plc:xxx&rkey=3mxxx"
 Retrieve a cached author profile. Falls back to a live ATProto fetch if not yet cached.
 
 | Parameter | Required | Description |
-|-----------|----------|-------------|
-| `did` | ✅ | Author DID |
+| --------- | -------- | ----------- |
+| `did`     | ✅       | Author DID  |
 
 ```bash
 curl "http://localhost:8000/api/authors?did=did:plc:xxx"
 ```
 
 **Response:**
+
 ```json
 {
-  "did": "did:plc:xxx",
-  "display_name": "Alice",
-  "avatar_url": "https://cdn.bsky.app/..."
+	"did": "did:plc:xxx",
+	"display_name": "Alice",
+	"avatar_url": "https://cdn.bsky.app/..."
 }
 ```
 
@@ -130,23 +132,24 @@ curl "http://localhost:8000/api/authors?did=did:plc:xxx"
 
 Reactions for a single message, grouped by emoji with reactor DIDs.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `message` | ✅ | Target message rkey |
+| Parameter | Required | Description         |
+| --------- | -------- | ------------------- |
+| `message` | ✅       | Target message rkey |
 
 #### `GET /api/reactions/channel`
 
 All reactions in a channel, keyed by target message rkey.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `channel` | ✅ | Channel rkey |
+| Parameter | Required | Description  |
+| --------- | -------- | ------------ |
+| `channel` | ✅       | Channel rkey |
 
 **Response:**
+
 ```json
 {
-  "3mxxx": [{ "emoji": "👍", "count": 3, "reactor_dids": ["did:plc:..."] }],
-  "3myyy": [{ "emoji": "❤️", "count": 1, "reactor_dids": ["did:plc:..."] }]
+	"3mxxx": [{ "emoji": "👍", "count": 3, "reactor_dids": ["did:plc:..."] }],
+	"3myyy": [{ "emoji": "❤️", "count": 1, "reactor_dids": ["did:plc:..."] }]
 }
 ```
 
@@ -157,10 +160,11 @@ All reactions in a channel, keyed by target message rkey.
 All communities for a user — both owned and joined — in a single roundtrip.
 
 | Parameter | Required | Description |
-|-----------|----------|-------------|
-| `did` | ✅ | User DID |
+| --------- | -------- | ----------- |
+| `did`     | ✅       | User DID    |
 
 **Response:**
+
 ```json
 {
   "owned": [
@@ -181,9 +185,9 @@ All communities for a user — both owned and joined — in a single roundtrip.
 
 All channels for a community.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `community` | ✅ | Community AT-URI (`at://did:plc:xxx/social.colibri.community/rkey`) |
+| Parameter   | Required | Description                                                         |
+| ----------- | -------- | ------------------------------------------------------------------- |
+| `community` | ✅       | Community AT-URI (`at://did:plc:xxx/social.colibri.community/rkey`) |
 
 **Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`, `community_uri`.
 
@@ -191,28 +195,47 @@ All channels for a community.
 
 Channels and categories combined into a sidebar-ready structure. Categories nest their channels; channels with no category appear under `uncategorized`.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `community` | ✅ | Community AT-URI |
+| Parameter   | Required | Description      |
+| ----------- | -------- | ---------------- |
+| `community` | ✅       | Community AT-URI |
 
 **Response:**
+
 ```json
 {
-  "categories": [
-    {
-      "uri": "at://...",
-      "rkey": "3mxxx",
-      "name": "General",
-      "channel_order": ["3mch1", "3mch2"],
-      "channels": [
-        { "uri": "...", "rkey": "3mch1", "name": "announcements", "channel_type": "text", "category_rkey": "3mxxx" },
-        { "uri": "...", "rkey": "3mch2", "name": "general", "channel_type": "text", "category_rkey": "3mxxx" }
-      ]
-    }
-  ],
-  "uncategorized": [
-    { "uri": "...", "rkey": "...", "name": "off-topic", "channel_type": "text", "category_rkey": null }
-  ]
+	"categories": [
+		{
+			"uri": "at://...",
+			"rkey": "3mxxx",
+			"name": "General",
+			"channel_order": ["3mch1", "3mch2"],
+			"channels": [
+				{
+					"uri": "...",
+					"rkey": "3mch1",
+					"name": "announcements",
+					"channel_type": "text",
+					"category_rkey": "3mxxx"
+				},
+				{
+					"uri": "...",
+					"rkey": "3mch2",
+					"name": "general",
+					"channel_type": "text",
+					"category_rkey": "3mxxx"
+				}
+			]
+		}
+	],
+	"uncategorized": [
+		{
+			"uri": "...",
+			"rkey": "...",
+			"name": "off-topic",
+			"channel_type": "text",
+			"category_rkey": null
+		}
+	]
 }
 ```
 
@@ -220,16 +243,32 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 
 All members of a community, enriched with cached profile data. The owner is always included with `status: "owner"`.
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `community` | ✅ | Community AT-URI |
+| Parameter   | Required | Description      |
+| ----------- | -------- | ---------------- |
+| `community` | ✅       | Community AT-URI |
 
 **Response:**
+
 ```json
 [
-  { "member_did": "did:plc:xxx", "status": "owner", "display_name": "Alice", "avatar_url": "..." },
-  { "member_did": "did:plc:yyy", "status": "approved", "display_name": "Bob", "avatar_url": null },
-  { "member_did": "did:plc:zzz", "status": "pending", "display_name": null, "avatar_url": null }
+	{
+		"member_did": "did:plc:xxx",
+		"status": "owner",
+		"display_name": "Alice",
+		"avatar_url": "..."
+	},
+	{
+		"member_did": "did:plc:yyy",
+		"status": "approved",
+		"display_name": "Bob",
+		"avatar_url": null
+	},
+	{
+		"member_did": "did:plc:zzz",
+		"status": "pending",
+		"display_name": null,
+		"avatar_url": null
+	}
 ]
 ```
 
@@ -240,6 +279,7 @@ All members of a community, enriched with cached profile data. The owner is alwa
 Look up an invite code and return the associated community.
 
 **Response:**
+
 ```json
 {
   "code": "abc123",
@@ -257,9 +297,11 @@ Look up an invite code and return the associated community.
 Create a new invite code. Requires `Authorization: Bearer <INVITE_API_KEY>`.
 
 **Body:**
+
 ```json
 { "community_uri": "at://...", "owner_did": "did:plc:xxx", "max_uses": 10 }
 ```
+
 `max_uses` may be `null` for unlimited.
 
 **Response:** `{ "code": "abc123" }`
@@ -303,44 +345,54 @@ Multiple subscriptions are cumulative. You can subscribe to several channels and
 Delivered to clients subscribed to the matching channel.
 
 #### `message`
+
 A new message was posted (or an existing one updated). Includes full author profile.
 
 ```json
 {
-  "type": "message",
-  "message": {
-    "id": "uuid",
-    "rkey": "3mxxx",
-    "author_did": "did:plc:xxx",
-    "text": "Hello!",
-    "channel": "general",
-    "created_at": "2024-03-01T12:00:00Z",
-    "indexed_at": "2024-03-01T12:00:01Z"
-  },
-  "author": { "did": "...", "display_name": "Alice", "avatar_url": "..." },
-  "parent": null
+	"type": "message",
+	"message": {
+		"id": "uuid",
+		"rkey": "3mxxx",
+		"author_did": "did:plc:xxx",
+		"text": "Hello!",
+		"channel": "general",
+		"created_at": "2024-03-01T12:00:00Z",
+		"indexed_at": "2024-03-01T12:00:01Z"
+	},
+	"author": { "did": "...", "display_name": "Alice", "avatar_url": "..." },
+	"parent": null
 }
 ```
 
 #### `message_deleted`
+
 ```json
-{ "type": "message_deleted", "id": "uuid", "rkey": "3mxxx", "author_did": "did:plc:xxx", "channel": "general" }
+{
+	"type": "message_deleted",
+	"id": "uuid",
+	"rkey": "3mxxx",
+	"author_did": "did:plc:xxx",
+	"channel": "general"
+}
 ```
 
 #### `reaction_added`
+
 ```json
 {
-  "type": "reaction_added",
-  "rkey": "3mxxx",
-  "author_did": "did:plc:xxx",
-  "emoji": "👍",
-  "target_rkey": "3myyy",
-  "target_author_did": "did:plc:yyy",
-  "channel": "general"
+	"type": "reaction_added",
+	"rkey": "3mxxx",
+	"author_did": "did:plc:xxx",
+	"emoji": "👍",
+	"target_rkey": "3myyy",
+	"target_author_did": "did:plc:yyy",
+	"channel": "general"
 }
 ```
 
 #### `reaction_removed`
+
 Same shape as `reaction_added`.
 
 ---
@@ -350,7 +402,9 @@ Same shape as `reaction_added`.
 Delivered to clients subscribed to the matching `community_uri`. Subscribe to a community to receive all of the following.
 
 #### `community_upserted`
+
 A community was created or its metadata updated.
+
 ```json
 {
   "type": "community_upserted",
@@ -365,64 +419,106 @@ A community was created or its metadata updated.
 ```
 
 #### `community_deleted`
+
 ```json
-{ "type": "community_deleted", "community_uri": "at://...", "owner_did": "did:plc:xxx", "rkey": "3mxxx" }
+{
+	"type": "community_deleted",
+	"community_uri": "at://...",
+	"owner_did": "did:plc:xxx",
+	"rkey": "3mxxx"
+}
 ```
 
 #### `channel_created`
+
 A channel was created or updated.
+
 ```json
 {
-  "type": "channel_created",
-  "community_uri": "at://...",
-  "uri": "at://did:plc:xxx/social.colibri.channel/3mxxx",
-  "rkey": "3mxxx",
-  "name": "announcements",
-  "description": "Important announcements",
-  "channel_type": "text",
-  "category_rkey": "3mcat"
+	"type": "channel_created",
+	"community_uri": "at://...",
+	"uri": "at://did:plc:xxx/social.colibri.channel/3mxxx",
+	"rkey": "3mxxx",
+	"name": "announcements",
+	"description": "Important announcements",
+	"channel_type": "text",
+	"category_rkey": "3mcat"
 }
 ```
 
 #### `channel_deleted`
+
 ```json
-{ "type": "channel_deleted", "community_uri": "at://...", "uri": "at://...", "rkey": "3mxxx" }
+{
+	"type": "channel_deleted",
+	"community_uri": "at://...",
+	"uri": "at://...",
+	"rkey": "3mxxx"
+}
 ```
 
 #### `category_created`
+
 A category was created or updated.
+
 ```json
 {
-  "type": "category_created",
-  "community_uri": "at://...",
-  "uri": "at://did:plc:xxx/social.colibri.category/3mxxx",
-  "rkey": "3mxxx",
-  "name": "General",
-  "channel_order": ["3mch1", "3mch2"]
+	"type": "category_created",
+	"community_uri": "at://...",
+	"uri": "at://did:plc:xxx/social.colibri.category/3mxxx",
+	"rkey": "3mxxx",
+	"name": "General",
+	"channel_order": ["3mch1", "3mch2"]
 }
 ```
 
 #### `category_deleted`
+
 ```json
-{ "type": "category_deleted", "community_uri": "at://...", "uri": "at://...", "rkey": "3mxxx" }
+{
+	"type": "category_deleted",
+	"community_uri": "at://...",
+	"uri": "at://...",
+	"rkey": "3mxxx"
+}
 ```
 
 #### `member_pending`
+
 A user requested to join (membership record created, awaiting approval).
+
 ```json
-{ "type": "member_pending", "community_uri": "at://...", "member_did": "did:plc:yyy", "membership_uri": "at://..." }
+{
+	"type": "member_pending",
+	"community_uri": "at://...",
+	"member_did": "did:plc:yyy",
+	"membership_uri": "at://..."
+}
 ```
 
 #### `member_joined`
+
 A user was approved and is now a full member.
+
 ```json
-{ "type": "member_joined", "community_uri": "at://...", "member_did": "did:plc:yyy", "membership_uri": "at://..." }
+{
+	"type": "member_joined",
+	"community_uri": "at://...",
+	"member_did": "did:plc:yyy",
+	"membership_uri": "at://..."
+}
 ```
 
 #### `member_left`
+
 A membership record was deleted (user left or was removed).
+
 ```json
-{ "type": "member_left", "community_uri": "at://...", "member_did": "did:plc:yyy" }
+{
+	"type": "member_left",
+	"community_uri": "at://...",
+	"member_did": "did:plc:yyy"
+}
 ```
 
 ---
@@ -454,16 +550,16 @@ The server notifies all room members when a peer joins or leaves.
 
 ## ATProto lexicons consumed
 
-| Collection | Description |
-|------------|-------------|
-| `social.colibri.message` | Chat messages (`text`, `channel`, `createdAt`, optional `parent`, `facets`) |
-| `social.colibri.reaction` | Emoji reactions (`emoji`, `targetMessage` record-key) |
-| `social.colibri.community` | Community records (`name`, `description`, `picture` blob, `categoryOrder`) |
-| `social.colibri.channel` | Channel records (`name`, `description`, `type`, `community` rkey, `category` rkey) |
-| `social.colibri.category` | Category records (`name`, `channelOrder`, `community` rkey) |
-| `social.colibri.membership` | Membership requests (`community` AT-URI) |
-| `social.colibri.approval` | Owner approvals (`membership` AT-URI, `community` AT-URI) |
-| `app.bsky.actor.profile` | Bluesky profiles — watched for display name / avatar updates |
+| Collection                  | Description                                                                        |
+| --------------------------- | ---------------------------------------------------------------------------------- |
+| `social.colibri.message`    | Chat messages (`text`, `channel`, `createdAt`, optional `parent`, `facets`)        |
+| `social.colibri.reaction`   | Emoji reactions (`emoji`, `targetMessage` record-key)                              |
+| `social.colibri.community`  | Community records (`name`, `description`, `picture` blob, `categoryOrder`)         |
+| `social.colibri.channel`    | Channel records (`name`, `description`, `type`, `community` rkey, `category` rkey) |
+| `social.colibri.category`   | Category records (`name`, `channelOrder`, `community` rkey)                        |
+| `social.colibri.membership` | Membership requests (`community` AT-URI)                                           |
+| `social.colibri.approval`   | Owner approvals (`membership` AT-URI, `community` AT-URI)                          |
+| `app.bsky.actor.profile`    | Bluesky profiles — watched for display name / avatar updates                       |
 
 ---
 
