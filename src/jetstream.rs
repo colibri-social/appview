@@ -61,6 +61,9 @@ struct ColibriMessage {
 #[serde(rename_all = "camelCase")]
 struct ColibriReaction {
     emoji: String,
+    // The target field was `parent` in early records and `targetMessage` in the lexicon.
+    // Accept both by using aliases.
+    #[serde(alias = "parent")]
     target_message: String,
 }
 

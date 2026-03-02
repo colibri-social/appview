@@ -259,9 +259,9 @@ pub async fn list_reaction_records(
         .filter_map(|entry| {
             let rkey = entry.uri.rsplit('/').next()?.to_string();
             let val = entry.value?;
-            // Reactions use emoji + targetMessage (record-key of the target message).
+            // Reactions use emoji + targetMessage, but older records used `parent`.
             let emoji = val.emoji?;
-            let target_rkey = val.target_message?;
+            let target_rkey = val.target_message.or(val.parent)?;
             if target_rkey.is_empty() {
                 return None;
             }
