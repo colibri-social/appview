@@ -22,14 +22,15 @@ pub async fn save_message(
     channel: &str,
     parent: Option<&str>,
     facets: Option<&serde_json::Value>,
+    attachments: Option<&serde_json::Value>,
     created_at: DateTime<Utc>,
 ) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
-        INSERT INTO messages (rkey, author_did, text, channel, parent, facets, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO messages (rkey, author_did, text, channel, parent, facets, attachments, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (author_did, rkey) DO NOTHING
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets, attachments
         "#,
     )
     .bind(rkey)
@@ -38,6 +39,7 @@ pub async fn save_message(
     .bind(channel)
     .bind(parent)
     .bind(facets.map(|f| sqlx::types::Json(f)))
+    .bind(attachments.map(|a| sqlx::types::Json(a)))
     .bind(created_at)
     .fetch_optional(pool)
     .await?;
@@ -54,19 +56,21 @@ pub async fn update_message(
     channel: &str,
     parent: Option<&str>,
     facets: Option<&serde_json::Value>,
+    attachments: Option<&serde_json::Value>,
 ) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
         UPDATE messages
-        SET text = $1, channel = $2, parent = $3, facets = $4, edited = TRUE
-        WHERE author_did = $5 AND rkey = $6
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets
+        SET text = $1, channel = $2, parent = $3, facets = $4, attachments = $5, edited = TRUE
+        WHERE author_did = $6 AND rkey = $7
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets, attachments
         "#,
     )
     .bind(text)
     .bind(channel)
     .bind(parent)
     .bind(facets.map(|f| sqlx::types::Json(f)))
+    .bind(attachments.map(|a| sqlx::types::Json(a)))
     .bind(author_did)
     .bind(rkey)
     .fetch_optional(pool)
@@ -85,7 +89,7 @@ pub async fn delete_message(
         r#"
         DELETE FROM messages
         WHERE author_did = $1 AND rkey = $2
-        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets, attachments
         "#,
     )
     .bind(author_did)
@@ -109,7 +113,7 @@ pub async fn get_messages(
         let messages: Vec<MessageWithAuthor> = sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -128,7 +132,7 @@ pub async fn get_messages(
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -146,7 +150,7 @@ pub async fn get_messages(
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -169,7 +173,7 @@ pub async fn get_message_by_rkey(pool: &PgPool, rkey: &str) -> Result<Option<Mes
     let msg = sqlx::query_as::<_, MessageWithAuthor>(
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-               m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+               m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
                a.display_name, a.avatar_url
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -193,7 +197,7 @@ pub async fn get_message_by_author_and_rkey(
     let msg = sqlx::query_as::<_, MessageWithAuthor>(
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-               m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+               m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
                a.display_name, a.avatar_url
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
@@ -255,7 +259,7 @@ pub async fn enrich_messages(
         sqlx::query_as::<_, MessageWithAuthor>(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
-                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets,
+                   m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did

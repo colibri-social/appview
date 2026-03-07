@@ -55,6 +55,8 @@ struct ColibriMessage {
     parent: Option<String>,
     #[serde(default)]
     facets: Option<serde_json::Value>,
+    #[serde(default)]
+    attachments: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +338,7 @@ async fn handle_message(
                 &record.channel,
                 record.parent.as_deref(),
                 record.facets.as_ref(),
+                record.attachments.as_ref(),
                 created_at,
             )
             .await
@@ -398,6 +401,7 @@ async fn handle_message(
                 &record.channel,
                 record.parent.as_deref(),
                 record.facets.as_ref(),
+                record.attachments.as_ref(),
             )
             .await
             {
@@ -589,7 +593,12 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
 
 // ── Community handler ─────────────────────────────────────────────────────────
 
-async fn handle_community(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+async fn handle_community(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
     let uri = format!("at://{}/social.colibri.community/{}", did, commit.rkey);
     match commit.operation.as_str() {
         "create" | "update" => {
@@ -649,7 +658,12 @@ async fn handle_community(commit: CommitData, did: &str, pool: &PgPool, bus: &Ev
 
 // ── Channel handler ───────────────────────────────────────────────────────────
 
-async fn handle_channel(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+async fn handle_channel(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
     let uri = format!("at://{}/social.colibri.channel/{}", did, commit.rkey);
     match commit.operation.as_str() {
         "create" | "update" => {
@@ -663,10 +677,8 @@ async fn handle_channel(commit: CommitData, did: &str, pool: &PgPool, bus: &Even
                     return Ok(());
                 }
             };
-            let community_uri = format!(
-                "at://{}/social.colibri.community/{}",
-                did, record.community
-            );
+            let community_uri =
+                format!("at://{}/social.colibri.community/{}", did, record.community);
             if let Err(e) = db::save_channel(
                 pool,
                 &uri,
@@ -721,7 +733,12 @@ async fn handle_channel(commit: CommitData, did: &str, pool: &PgPool, bus: &Even
 
 // ── Category handler ──────────────────────────────────────────────────────────
 
-async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+async fn handle_category(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
     let uri = format!("at://{}/social.colibri.category/{}", did, commit.rkey);
     match commit.operation.as_str() {
         "create" | "update" => {
@@ -735,15 +752,17 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
                     return Ok(());
                 }
             };
-            let community_uri = format!(
-                "at://{}/social.colibri.community/{}",
-                did, record.community
-            );
+            let community_uri =
+                format!("at://{}/social.colibri.community/{}", did, record.community);
             // Convert Vec<String> channelOrder into a serde_json::Value array for storage.
-            let channel_order_json: Option<serde_json::Value> = record
-                .channel_order
-                .as_ref()
-                .map(|v| serde_json::Value::Array(v.iter().map(|s| serde_json::Value::String(s.clone())).collect()));
+            let channel_order_json: Option<serde_json::Value> =
+                record.channel_order.as_ref().map(|v| {
+                    serde_json::Value::Array(
+                        v.iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    )
+                });
 
             if let Err(e) = db::save_category(
                 pool,
@@ -771,14 +790,13 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
         "delete" => {
             info!(did, rkey = %commit.rkey, "Category: received delete event");
             // Look up community_uri before deleting.
-            let community_uri: Option<String> = sqlx::query_scalar(
-                "SELECT community_uri FROM categories WHERE uri = $1"
-            )
-            .bind(&uri)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+            let community_uri: Option<String> =
+                sqlx::query_scalar("SELECT community_uri FROM categories WHERE uri = $1")
+                    .bind(&uri)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten();
 
             if let Err(e) = db::delete_category(pool, &uri).await {
                 error!(did, rkey = %commit.rkey, "DB error deleting category: {e}");
@@ -800,7 +818,12 @@ async fn handle_category(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
 
 // ── Membership handler ────────────────────────────────────────────────────────
 
-async fn handle_membership(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+async fn handle_membership(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
     let membership_uri = format!("at://{}/social.colibri.membership/{}", did, commit.rkey);
     match commit.operation.as_str() {
         "create" => {
@@ -814,14 +837,9 @@ async fn handle_membership(commit: CommitData, did: &str, pool: &PgPool, bus: &E
                     return Ok(());
                 }
             };
-            if let Err(e) = db::save_membership(
-                pool,
-                &membership_uri,
-                &record.community,
-                did,
-                &commit.rkey,
-            )
-            .await
+            if let Err(e) =
+                db::save_membership(pool, &membership_uri, &record.community, did, &commit.rkey)
+                    .await
             {
                 error!(did, rkey = %commit.rkey, "DB error saving membership: {e}");
             } else {
@@ -835,13 +853,19 @@ async fn handle_membership(commit: CommitData, did: &str, pool: &PgPool, bus: &E
         }
         "delete" => {
             // Look up community_uri before deleting.
-            let info = db::get_membership_info(pool, &membership_uri).await.ok().flatten();
+            let info = db::get_membership_info(pool, &membership_uri)
+                .await
+                .ok()
+                .flatten();
             if let Err(e) = db::delete_membership(pool, &membership_uri).await {
                 error!(did, rkey = %commit.rkey, "DB error deleting membership: {e}");
             } else {
                 info!(did, rkey = %commit.rkey, "Membership deleted");
                 if let Some((community_uri, member_did)) = info {
-                    let _ = bus.send(AppEvent::MemberLeft { community_uri, member_did });
+                    let _ = bus.send(AppEvent::MemberLeft {
+                        community_uri,
+                        member_did,
+                    });
                 }
             }
         }
@@ -852,7 +876,12 @@ async fn handle_membership(commit: CommitData, did: &str, pool: &PgPool, bus: &E
 
 // ── Approval handler ──────────────────────────────────────────────────────────
 
-async fn handle_approval(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+async fn handle_approval(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
     let approval_uri = format!("at://{}/social.colibri.approval/{}", did, commit.rkey);
     match commit.operation.as_str() {
         "create" => {
@@ -885,7 +914,10 @@ async fn handle_approval(commit: CommitData, did: &str, pool: &PgPool, bus: &Eve
             }
         }
         "delete" => {
-            let info = db::get_membership_info_by_approval(pool, &approval_uri).await.ok().flatten();
+            let info = db::get_membership_info_by_approval(pool, &approval_uri)
+                .await
+                .ok()
+                .flatten();
             if let Err(e) = db::delete_approval(pool, &approval_uri).await {
                 error!(did, rkey = %commit.rkey, "DB error deleting approval: {e}");
             } else {

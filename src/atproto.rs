@@ -16,6 +16,7 @@ pub struct RawRecord {
     pub channel: String,
     pub parent: Option<String>,
     pub facets: Option<serde_json::Value>,
+    pub attachments: Option<serde_json::Value>,
 }
 
 pub struct RawReaction {
@@ -100,6 +101,8 @@ struct ColibriRecord {
     parent: Option<String>,
     #[serde(default)]
     facets: Option<serde_json::Value>,
+    #[serde(default)]
+    attachments: Option<serde_json::Value>,
     // social.colibri.reaction fields
     emoji: Option<String>,
     /// targetMessage rkey (reaction target — lexicon field name is `targetMessage`).
@@ -218,6 +221,7 @@ pub async fn list_message_records(
                 channel: val.channel?,
                 parent: val.parent,
                 facets: val.facets,
+                attachments: val.attachments,
             })
         })
         .collect();

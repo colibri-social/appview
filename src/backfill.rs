@@ -123,6 +123,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     &record.channel,
                     record.parent.as_deref(),
                     record.facets.as_ref(),
+                    record.attachments.as_ref(),
                     created_at,
                 )
                 .await
@@ -402,6 +403,7 @@ async fn backfill_messages(
                 &record.channel,
                 record.parent.as_deref(),
                 record.facets.as_ref(),
+                record.attachments.as_ref(),
                 created_at,
             )
             .await
