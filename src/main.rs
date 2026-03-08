@@ -12,7 +12,7 @@ mod webrtc;
 mod ws_handler;
 
 use chrono::{DateTime, Utc};
-use rocket::{fairing::AdHoc, http::Status, serde::json::Json, State};
+use rocket::{fairing::AdHoc, http::Status, response::Redirect, serde::json::Json, State};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
@@ -336,6 +336,28 @@ async fn revoke_invite(
     }
 }
 
+/// Resolve a blob by DID and CID, redirecting to the author's PDS.
+///
+/// Query params: `did` (required), `cid` (required — the `$link` value from the blob ref)
+#[get("/api/blob?<did>&<cid>")]
+async fn get_blob(did: &str, cid: &str, http: &State<reqwest::Client>) -> Result<Redirect, Status> {
+    match atproto::resolve_pds(http, did).await {
+        Ok(pds_url) => {
+            let url = format!(
+                "{}/xrpc/com.atproto.sync.getBlob?did={}&cid={}",
+                pds_url.trim_end_matches('/'),
+                did,
+                cid
+            );
+            Ok(Redirect::to(url))
+        }
+        Err(e) => {
+            error!(did, cid, "Failed to resolve PDS for blob: {e}");
+            Err(Status::NotFound)
+        }
+    }
+}
+
 #[launch]
 fn rocket() -> _ {
     let _ = dotenvy::dotenv();
@@ -392,6 +414,7 @@ fn rocket() -> _ {
                 get_invite,
                 create_invite,
                 revoke_invite,
+                get_blob,
                 ws_handler::subscribe,
                 webrtc::signal,
                 preflight
