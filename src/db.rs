@@ -865,6 +865,25 @@ pub async fn save_membership(
     .bind(membership_uri)
     .execute(pool)
     .await?;
+
+    // Drain any staged approval that arrived before this membership row existed.
+    sqlx::query(
+        r#"
+        WITH staged AS (
+            DELETE FROM pending_approvals WHERE membership_uri = $1 RETURNING approval_uri, approval_rkey
+        )
+        UPDATE community_members
+           SET approval_uri  = staged.approval_uri,
+               approval_rkey = staged.approval_rkey,
+               status        = 'approved'
+          FROM staged
+         WHERE community_members.membership_uri = $1
+        "#,
+    )
+    .bind(membership_uri)
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
@@ -912,7 +931,7 @@ pub async fn save_approval(
     membership_uri: &str,
     approval_rkey: &str,
 ) -> Result<()> {
-    sqlx::query(
+    let rows = sqlx::query(
         r#"
         UPDATE community_members
            SET approval_uri  = $1,
@@ -925,7 +944,26 @@ pub async fn save_approval(
     .bind(approval_rkey)
     .bind(membership_uri)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+
+    // Membership row doesn't exist yet — stage the approval so save_membership
+    // can pick it up when the membership record arrives.
+    if rows == 0 {
+        sqlx::query(
+            r#"
+            INSERT INTO pending_approvals (approval_uri, membership_uri, approval_rkey)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (approval_uri) DO NOTHING
+            "#,
+        )
+        .bind(approval_uri)
+        .bind(membership_uri)
+        .bind(approval_rkey)
+        .execute(pool)
+        .await?;
+    }
+
     Ok(())
 }
 
