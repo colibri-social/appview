@@ -59,7 +59,7 @@ docker compose -f docker-compose.dev.yml up
 | Variable         | Required | Default                                             | Description                                                                      |
 | ---------------- | -------- | --------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `DATABASE_URL`   | ✅       | —                                                   | PostgreSQL connection string, e.g. `postgres://user:pass@localhost:5432/colibri` |
-| `INVITE_API_KEY` | ✅       | —                                                   | Bearer token required for `POST /api/invite` and `DELETE /api/invite/<code>`     |
+| `INVITE_API_KEY` | ✅       | —                                                   | Bearer token required for `POST /api/invite`, `DELETE /api/invite/<code>`, and `GET /api/invites`     |
 | `ROCKET_ADDRESS` | ❌       | `0.0.0.0`                                           | Bind address                                                                     |
 | `ROCKET_PORT`    | ❌       | `8000`                                              | Bind port                                                                        |
 | `JETSTREAM_URL`  | ❌       | `wss://jetstream2.us-east.bsky.network/subscribe?…` | Override Jetstream endpoint (e.g. point at a self-hosted instance)               |
@@ -274,6 +274,29 @@ All members of a community, enriched with cached profile data. The owner is alwa
 
 ### Invite codes
 
+#### `GET /api/invites` 🔒
+
+Return all invite codes for a community, newest first. Requires `Authorization: Bearer <INVITE_API_KEY>`.
+
+| Parameter   | Required | Description      |
+| ----------- | -------- | ---------------- |
+| `community` | ✅       | Community AT-URI |
+
+**Response:**
+
+```json
+[
+  {
+    "code": "abc123",
+    "community_uri": "at://...",
+    "created_by_did": "did:plc:xxx",
+    "max_uses": 10,
+    "use_count": 3,
+    "active": true
+  }
+]
+```
+
 #### `GET /api/invite/<code>`
 
 Look up an invite code and return the associated community.
@@ -311,6 +334,25 @@ Create a new invite code. Requires `Authorization: Bearer <INVITE_API_KEY>`.
 Revoke (deactivate) an invite code. Requires `Authorization: Bearer <INVITE_API_KEY>`.
 
 Returns `204 No Content` on success, `403 Forbidden` if the `owner_did` doesn't match.
+
+### Blobs
+
+#### `GET /api/blob`
+
+Proxy a blob from the author's PDS. Resolves the DID to its PDS endpoint and forwards the request, relaying `Range`, `Content-Type`, `Content-Range`, `Content-Length`, and `Accept-Ranges` headers transparently. Returns `206 Partial Content` when a `Range` header is sent.
+
+| Parameter | Required | Description                                          |
+| --------- | -------- | ---------------------------------------------------- |
+| `did`     | ✅       | Author DID                                           |
+| `cid`     | ✅       | Blob CID — the `$link` value from the ATProto blob ref |
+
+```bash
+curl "http://localhost:8000/api/blob?did=did:plc:xxx&cid=bafkrei..."
+# Partial content / streaming
+curl -H "Range: bytes=0-1023" "http://localhost:8000/api/blob?did=did:plc:xxx&cid=bafkrei..."
+```
+
+Returns `404` if the DID cannot be resolved, `502` if the PDS request fails.
 
 ---
 

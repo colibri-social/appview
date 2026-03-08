@@ -1107,6 +1107,26 @@ pub async fn revoke_invite_code(pool: &PgPool, code: &str, owner_did: &str) -> R
     Ok(rows_affected > 0)
 }
 
+/// Return all invite codes for a community, ordered newest first.
+pub async fn get_invite_codes_for_community(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<InviteCodeInfo>> {
+    let codes = sqlx::query_as::<_, InviteCodeInfo>(
+        r#"
+        SELECT code, community_uri, created_by_did, max_uses, use_count, active
+        FROM invite_codes
+        WHERE community_uri = $1
+        ORDER BY created_at DESC
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(codes)
+}
+
 /// Increment the use counter for a code and return whether it is still usable.
 /// Returns false if the code is inactive or has hit max_uses.
 pub async fn use_invite_code(pool: &PgPool, code: &str) -> Result<bool> {

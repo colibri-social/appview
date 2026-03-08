@@ -25,7 +25,7 @@ use tracing::error;
 
 use models::{
     author::AuthorProfile,
-    community::{Channel, CommunitiesResponse, CommunityMember, CreateInviteRequest},
+    community::{Channel, CommunitiesResponse, CommunityMember, CreateInviteRequest, InviteCodeInfo},
     message::MessageResponse,
     reaction::ReactionSummary,
 };
@@ -466,6 +466,24 @@ impl<'r> Responder<'r, 'static> for BlobResponse {
     }
 }
 
+/// Return all invite codes for a community.
+///
+/// Query param: `community` (required) — the full AT-URI of the community
+#[get("/api/invites?<community>")]
+async fn list_invites(
+    _key: ApiKey,
+    community: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Vec<InviteCodeInfo>>, Status> {
+    db::get_invite_codes_for_community(pool, community)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("list_invites error: {e}");
+            Status::InternalServerError
+        })
+}
+
 #[launch]
 fn rocket() -> _ {
     let _ = dotenvy::dotenv();
@@ -522,6 +540,7 @@ fn rocket() -> _ {
                 get_invite,
                 create_invite,
                 revoke_invite,
+                list_invites,
                 get_blob,
                 ws_handler::subscribe,
                 webrtc::signal,
