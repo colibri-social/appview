@@ -73,10 +73,6 @@ impl<'r> rocket::request::FromRequest<'r> for ApiKey {
     type Error = ();
 
     async fn from_request(req: &'r Request<'_>) -> rocket::request::Outcome<Self, Self::Error> {
-        dbg!(format!(
-            "API KEY: {}",
-            std::env::var("INVITE_API_KEY").unwrap_or(String::from(""))
-        ));
         let expected = match std::env::var("INVITE_API_KEY") {
             Ok(k) if !k.is_empty() => k,
             _ => {
