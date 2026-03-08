@@ -559,6 +559,8 @@ pub async fn get_next_backfill_item(pool: &PgPool) -> Result<Option<(String, Str
             SELECT owner_did  AS did FROM communities
             UNION
             SELECT did        AS did FROM author_profiles
+            UNION
+            SELECT member_did AS did FROM community_members
         ) AS known
         CROSS JOIN (
             VALUES ('social.colibri.message'),
@@ -681,6 +683,8 @@ pub async fn get_all_known_dids(pool: &PgPool) -> Result<Vec<String>> {
             SELECT owner_did  AS did FROM communities
             UNION
             SELECT did        AS did FROM author_profiles
+            UNION
+            SELECT member_did AS did FROM community_members
         ) AS known
         ORDER BY did
         "#,

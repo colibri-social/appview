@@ -297,7 +297,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         if let Ok((records, _)) =
             atproto::list_approval_records(http, &pds_url, did, None).await
         {
-            for record in records {
+            for record in &records {
                 match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey)
                     .await
                 {
@@ -306,6 +306,46 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         total_inserted += 1;
                     }
                     Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error approval: {e}"),
+                }
+            }
+
+            // For each approval, ensure the referenced member's membership records
+            // are also fetched — they may not be known through any other path.
+            for record in records {
+                let member_did = match record
+                    .membership_uri
+                    .strip_prefix("at://")
+                    .and_then(|s| s.split('/').next())
+                {
+                    Some(d) if d != did => d.to_string(),
+                    _ => continue,
+                };
+
+                let member_pds = match atproto::resolve_pds(http, &member_did).await {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!(member_did, "Backfill/sweep: cannot resolve member PDS: {e}");
+                        continue;
+                    }
+                };
+
+                if let Ok((mem_records, _)) =
+                    atproto::list_membership_records(http, &member_pds, &member_did, None).await
+                {
+                    for mem_record in mem_records {
+                        match db::save_membership(
+                            pool,
+                            &mem_record.uri,
+                            &mem_record.community_uri,
+                            &member_did,
+                            &mem_record.rkey,
+                        )
+                        .await
+                        {
+                            Ok(_) => debug!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: member membership upserted"),
+                            Err(e) => error!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: DB error member membership: {e}"),
+                        }
+                    }
                 }
             }
         }
@@ -787,6 +827,9 @@ async fn backfill_approvals(
     let mut cursor = db::get_backfill_cursor(pool, did, collection).await?;
     let mut total: usize = 0;
     let mut page: usize = 0;
+    // Collect member DIDs encountered so we can fetch their membership records
+    // if they are not yet known (i.e. have never sent a message / created a community).
+    let mut member_dids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     loop {
         page += 1;
@@ -798,6 +841,16 @@ async fn backfill_approvals(
         debug!(did, page, count = page_count, "Backfill: processing approval records");
 
         for record in records {
+            // Extract the member DID from the membership AT-URI:
+            // at://did/social.colibri.membership/rkey
+            if let Some(member_did) = record
+                .membership_uri
+                .strip_prefix("at://")
+                .and_then(|s| s.split('/').next())
+            {
+                member_dids.insert(member_did.to_string());
+            }
+
             match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey).await
             {
                 Ok(_) => {
@@ -820,6 +873,40 @@ async fn backfill_approvals(
                 db::mark_backfill_complete(pool, did, collection).await?;
                 info!(did, total, pages = page, "Backfill: approvals complete");
                 break;
+            }
+        }
+    }
+
+    // For each member DID discovered via approvals, ensure their membership
+    // records are fetched even if they have never been seen in any other context.
+    for member_did in member_dids {
+        let member_pds = match atproto::resolve_pds(http, &member_did).await {
+            Ok(u) => u,
+            Err(e) => {
+                warn!(member_did, "Backfill: cannot resolve member PDS: {e}");
+                continue;
+            }
+        };
+        if let Ok((records, _)) =
+            atproto::list_membership_records(http, &member_pds, &member_did, None).await
+        {
+            for record in records {
+                let membership_uri = format!(
+                    "at://{}/social.colibri.membership/{}",
+                    member_did, record.rkey
+                );
+                match db::save_membership(
+                    pool,
+                    &membership_uri,
+                    &record.community_uri,
+                    &member_did,
+                    &record.rkey,
+                )
+                .await
+                {
+                    Ok(_) => debug!(member_did, rkey = %record.rkey, "Backfill: member membership upserted"),
+                    Err(e) => error!(member_did, rkey = %record.rkey, "Backfill: DB error saving member membership: {e}"),
+                }
             }
         }
     }
