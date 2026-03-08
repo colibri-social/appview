@@ -12,7 +12,14 @@ mod webrtc;
 mod ws_handler;
 
 use chrono::{DateTime, Utc};
-use rocket::{fairing::AdHoc, http::Status, response::Redirect, serde::json::Json, State};
+use rocket::{
+    fairing::AdHoc,
+    http::Status,
+    request::{self, FromRequest},
+    response::{self, Responder, Response as RocketResponse},
+    serde::json::Json,
+    State,
+};
 use sqlx::postgres::PgPoolOptions;
 use tracing::error;
 
@@ -336,25 +343,126 @@ async fn revoke_invite(
     }
 }
 
-/// Resolve a blob by DID and CID, redirecting to the author's PDS.
+/// Request guard that extracts the `Range` header value, if present.
+struct RangeHeader(Option<String>);
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for RangeHeader {
+    type Error = ();
+    async fn from_request(req: &'r Request<'_>) -> request::Outcome<Self, Self::Error> {
+        let val = req.headers().get_one("Range").map(|s| s.to_string());
+        request::Outcome::Success(RangeHeader(val))
+    }
+}
+
+/// Resolve and proxy a blob by DID and CID from the author's PDS.
+/// Forwards the `Range` header and relays `Content-Type`, `Content-Range`,
+/// `Content-Length`, and `Accept-Ranges` back to the client.
 ///
 /// Query params: `did` (required), `cid` (required — the `$link` value from the blob ref)
 #[get("/api/blob?<did>&<cid>")]
-async fn get_blob(did: &str, cid: &str, http: &State<reqwest::Client>) -> Result<Redirect, Status> {
-    match atproto::resolve_pds(http, did).await {
-        Ok(pds_url) => {
-            let url = format!(
-                "{}/xrpc/com.atproto.sync.getBlob?did={}&cid={}",
-                pds_url.trim_end_matches('/'),
-                did,
-                cid
-            );
-            Ok(Redirect::to(url))
-        }
+async fn get_blob<'r>(
+    did: &'r str,
+    cid: &'r str,
+    http: &'r State<reqwest::Client>,
+    range: RangeHeader,
+) -> Result<BlobResponse, Status> {
+    let pds_url = match atproto::resolve_pds(http, did).await {
+        Ok(u) => u,
         Err(e) => {
             error!(did, cid, "Failed to resolve PDS for blob: {e}");
-            Err(Status::NotFound)
+            return Err(Status::NotFound);
         }
+    };
+
+    let url = format!(
+        "{}/xrpc/com.atproto.sync.getBlob?did={}&cid={}",
+        pds_url.trim_end_matches('/'),
+        did,
+        cid
+    );
+
+    let mut req = http.get(&url);
+    if let Some(range_val) = range.0 {
+        req = req.header("Range", range_val);
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            error!(did, cid, "Failed to fetch blob from PDS: {e}");
+            return Err(Status::new(502));
+        }
+    };
+
+    let status = Status::from_code(resp.status().as_u16()).unwrap_or(Status::InternalServerError);
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let content_range = resp
+        .headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let content_length = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let accept_ranges = resp
+        .headers()
+        .get("accept-ranges")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    let body = match resp.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            error!(did, cid, "Failed to read blob body from PDS: {e}");
+            return Err(Status::new(502));
+        }
+    };
+
+    Ok(BlobResponse {
+        status,
+        content_type,
+        content_range,
+        content_length,
+        accept_ranges,
+        body,
+    })
+}
+
+struct BlobResponse {
+    status: Status,
+    content_type: String,
+    content_range: Option<String>,
+    content_length: Option<String>,
+    accept_ranges: Option<String>,
+    body: Vec<u8>,
+}
+
+impl<'r> Responder<'r, 'static> for BlobResponse {
+    fn respond_to(self, _req: &'r Request<'_>) -> response::Result<'static> {
+        let mut builder = RocketResponse::build();
+        builder.status(self.status);
+        builder.raw_header("Content-Type", self.content_type);
+        if let Some(cr) = self.content_range {
+            builder.raw_header("Content-Range", cr);
+        }
+        if let Some(cl) = self.content_length {
+            builder.raw_header("Content-Length", cl);
+        }
+        builder.raw_header(
+            "Accept-Ranges",
+            self.accept_ranges.unwrap_or_else(|| "bytes".to_string()),
+        );
+        let len = self.body.len();
+        builder.sized_body(len, std::io::Cursor::new(self.body));
+        builder.ok()
     }
 }
 
