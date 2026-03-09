@@ -860,21 +860,7 @@ pub async fn save_membership(
         INSERT INTO community_members
             (community_uri, member_did, membership_rkey, membership_uri, status)
         VALUES ($1, $2, $3, $4, 'pending')
-        ON CONFLICT (community_uri, member_did) DO UPDATE
-            SET membership_uri  = EXCLUDED.membership_uri,
-                membership_rkey = EXCLUDED.membership_rkey,
-                status          = CASE
-                    WHEN community_members.membership_uri = EXCLUDED.membership_uri THEN community_members.status
-                    ELSE 'pending'
-                END,
-                approval_uri    = CASE
-                    WHEN community_members.membership_uri = EXCLUDED.membership_uri THEN community_members.approval_uri
-                    ELSE NULL
-                END,
-                approval_rkey   = CASE
-                    WHEN community_members.membership_uri = EXCLUDED.membership_uri THEN community_members.approval_rkey
-                    ELSE NULL
-                END
+        ON CONFLICT (membership_uri) DO NOTHING
         "#,
     )
     .bind(community_uri)
@@ -1048,7 +1034,8 @@ pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<Commun
 
     let joined = sqlx::query_as::<_, Community>(
         r#"
-        SELECT c.uri, c.owner_did, c.rkey, c.name, c.description, c.picture, c.category_order
+        SELECT DISTINCT ON (c.uri)
+               c.uri, c.owner_did, c.rkey, c.name, c.description, c.picture, c.category_order
           FROM communities c
           JOIN community_members cm ON cm.community_uri = c.uri
          WHERE cm.member_did = $1
@@ -1395,7 +1382,8 @@ pub async fn get_members_for_community(
 ) -> Result<Vec<crate::models::community::CommunityMember>> {
     let members = sqlx::query_as::<_, crate::models::community::CommunityMember>(
         r#"
-        -- Always include the owner (status = 'owner'), then approved/pending members.
+        -- Always include the owner (status = 'owner'), then one row per unique member
+        -- (prefer approved over pending when a member has multiple declarations).
         SELECT co.owner_did  AS member_did,
                'owner'       AS status,
                ap.display_name,
@@ -1406,13 +1394,19 @@ pub async fn get_members_for_community(
 
         UNION ALL
 
-        SELECT cm.member_did,
-               cm.status,
-               ap.display_name,
-               ap.avatar_url
-          FROM community_members cm
-          LEFT JOIN author_profiles ap ON ap.did = cm.member_did
-         WHERE cm.community_uri = $1
+        SELECT member_did, status, display_name, avatar_url
+          FROM (
+              SELECT DISTINCT ON (cm.member_did)
+                     cm.member_did,
+                     cm.status,
+                     ap.display_name,
+                     ap.avatar_url
+                FROM community_members cm
+                LEFT JOIN author_profiles ap ON ap.did = cm.member_did
+               WHERE cm.community_uri = $2
+               ORDER BY cm.member_did,
+                        CASE WHEN cm.status = 'approved' THEN 0 ELSE 1 END
+          ) deduped
          ORDER BY status, member_did
         "#,
     )

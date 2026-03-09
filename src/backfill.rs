@@ -297,6 +297,11 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         if let Ok((records, _)) =
             atproto::list_approval_records(http, &pds_url, did, None).await
         {
+            // Collect unique member DIDs while saving approvals, so each member's
+            // PDS is only contacted once even if they have multiple approvals.
+            let mut member_dids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
             for record in &records {
                 match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey)
                     .await
@@ -307,20 +312,21 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     }
                     Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error approval: {e}"),
                 }
-            }
 
-            // For each approval, ensure the referenced member's membership records
-            // are also fetched — they may not be known through any other path.
-            for record in records {
-                let member_did = match record
+                if let Some(member_did) = record
                     .membership_uri
                     .strip_prefix("at://")
                     .and_then(|s| s.split('/').next())
                 {
-                    Some(d) if d != did => d.to_string(),
-                    _ => continue,
-                };
+                    if member_did != did {
+                        member_dids.insert(member_did.to_string());
+                    }
+                }
+            }
 
+            // For each unique member DID, ensure all their membership records are
+            // fetched — they may not be reachable through any other path.
+            for member_did in member_dids {
                 let member_pds = match atproto::resolve_pds(http, &member_did).await {
                     Ok(u) => u,
                     Err(e) => {
@@ -891,13 +897,9 @@ async fn backfill_approvals(
             atproto::list_membership_records(http, &member_pds, &member_did, None).await
         {
             for record in records {
-                let membership_uri = format!(
-                    "at://{}/social.colibri.membership/{}",
-                    member_did, record.rkey
-                );
                 match db::save_membership(
                     pool,
-                    &membership_uri,
+                    &record.uri,
                     &record.community_uri,
                     &member_did,
                     &record.rkey,
