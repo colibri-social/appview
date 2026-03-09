@@ -860,7 +860,21 @@ pub async fn save_membership(
         INSERT INTO community_members
             (community_uri, member_did, membership_rkey, membership_uri, status)
         VALUES ($1, $2, $3, $4, 'pending')
-        ON CONFLICT (community_uri, member_did) DO NOTHING
+        ON CONFLICT (community_uri, member_did) DO UPDATE
+            SET membership_uri  = EXCLUDED.membership_uri,
+                membership_rkey = EXCLUDED.membership_rkey,
+                status          = CASE
+                    WHEN community_members.membership_uri = EXCLUDED.membership_uri THEN community_members.status
+                    ELSE 'pending'
+                END,
+                approval_uri    = CASE
+                    WHEN community_members.membership_uri = EXCLUDED.membership_uri THEN community_members.approval_uri
+                    ELSE NULL
+                END,
+                approval_rkey   = CASE
+                    WHEN community_members.membership_uri = EXCLUDED.membership_uri THEN community_members.approval_rkey
+                    ELSE NULL
+                END
         "#,
     )
     .bind(community_uri)
