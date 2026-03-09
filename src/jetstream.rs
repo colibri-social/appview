@@ -272,11 +272,11 @@ async fn handle_event(
         }
         "social.colibri.membership" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching membership event");
-            handle_membership(commit, &event.did, pool, bus).await
+            handle_membership(commit, &event.did, pool, http, bus).await
         }
         "social.colibri.approval" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching approval event");
-            handle_approval(commit, &event.did, pool, bus).await
+            handle_approval(commit, &event.did, pool, http, bus).await
         }
         "app.bsky.actor.profile" => {
             trace!(did = %event.did, op = %commit.operation, "Dispatching profile event");
@@ -822,6 +822,7 @@ async fn handle_membership(
     commit: CommitData,
     did: &str,
     pool: &PgPool,
+    http: &reqwest::Client,
     bus: &EventBus,
 ) -> Result<()> {
     let membership_uri = format!("at://{}/social.colibri.membership/{}", did, commit.rkey);
@@ -844,10 +845,13 @@ async fn handle_membership(
                 error!(did, rkey = %commit.rkey, "DB error saving membership: {e}");
             } else {
                 info!(did, rkey = %commit.rkey, community = %record.community, "Membership indexed (pending)");
+                let profile = ensure_profile_cached(pool, http, did).await;
                 let _ = bus.send(AppEvent::MemberPending {
                     community_uri: record.community,
                     member_did: did.to_string(),
                     membership_uri,
+                    display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                    avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
                 });
             }
         }
@@ -862,8 +866,11 @@ async fn handle_membership(
             } else {
                 info!(did, rkey = %commit.rkey, "Membership deleted");
                 if let Some((community_uri, member_did)) = info {
+                    let profile = ensure_profile_cached(pool, http, &member_did).await;
                     let _ = bus.send(AppEvent::MemberLeft {
                         community_uri,
+                        display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                        avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
                         member_did,
                     });
                 }
@@ -880,6 +887,7 @@ async fn handle_approval(
     commit: CommitData,
     did: &str,
     pool: &PgPool,
+    http: &reqwest::Client,
     bus: &EventBus,
 ) -> Result<()> {
     let approval_uri = format!("at://{}/social.colibri.approval/{}", did, commit.rkey);
@@ -905,10 +913,13 @@ async fn handle_approval(
                 if let Ok(Some((community_uri, member_did))) =
                     db::get_membership_info(pool, &record.membership).await
                 {
+                    let profile = ensure_profile_cached(pool, http, &member_did).await;
                     let _ = bus.send(AppEvent::MemberJoined {
                         community_uri,
-                        member_did,
                         membership_uri: record.membership,
+                        display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                        avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                        member_did,
                     });
                 }
             }
@@ -935,10 +946,13 @@ async fn handle_approval(
                     .fetch_optional(pool)
                     .await {
                         if let Some((membership_uri, _)) = rows {
+                            let profile = ensure_profile_cached(pool, http, &member_did).await;
                             let _ = bus.send(AppEvent::MemberPending {
                                 community_uri,
-                                member_did,
                                 membership_uri,
+                                display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                                avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                                member_did,
                             });
                         }
                     }

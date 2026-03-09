@@ -68,16 +68,28 @@ pub enum AppEvent {
         community_uri: String,
         member_did: String,
         membership_uri: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar_url: Option<String>,
     },
     /// Fired when an approval record is created (status = approved).
     MemberJoined {
         community_uri: String,
         member_did: String,
         membership_uri: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar_url: Option<String>,
     },
     MemberLeft {
         community_uri: String,
         member_did: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar_url: Option<String>,
     },
     // ── Owner-scoped community list events (filtered by community_uri) ───────
     /// A community was created or fully updated.
