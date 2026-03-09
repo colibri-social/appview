@@ -26,7 +26,7 @@ use tracing::error;
 use models::{
     author::AuthorProfile,
     community::{
-        Channel, CommunitiesResponse, CommunityMember, CreateInviteRequest, InviteCodeInfo,
+        Channel, CommunitiesResponse, Community, CommunityMember, CreateInviteRequest, InviteCodeInfo,
     },
     message::MessageResponse,
     reaction::ReactionSummary,
@@ -244,6 +244,24 @@ async fn get_sidebar(
             error!("get_sidebar error: {e}");
             Status::InternalServerError
         })
+}
+
+/// Look up a community by AT-URI or rkey.
+///
+/// Query param: `community` (required) — AT-URI (`at://...`) or bare rkey
+#[get("/api/community?<community>")]
+async fn get_community(
+    community: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Community>, Status> {
+    match db::get_community(pool, community).await {
+        Ok(Some(c)) => Ok(Json(c)),
+        Ok(None) => Err(Status::NotFound),
+        Err(e) => {
+            error!("get_community error: {e}");
+            Err(Status::InternalServerError)
+        }
+    }
 }
 
 /// Retrieve all members of a community, enriched with cached profile data.
@@ -536,6 +554,7 @@ fn rocket() -> _ {
                 get_reactions_for_message,
                 get_reactions_for_channel,
                 get_communities,
+                get_community,
                 get_channels,
                 get_sidebar,
                 get_members,

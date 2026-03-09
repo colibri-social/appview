@@ -1007,6 +1007,22 @@ pub async fn is_approved_member(pool: &PgPool, community_uri: &str, did: &str) -
     Ok(exists)
 }
 
+/// Look up a single community by AT-URI or rkey.
+pub async fn get_community(pool: &PgPool, uri_or_rkey: &str) -> Result<Option<Community>> {
+    let community = sqlx::query_as::<_, Community>(
+        r#"
+        SELECT uri, owner_did, rkey, name, description, picture, category_order
+          FROM communities
+         WHERE uri = $1 OR rkey = $1
+         LIMIT 1
+        "#,
+    )
+    .bind(uri_or_rkey)
+    .fetch_optional(pool)
+    .await?;
+    Ok(community)
+}
+
 /// Return all communities owned by or joined (approved) by a DID.
 pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(

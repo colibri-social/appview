@@ -155,6 +155,21 @@ All reactions in a channel, keyed by target message rkey.
 
 ### Communities
 
+#### `GET /api/community`
+
+Look up a single cached community by AT-URI or rkey.
+
+| Parameter   | Required | Description                     |
+| ----------- | -------- | ------------------------------- |
+| `community` | ✅       | AT-URI (`at://...`) or bare rkey |
+
+```bash
+curl "http://localhost:8000/api/community?community=at://did:plc:xxx/social.colibri.community/3mxxx"
+curl "http://localhost:8000/api/community?community=3mxxx"
+```
+
+Returns `404` if the community is not cached.
+
 #### `GET /api/communities`
 
 All communities for a user — both owned and joined — in a single roundtrip.
