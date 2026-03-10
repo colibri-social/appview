@@ -486,7 +486,26 @@ impl<'r> Responder<'r, 'static> for BlobResponse {
     }
 }
 
-/// Return all invite codes for a community.
+/// Mark an invite code as used (increments use_count, enforces max_uses).
+/// Returns 204 on success, 404 if the code doesn't exist, 410 if the code is
+/// inactive or exhausted.
+#[post("/api/invite/<code>/use")]
+async fn use_invite(
+    _key: ApiKey,
+    code: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Status {
+    match db::use_invite_code(pool, code).await {
+        Ok(true) => Status::NoContent,
+        Ok(false) => Status::Gone,
+        Err(e) => {
+            error!("use_invite error: {e}");
+            Status::InternalServerError
+        }
+    }
+}
+
+
 ///
 /// Query param: `community` (required) — the full AT-URI of the community
 #[get("/api/invites?<community>")]
@@ -561,6 +580,7 @@ fn rocket() -> _ {
                 get_invite,
                 create_invite,
                 revoke_invite,
+                use_invite,
                 list_invites,
                 get_blob,
                 ws_handler::subscribe,

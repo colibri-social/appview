@@ -350,6 +350,12 @@ Revoke (deactivate) an invite code. Requires `Authorization: Bearer <INVITE_API_
 
 Returns `204 No Content` on success, `403 Forbidden` if the `owner_did` doesn't match.
 
+#### `POST /api/invite/<code>/use` 🔒
+
+Mark an invite code as used. Increments `use_count` and enforces `max_uses` — if the code is inactive or exhausted, returns `410 Gone`. Requires `Authorization: Bearer <INVITE_API_KEY>`.
+
+Returns `204 No Content` on success, `410 Gone` if the code is inactive or has reached `max_uses`.
+
 ### Blobs
 
 #### `GET /api/blob`
