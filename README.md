@@ -102,6 +102,22 @@ Fetch a single message by author and record key.
 curl "http://localhost:8000/api/message?author=did:plc:xxx&rkey=3mxxx"
 ```
 
+#### `POST /api/message/block` 🔒
+
+Block a message, hiding it from all future responses. All connected WebSocket clients are immediately notified via a `message_deleted` event. Requires `Authorization: Bearer <INVITE_API_KEY>`.
+
+Returns `204 No Content` on success, `404` if the message doesn't exist or is already blocked.
+
+| Parameter    | Required | Description       |
+| ------------ | -------- | ----------------- |
+| `author_did` | ✅       | Author DID        |
+| `rkey`       | ✅       | Message record key |
+
+```bash
+curl -X POST "http://localhost:8000/api/message/block?author_did=did:plc:xxx&rkey=3mxxx" \
+  -H "Authorization: Bearer $INVITE_API_KEY"
+```
+
 ### Authors
 
 #### `GET /api/authors`

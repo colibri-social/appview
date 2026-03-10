@@ -100,6 +100,28 @@ pub async fn delete_message(
     Ok(msg)
 }
 
+/// Mark a message as blocked (hidden from all clients). Returns the message
+/// metadata needed to emit a MessageDeleted event, or None if not found.
+pub async fn block_message(
+    pool: &PgPool,
+    author_did: &str,
+    rkey: &str,
+) -> Result<Option<Message>> {
+    let msg = sqlx::query_as::<_, Message>(
+        r#"
+        UPDATE messages SET blocked = TRUE
+        WHERE author_did = $1 AND rkey = $2 AND NOT blocked
+        RETURNING id, rkey, author_did, text, channel, created_at, indexed_at, edited, parent, facets, attachments
+        "#,
+    )
+    .bind(author_did)
+    .bind(rkey)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(msg)
+}
+
 /// Paginated messages for a channel, enriched with author profiles, parent messages,
 /// and grouped reactions.
 pub async fn get_messages(
@@ -117,7 +139,7 @@ pub async fn get_messages(
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
-            WHERE m.channel = $1
+            WHERE m.channel = $1 AND NOT m.blocked
             ORDER BY m.created_at DESC
             "#,
         )
@@ -136,7 +158,7 @@ pub async fn get_messages(
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
-            WHERE m.channel = $1 AND m.created_at < $2
+            WHERE m.channel = $1 AND m.created_at < $2 AND NOT m.blocked
             ORDER BY m.created_at DESC
             LIMIT $3
             "#,
@@ -154,7 +176,7 @@ pub async fn get_messages(
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
-            WHERE m.channel = $1
+            WHERE m.channel = $1 AND NOT m.blocked
             ORDER BY m.created_at DESC
             LIMIT $2
             "#,
@@ -177,7 +199,7 @@ pub async fn get_message_by_rkey(pool: &PgPool, rkey: &str) -> Result<Option<Mes
                a.display_name, a.avatar_url
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
-        WHERE m.rkey = $1
+        WHERE m.rkey = $1 AND NOT m.blocked
         LIMIT 1
         "#,
     )
@@ -201,7 +223,7 @@ pub async fn get_message_by_author_and_rkey(
                a.display_name, a.avatar_url
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
-        WHERE m.author_did = $1 AND m.rkey = $2
+        WHERE m.author_did = $1 AND m.rkey = $2 AND NOT m.blocked
         LIMIT 1
         "#,
     )
@@ -263,7 +285,7 @@ pub async fn enrich_messages(
                    a.display_name, a.avatar_url
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
-            WHERE m.rkey = ANY($1)
+            WHERE m.rkey = ANY($1) AND NOT m.blocked
             "#,
         )
         .bind(&parent_rkeys[..])

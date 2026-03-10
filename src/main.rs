@@ -363,7 +363,38 @@ async fn revoke_invite(
     }
 }
 
-/// Request guard that extracts the `Range` header value, if present.
+/// Block a message by author DID and rkey. The message is hidden from all
+/// future requests and all connected clients are notified via a MessageDeleted
+/// event, matching the behaviour of a normal message deletion.
+///
+/// Query params: `author_did`, `rkey`
+#[post("/api/message/block?<author_did>&<rkey>")]
+async fn block_message(
+    _key: ApiKey,
+    author_did: &str,
+    rkey: &str,
+    pool: &State<sqlx::PgPool>,
+    bus: &State<events::EventBus>,
+) -> Status {
+    match db::block_message(pool, author_did, rkey).await {
+        Ok(Some(msg)) => {
+            let _ = bus.send(events::AppEvent::MessageDeleted {
+                id: msg.id,
+                rkey: msg.rkey,
+                author_did: msg.author_did,
+                channel: msg.channel,
+            });
+            Status::NoContent
+        }
+        Ok(None) => Status::NotFound,
+        Err(e) => {
+            error!("block_message error: {e}");
+            Status::InternalServerError
+        }
+    }
+}
+
+
 struct RangeHeader(Option<String>);
 
 #[rocket::async_trait]
@@ -581,6 +612,7 @@ fn rocket() -> _ {
                 create_invite,
                 revoke_invite,
                 use_invite,
+                block_message,
                 list_invites,
                 get_blob,
                 ws_handler::subscribe,
