@@ -61,6 +61,8 @@ pub struct CommunityMember {
     pub status: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub status_text: Option<String>,
+    pub emoji: Option<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]

@@ -1437,20 +1437,24 @@ pub async fn get_members_for_community(
         SELECT co.owner_did  AS member_did,
                'owner'       AS status,
                ap.display_name,
-               ap.avatar_url
+               ap.avatar_url,
+               ap.status     AS status_text,
+               ap.emoji
           FROM communities co
           LEFT JOIN author_profiles ap ON ap.did = co.owner_did
          WHERE co.uri = $1
 
         UNION ALL
 
-        SELECT member_did, status, display_name, avatar_url
+        SELECT member_did, status, display_name, avatar_url, status_text, emoji
           FROM (
               SELECT DISTINCT ON (cm.member_did)
                      cm.member_did,
                      cm.status,
                      ap.display_name,
-                     ap.avatar_url
+                     ap.avatar_url,
+                     ap.status AS status_text,
+                     ap.emoji
                 FROM community_members cm
                 LEFT JOIN author_profiles ap ON ap.did = cm.member_did
                WHERE cm.community_uri = $2
