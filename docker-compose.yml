@@ -10,7 +10,7 @@ services:
       ROCKET_ADDRESS: 0.0.0.0
       ROCKET_PORT: 8000
       RUST_LOG: ${RUST_LOG:-colibri_appview=info,rocket=info}
-      JETSTREAM_URL: wss://jetstream.colibri.social/subscribe?wantedCollections=social.colibri.message&wantedCollections=social.colibri.reaction&wantedCollections=app.bsky.actor.profile&wantedCollections=social.colibri.category&wantedCollections=social.colibri.community&wantedCollections=social.colibri.channel&wantedCollections=social.colibri.membership&wantedCollections=social.colibri.approval
+      JETSTREAM_URL: ${JETSTREAM_URL}
     depends_on:
       postgres:
         condition: service_healthy
