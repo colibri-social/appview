@@ -55,6 +55,8 @@ struct Subscriptions {
     messages: Option<Option<HashSet<String>>>,
     /// Same semantics, filtered by community AT-URI.
     community: Option<Option<HashSet<String>>>,
+    /// Filtered by DID. `Some(None)` = all users.
+    user_status: Option<Option<HashSet<String>>>,
 }
 
 impl Subscriptions {
@@ -78,6 +80,15 @@ impl Subscriptions {
                 }
                 None => self.community = Some(None),
             },
+            "user_status" => match param {
+                Some(did) => {
+                    let set = self.user_status.get_or_insert_with(|| Some(HashSet::new()));
+                    if let Some(inner) = set {
+                        inner.insert(did);
+                    }
+                }
+                None => self.user_status = Some(None),
+            },
             other => debug!("Unknown event_type in subscribe: {other}"),
         }
     }
@@ -99,6 +110,14 @@ impl Subscriptions {
                     }
                 }
                 None => self.community = None,
+            },
+            "user_status" => match param {
+                Some(did) => {
+                    if let Some(Some(set)) = &mut self.user_status {
+                        set.remove(&did);
+                    }
+                }
+                None => self.user_status = None,
             },
             other => debug!("Unknown event_type in unsubscribe: {other}"),
         }
@@ -130,6 +149,11 @@ impl Subscriptions {
                 None => false,
                 Some(None) => true,
                 Some(Some(uris)) => uris.contains(community_uri),
+            },
+            AppEvent::UserStatusChanged { did, .. } => match &self.user_status {
+                None => false,
+                Some(None) => true,
+                Some(Some(dids)) => dids.contains(did),
             },
         }
     }

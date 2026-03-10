@@ -17,7 +17,7 @@ use crate::{
 };
 
 const DEFAULT_JETSTREAM_URL: &str = concat!(
-    "wss://jetstream2.us-east.bsky.network/subscribe",
+    "wss://jetstream.colibri.social/subscribe",
     "?wantedCollections=social.colibri.message",
     "&wantedCollections=social.colibri.reaction",
     "&wantedCollections=social.colibri.community",
@@ -25,6 +25,7 @@ const DEFAULT_JETSTREAM_URL: &str = concat!(
     "&wantedCollections=social.colibri.category",
     "&wantedCollections=social.colibri.membership",
     "&wantedCollections=social.colibri.approval",
+    "&wantedCollections=social.colibri.actor.data",
     "&wantedCollections=app.bsky.actor.profile"
 );
 
@@ -116,6 +117,16 @@ struct ColibriMembership {
 struct ColibriApproval {
     /// AT-URI of the member's social.colibri.membership record.
     membership: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColibriActorData {
+    /// User status text (max 32 chars).
+    status: String,
+    /// Optional status emoji.
+    #[serde(default)]
+    emoji: Option<String>,
 }
 
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
@@ -277,6 +288,10 @@ async fn handle_event(
         "social.colibri.approval" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching approval event");
             handle_approval(commit, &event.did, pool, http, bus).await
+        }
+        "social.colibri.actor.data" => {
+            debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching actor status event");
+            handle_actor_data(commit, &event.did, pool, bus).await
         }
         "app.bsky.actor.profile" => {
             trace!(did = %event.did, op = %commit.operation, "Dispatching profile event");
@@ -589,9 +604,65 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
     Ok(())
 }
 
-// ── Shared helpers ────────────────────────────────────────────────────────────
+// ── Actor data (status) handler ───────────────────────────────────────────────
 
-// ── Community handler ─────────────────────────────────────────────────────────
+async fn handle_actor_data(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
+    match commit.operation.as_str() {
+        "create" | "update" => {
+            let record: ColibriActorData = match commit
+                .record
+                .and_then(|v| serde_json::from_value(v).ok())
+            {
+                Some(r) => r,
+                None => {
+                    debug!(did, rkey = %commit.rkey, "Actor data: missing or malformed record, skipping");
+                    return Ok(());
+                }
+            };
+
+            // Truncate to 32 chars just in case the sender exceeds the limit.
+            let status: String = record.status.chars().take(32).collect();
+
+            match db::upsert_actor_status(pool, did, &status, record.emoji.as_deref()).await {
+                Ok(profile) => {
+                    info!(did, status = %status, "Actor status updated");
+                    let _ = bus.send(AppEvent::UserStatusChanged {
+                        did: did.to_string(),
+                        status,
+                        emoji: record.emoji,
+                        display_name: profile.display_name,
+                        avatar_url: profile.avatar_url,
+                    });
+                }
+                Err(e) => error!(did, "Failed to upsert actor status: {e}"),
+            }
+        }
+        "delete" => {
+            // Clear the status when the record is deleted.
+            match db::upsert_actor_status(pool, did, "", None).await {
+                Ok(profile) => {
+                    info!(did, "Actor status cleared");
+                    let _ = bus.send(AppEvent::UserStatusChanged {
+                        did: did.to_string(),
+                        status: String::new(),
+                        emoji: None,
+                        display_name: profile.display_name,
+                        avatar_url: profile.avatar_url,
+                    });
+                }
+                Err(e) => error!(did, "Failed to clear actor status: {e}"),
+            }
+        }
+        other => trace!(did, op = other, "Actor data: unhandled operation"),
+    }
+
+    Ok(())
+}
 
 async fn handle_community(
     commit: CommitData,

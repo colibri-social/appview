@@ -110,6 +110,18 @@ pub enum AppEvent {
         owner_did: String,
         rkey: String,
     },
+    // ── User status events (filtered by DID) ─────────────────────────────
+    /// Fired when a user updates their social.colibri.actor.data record.
+    UserStatusChanged {
+        did: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        emoji: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar_url: Option<String>,
+    },
 }
 
 pub type EventBus = broadcast::Sender<AppEvent>;

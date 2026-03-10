@@ -6,5 +6,7 @@ pub struct AuthorProfile {
     pub did: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub status: Option<String>,
+    pub emoji: Option<String>,
     pub updated_at: DateTime<Utc>,
 }

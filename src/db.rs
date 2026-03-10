@@ -501,7 +501,7 @@ pub async fn get_reactions_for_channel(
 
 // ── Author profiles ───────────────────────────────────────────────────────────
 
-/// Insert or refresh a cached author profile.
+/// Insert or refresh a cached author profile (display name + avatar only).
 pub async fn upsert_author_profile(
     pool: &PgPool,
     did: &str,
@@ -516,7 +516,7 @@ pub async fn upsert_author_profile(
           SET display_name = EXCLUDED.display_name,
               avatar_url   = EXCLUDED.avatar_url,
               updated_at   = NOW()
-        RETURNING did, display_name, avatar_url, updated_at
+        RETURNING did, display_name, avatar_url, status, emoji, updated_at
         "#,
     )
     .bind(did)
@@ -528,10 +528,38 @@ pub async fn upsert_author_profile(
     Ok(profile)
 }
 
+/// Update (or insert) the actor status fields for a cached profile.
+/// Only touches `status` / `emoji`; profile fields are unchanged.
+pub async fn upsert_actor_status(
+    pool: &PgPool,
+    did: &str,
+    status: &str,
+    emoji: Option<&str>,
+) -> Result<AuthorProfile> {
+    let profile = sqlx::query_as::<_, AuthorProfile>(
+        r#"
+        INSERT INTO author_profiles (did, status, emoji)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (did) DO UPDATE
+          SET status  = EXCLUDED.status,
+              emoji = EXCLUDED.emoji,
+              updated_at   = NOW()
+        RETURNING did, display_name, avatar_url, status, emoji, updated_at
+        "#,
+    )
+    .bind(did)
+    .bind(status)
+    .bind(emoji)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(profile)
+}
+
 /// Retrieve a cached author profile. Returns `None` if never fetched.
 pub async fn get_author_profile(pool: &PgPool, did: &str) -> Result<Option<AuthorProfile>> {
     let profile = sqlx::query_as::<_, AuthorProfile>(
-        "SELECT did, display_name, avatar_url, updated_at FROM author_profiles WHERE did = $1",
+        "SELECT did, display_name, avatar_url, status, emoji, updated_at FROM author_profiles WHERE did = $1",
     )
     .bind(did)
     .fetch_optional(pool)

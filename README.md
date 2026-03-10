@@ -409,9 +409,16 @@ Connect with any WebSocket client. Send JSON subscription requests; receive JSON
 // All events for a specific community (channels, categories, members, community metadata)
 { "action": "subscribe", "event_type": "community", "community_uri": "at://did:plc:xxx/social.colibri.community/<rkey>" }
 
+// Status updates for a specific user
+{ "action": "subscribe", "event_type": "user_status", "did": "did:plc:xxx" }
+
+// Status updates for all users
+{ "action": "subscribe", "event_type": "user_status" }
+
 // Unsubscribing works the same way
 { "action": "unsubscribe", "event_type": "message", "channel": "<channel-rkey>" }
 { "action": "unsubscribe", "event_type": "community", "community_uri": "at://..." }
+{ "action": "unsubscribe", "event_type": "user_status", "did": "did:plc:xxx" }
 
 // Keepalive (server replies with empty ack)
 { "action": "heartbeat" }
@@ -599,6 +606,35 @@ A membership record was deleted (user left or was removed).
 	"member_did": "did:plc:yyy"
 }
 ```
+
+---
+
+### Events — `user_status` subscription
+
+Delivered to clients subscribed to the matching DID (or all users if no DID filter).
+
+#### `user_status_changed`
+
+A user updated or deleted their `social.colibri.actor.data` record. `status` is an empty string when the record was deleted.
+
+```json
+{
+	"type": "user_status_changed",
+	"did": "did:plc:xxx",
+	"status": "Working on something cool",
+	"emoji": "🚀",
+	"display_name": "Alice",
+	"avatar_url": "https://..."
+}
+```
+
+| Field          | Always present | Description                                              |
+| -------------- | -------------- | -------------------------------------------------------- |
+| `did`          | ✅             | User DID                                                 |
+| `status`  | ✅             | Status text (max 32 chars); empty string if deleted      |
+| `emoji` | ❌             | Optional emoji                                           |
+| `display_name` | ❌             | Cached display name (omitted if not yet in profile cache)|
+| `avatar_url`   | ❌             | Cached avatar URL                                        |
 
 ---
 
