@@ -130,7 +130,10 @@ struct ColibriActorData {
 }
 
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
-    let url = std::env::var("JETSTREAM_URL").unwrap_or_else(|_| DEFAULT_JETSTREAM_URL.to_string());
+    let url = std::env::var("JETSTREAM_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_JETSTREAM_URL.to_string());
 
     // Load persisted cursor so we can replay missed events after a restart.
     let initial_ts = db::get_jetstream_cursor(&pool).await.unwrap_or(0);

@@ -10,7 +10,7 @@ services:
       ROCKET_ADDRESS: 0.0.0.0
       ROCKET_PORT: 8000
       RUST_LOG: ${RUST_LOG:-colibri_appview=info,rocket=info}
-      JETSTREAM_URL: ${JETSTREAM_URL}
+      JETSTREAM_URL: ${JETSTREAM_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
