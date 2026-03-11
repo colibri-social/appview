@@ -7,8 +7,9 @@ An [ATProto](https://atproto.com/) appview for the **Colibri** social platform, 
 | Feature                  | Details                                                                                                                                                                          |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Jetstream consumer**   | Connects to a Colibri Jetstream WebSocket and ingests all Colibri lexicon records into PostgreSQL in real time, with cursor persistence and automatic reconnect.                 |
-| **Backfill**             | On startup, fetches historical records from each known DID's PDS so no data is missed. Triggered again automatically when the appview falls behind.                              |
-| **Client subscriptions** | Clients connect via WebSocket (`/api/subscribe`) and subscribe to filtered event streams — messages by channel, community events by AT-URI. Easy to extend with new event types. |
+| **Backfill**             | On startup, fetches historical records from each known DID's PDS so no data is missed. Triggered again automatically when the appview falls behind. Backfill includes Bluesky profiles (`banner_url`, `handle`, `description`) and actor status/emoji. |
+| **Client subscriptions** | Clients connect via WebSocket (`/api/subscribe?did=<did>`) and subscribe to filtered event streams — messages by channel, community events by AT-URI. Community subscriptions automatically deliver member status and profile updates. Easy to extend with new event types. |
+| **Presence**             | Clients are marked online on WS connect, offline on disconnect, and away after 5 minutes of heartbeat-only activity. Preferred state (`online`/`away`/`dnd`) is persisted and restored on reconnect. |
 | **WebRTC signaling**     | Room-based peer-to-peer voice/video signaling over WebSocket (`/api/webrtc/signal`).                                                                                             |
 | **REST API**             | Full set of read endpoints for messages, authors, reactions, communities, channels, categories, members, and invite codes.                                                       |
 
@@ -59,7 +60,7 @@ docker compose -f docker-compose.dev.yml up
 | Variable         | Required | Default                                             | Description                                                                      |
 | ---------------- | -------- | --------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `DATABASE_URL`   | ✅       | —                                                   | PostgreSQL connection string, e.g. `postgres://user:pass@localhost:5432/colibri` |
-| `INVITE_API_KEY` | ✅       | —                                                   | Bearer token required for `POST /api/invite`, `DELETE /api/invite/<code>`, and `GET /api/invites`     |
+| `INVITE_API_KEY` | ✅       | —                                                   | Bearer token required for `POST /api/invite`, `DELETE /api/invite/<code>`, `GET /api/invites`, `POST /api/message/block`, and `POST /api/user/state` |
 | `ROCKET_ADDRESS` | ❌       | `0.0.0.0`                                           | Bind address                                                                     |
 | `ROCKET_PORT`    | ❌       | `8000`                                              | Bind port                                                                        |
 | `JETSTREAM_URL`  | ❌       | `wss://jetstream2.us-east.bsky.network/subscribe?…` | Override Jetstream endpoint (e.g. point at a self-hosted instance)               |
@@ -136,9 +137,15 @@ curl "http://localhost:8000/api/authors?did=did:plc:xxx"
 
 ```json
 {
-	"did": "did:plc:xxx",
-	"display_name": "Alice",
-	"avatar_url": "https://cdn.bsky.app/..."
+  "did": "did:plc:xxx",
+  "display_name": "Alice",
+  "avatar_url": "https://cdn.bsky.app/...",
+  "banner_url": "https://cdn.bsky.app/...",
+  "description": "Building cool things",
+  "handle": "alice.bsky.social",
+  "status": "Working on something cool",
+  "emoji": "🚀",
+  "state": "online"
 }
 ```
 
@@ -282,26 +289,46 @@ All members of a community, enriched with cached profile data. The owner is alwa
 
 ```json
 [
-	{
-		"member_did": "did:plc:xxx",
-		"status": "owner",
-		"display_name": "Alice",
-		"avatar_url": "..."
-	},
-	{
-		"member_did": "did:plc:yyy",
-		"status": "approved",
-		"display_name": "Bob",
-		"avatar_url": null
-	},
-	{
-		"member_did": "did:plc:zzz",
-		"status": "pending",
-		"display_name": null,
-		"avatar_url": null
-	}
+  {
+    "member_did": "did:plc:xxx",
+    "status": "owner",
+    "display_name": "Alice",
+    "avatar_url": "https://cdn.bsky.app/...",
+    "banner_url": "https://cdn.bsky.app/...",
+    "description": "Building cool things",
+    "handle": "alice.bsky.social",
+    "status_text": "Working on something cool",
+    "emoji": "🚀",
+    "state": "online"
+  },
+  {
+    "member_did": "did:plc:yyy",
+    "status": "approved",
+    "display_name": "Bob",
+    "avatar_url": null,
+    "banner_url": null,
+    "description": null,
+    "handle": "bob.bsky.social",
+    "status_text": null,
+    "emoji": null,
+    "state": "away"
+  },
+  {
+    "member_did": "did:plc:zzz",
+    "status": "pending",
+    "display_name": null,
+    "avatar_url": null,
+    "banner_url": null,
+    "description": null,
+    "handle": null,
+    "status_text": null,
+    "emoji": null,
+    "state": null
+  }
 ]
 ```
+
+> **Note:** `status` is the membership role (`owner`/`approved`/`pending`). `status_text` is the user's custom status message from `social.colibri.actor.data`. `state` is the presence state (`online`/`away`/`dnd`/`offline`).
 
 ### Invite codes
 
@@ -372,6 +399,26 @@ Mark an invite code as used. Increments `use_count` and enforces `max_uses` — 
 
 Returns `204 No Content` on success, `410 Gone` if the code is inactive or has reached `max_uses`.
 
+### Presence
+
+#### `POST /api/user/state` 🔒
+
+Manually set a user's presence state. Updates both the current state and the **preferred state** — the preferred state is restored automatically when the user reconnects via WebSocket. Requires `Authorization: Bearer <INVITE_API_KEY>`.
+
+Valid states: `online`, `away`, `dnd`. `offline` is managed automatically by the WebSocket connection.
+
+| Parameter | Required | Description                        |
+| --------- | -------- | ---------------------------------- |
+| `did`     | ✅       | User DID                           |
+| `state`   | ✅       | `online`, `away`, or `dnd`         |
+
+```bash
+curl -X POST "http://localhost:8000/api/user/state?did=did:plc:xxx&state=dnd" \
+  -H "Authorization: Bearer $INVITE_API_KEY"
+```
+
+Returns `204 No Content` on success, `422 Unprocessable Entity` for an invalid state value.
+
 ### Blobs
 
 #### `GET /api/blob`
@@ -395,7 +442,20 @@ Returns `404` if the DID cannot be resolved, `502` if the PDS request fails.
 
 ## WebSocket: real-time events — `GET /api/subscribe`
 
-Connect with any WebSocket client. Send JSON subscription requests; receive JSON events.
+Connect with any WebSocket client. Pass `?did=<did>` to enable presence tracking for a user.
+
+```
+ws://localhost:8000/api/subscribe
+ws://localhost:8000/api/subscribe?did=did:plc:xxx
+```
+
+When `did` is provided:
+- On connect: restores the user's preferred state (default `online`) and broadcasts a `user_status_changed` event
+- On disconnect: sets state to `offline` and broadcasts
+- After 5 minutes of heartbeat-only messages: sets state to `away` and broadcasts
+- On next non-heartbeat message while away: restores preferred state and broadcasts
+
+Send JSON subscription requests; receive JSON events.
 
 ### Subscribing
 
@@ -406,13 +466,14 @@ Connect with any WebSocket client. Send JSON subscription requests; receive JSON
 // Messages in all channels
 { "action": "subscribe", "event_type": "message" }
 
-// All events for a specific community (channels, categories, members, community metadata)
+// All events for a specific community (channels, categories, members, community metadata,
+// plus status/profile updates for all community members automatically)
 { "action": "subscribe", "event_type": "community", "community_uri": "at://did:plc:xxx/social.colibri.community/<rkey>" }
 
-// Status updates for a specific user
+// Status/profile updates for a specific user (also covered by community subscription)
 { "action": "subscribe", "event_type": "user_status", "did": "did:plc:xxx" }
 
-// Status updates for all users
+// Status/profile updates for all users
 { "action": "subscribe", "event_type": "user_status" }
 
 // Unsubscribing works the same way
@@ -420,11 +481,16 @@ Connect with any WebSocket client. Send JSON subscription requests; receive JSON
 { "action": "unsubscribe", "event_type": "community", "community_uri": "at://..." }
 { "action": "unsubscribe", "event_type": "user_status", "did": "did:plc:xxx" }
 
-// Keepalive (server replies with empty ack)
+// Keepalive — does NOT reset the away timer
 { "action": "heartbeat" }
+
+// Signal user activity (e.g. after sending a message via REST) — resets away timer
+{ "action": "activity" }
 ```
 
 Multiple subscriptions are cumulative. You can subscribe to several channels and/or several communities at once.
+
+> **Community subscriptions** automatically include `user_status_changed` and `user_profile_updated` events for all current and future members of that community — no separate `user_status` subscription needed.
 
 ### Events — `message` subscription
 
@@ -432,22 +498,29 @@ Delivered to clients subscribed to the matching channel.
 
 #### `message`
 
-A new message was posted (or an existing one updated). Includes full author profile.
+A new message was posted (or an existing one updated). Includes full author profile embedded directly in the message object.
 
 ```json
 {
-	"type": "message",
-	"message": {
-		"id": "uuid",
-		"rkey": "3mxxx",
-		"author_did": "did:plc:xxx",
-		"text": "Hello!",
-		"channel": "general",
-		"created_at": "2024-03-01T12:00:00Z",
-		"indexed_at": "2024-03-01T12:00:01Z"
-	},
-	"author": { "did": "...", "display_name": "Alice", "avatar_url": "..." },
-	"parent": null
+  "type": "message",
+  "message": {
+    "id": "uuid",
+    "rkey": "3mxxx",
+    "author_did": "did:plc:xxx",
+    "display_name": "Alice",
+    "avatar_url": "https://cdn.bsky.app/...",
+    "banner_url": "https://cdn.bsky.app/...",
+    "description": "Building cool things",
+    "handle": "alice.bsky.social",
+    "status_text": "Working on something",
+    "emoji": "🚀",
+    "state": "online",
+    "text": "Hello!",
+    "channel": "general",
+    "created_at": "2024-03-01T12:00:00Z",
+    "indexed_at": "2024-03-01T12:00:01Z"
+  },
+  "parent": null
 }
 ```
 
@@ -486,6 +559,8 @@ Same shape as `reaction_added`.
 ### Events — `community` subscription
 
 Delivered to clients subscribed to the matching `community_uri`. Subscribe to a community to receive all of the following.
+
+> **Presence & profile updates are automatic.** When you subscribe to a community, you also receive `user_status_changed` and `user_profile_updated` events for all current and future members of that community — including the owner. No separate `user_status` subscription is needed. When a new member joins, they are added to the watch-list live; when a member leaves, they are removed.
 
 #### `community_upserted`
 
@@ -611,30 +686,50 @@ A membership record was deleted (user left or was removed).
 
 ### Events — `user_status` subscription
 
-Delivered to clients subscribed to the matching DID (or all users if no DID filter).
+Delivered to clients with a `user_status` subscription matching the DID (or all users if no DID filter). Also automatically delivered to clients with a **community** subscription that includes the user as a member or owner — no separate subscription needed in that case.
 
 #### `user_status_changed`
 
-A user updated or deleted their `social.colibri.actor.data` record. `status` is an empty string when the record was deleted.
+A user updated or deleted their `social.colibri.actor.data` record, or their presence state changed (connect/disconnect/away).
 
 ```json
 {
-	"type": "user_status_changed",
-	"did": "did:plc:xxx",
-	"status": "Working on something cool",
-	"emoji": "🚀",
-	"display_name": "Alice",
-	"avatar_url": "https://..."
+  "type": "user_status_changed",
+  "did": "did:plc:xxx",
+  "status": "Working on something cool",
+  "emoji": "🚀",
+  "state": "online",
+  "display_name": "Alice",
+  "avatar_url": "https://..."
 }
 ```
 
-| Field          | Always present | Description                                              |
-| -------------- | -------------- | -------------------------------------------------------- |
-| `did`          | ✅             | User DID                                                 |
-| `status`  | ✅             | Status text (max 32 chars); empty string if deleted      |
-| `emoji` | ❌             | Optional emoji                                           |
-| `display_name` | ❌             | Cached display name (omitted if not yet in profile cache)|
-| `avatar_url`   | ❌             | Cached avatar URL                                        |
+| Field          | Always present | Description                                                              |
+| -------------- | -------------- | ------------------------------------------------------------------------ |
+| `did`          | ✅             | User DID                                                                 |
+| `status`       | ✅             | Status text (max 32 chars); empty string if deleted                      |
+| `emoji`        | ❌             | Optional status emoji                                                    |
+| `state`        | ❌             | Presence state: `online`, `away`, `dnd`, or `offline`                   |
+| `display_name` | ❌             | Cached display name (omitted if not yet in profile cache)                |
+| `avatar_url`   | ❌             | Cached avatar URL                                                        |
+
+#### `user_profile_updated`
+
+A user updated their Bluesky profile (`app.bsky.actor.profile`). Only fired for users already in the profile cache.
+
+```json
+{
+  "type": "user_profile_updated",
+  "did": "did:plc:xxx",
+  "display_name": "Alice",
+  "avatar_url": "https://cdn.bsky.app/...",
+  "banner_url": "https://cdn.bsky.app/...",
+  "description": "Building cool things",
+  "handle": "alice.bsky.social"
+}
+```
+
+All fields except `did` are optional — only present if the profile record contained them.
 
 ---
 
@@ -665,16 +760,17 @@ The server notifies all room members when a peer joins or leaves.
 
 ## ATProto lexicons consumed
 
-| Collection                  | Description                                                                        |
-| --------------------------- | ---------------------------------------------------------------------------------- |
-| `social.colibri.message`    | Chat messages (`text`, `channel`, `createdAt`, optional `parent`, `facets`)        |
-| `social.colibri.reaction`   | Emoji reactions (`emoji`, `targetMessage` record-key)                              |
-| `social.colibri.community`  | Community records (`name`, `description`, `picture` blob, `categoryOrder`)         |
-| `social.colibri.channel`    | Channel records (`name`, `description`, `type`, `community` rkey, `category` rkey) |
-| `social.colibri.category`   | Category records (`name`, `channelOrder`, `community` rkey)                        |
-| `social.colibri.membership` | Membership requests (`community` AT-URI)                                           |
-| `social.colibri.approval`   | Owner approvals (`membership` AT-URI, `community` AT-URI)                          |
-| `app.bsky.actor.profile`    | Bluesky profiles — watched for display name / avatar updates                       |
+| Collection                    | Description                                                                        |
+| ----------------------------- | ---------------------------------------------------------------------------------- |
+| `social.colibri.message`      | Chat messages (`text`, `channel`, `createdAt`, optional `parent`, `facets`)        |
+| `social.colibri.reaction`     | Emoji reactions (`emoji`, `targetMessage` record-key)                              |
+| `social.colibri.community`    | Community records (`name`, `description`, `picture` blob, `categoryOrder`)         |
+| `social.colibri.channel`      | Channel records (`name`, `description`, `type`, `community` rkey, `category` rkey) |
+| `social.colibri.category`     | Category records (`name`, `channelOrder`, `community` rkey)                        |
+| `social.colibri.membership`   | Membership requests (`community` AT-URI)                                           |
+| `social.colibri.approval`     | Owner approvals (`membership` AT-URI, `community` AT-URI)                          |
+| `social.colibri.actor.data`   | User status and emoji (`status` text max 32 chars, optional `emoji`). Upserted to profile cache; triggers `user_status_changed`. |
+| `app.bsky.actor.profile`      | Bluesky profiles — watched for display name, avatar, banner, description updates. Resolved directly from the commit payload (no AppView roundtrip). |
 
 ---
 

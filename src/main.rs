@@ -632,6 +632,7 @@ fn rocket() -> _ {
         .manage(events::create_event_bus(4096))
         .manage(RoomState::new())
         .manage(reqwest::Client::new())
+        .manage(std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, ws_handler::DIDConnectionState>::new())))
         // ── Routes ───────────────────────────────────────────────────────────
         .mount(
             "/",

@@ -1,13 +1,32 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use rocket::State;
 use rocket_ws as ws;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 use crate::events::{AppEvent, EventBus};
+
+// ── Shared presence map ───────────────────────────────────────────────────────
+
+/// Per-DID connection state, shared across all WebSocket connections for a user.
+#[derive(Debug)]
+pub struct DIDConnectionState {
+    /// Number of currently-open WebSocket connections for this DID.
+    pub count: usize,
+    /// Most recent non-heartbeat activity across *all* connections for this DID.
+    pub last_active: tokio::time::Instant,
+    /// Whether the appview has set this DID to `away` due to inactivity.
+    /// Reset to `false` as soon as any connection sends a non-heartbeat action.
+    pub is_away: bool,
+}
+
+/// Application-wide presence map.  Registered as Rocket managed state.
+pub type PresenceMap = Arc<Mutex<HashMap<String, DIDConnectionState>>>;
 
 // ── Client → server ───────────────────────────────────────────────────────────
 
@@ -174,10 +193,17 @@ impl Subscriptions {
 const AWAY_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(300);
 
 #[rocket::get("/api/subscribe?<did>")]
-pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>, did: Option<String>) -> ws::Channel<'static> {
+pub fn subscribe(
+    ws: ws::WebSocket,
+    bus: &State<EventBus>,
+    pool: &State<PgPool>,
+    presence_map: &State<PresenceMap>,
+    did: Option<String>,
+) -> ws::Channel<'static> {
     let mut rx = bus.subscribe();
     let bus = bus.inner().clone();
     let pool = pool.inner().clone();
+    let presence_map = presence_map.inner().clone();
     let did = did.filter(|d| !d.is_empty());
 
     ws.channel(move |stream| {
@@ -185,32 +211,55 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
             let (mut sink, mut stream) = stream.split();
             let mut subs = Subscriptions::default();
 
-            // ── On connect: restore preferred state ──────────────────────────
+            // ── On connect: register in presence map ─────────────────────────
             let mut preferred_state = "online".to_string();
             if let Some(ref d) = did {
-                match crate::db::get_author_profile(&pool, d).await {
-                    Ok(Some(profile)) => {
-                        preferred_state = profile.preferred_state
-                            .as_deref()
-                            .unwrap_or("online")
-                            .to_string();
-                        if let Ok(updated) = crate::db::set_user_state(&pool, d, &preferred_state, false).await {
-                            let _ = bus.send(AppEvent::UserStatusChanged {
-                                did: d.clone(),
-                                status: updated.status.unwrap_or_default(),
-                                emoji: updated.emoji,
-                                state: updated.state,
-                                display_name: updated.display_name,
-                                avatar_url: updated.avatar_url,
-                            });
-                        }
+                // Read preferred_state from DB.
+                if let Ok(Some(profile)) = crate::db::get_author_profile(&pool, d).await {
+                    preferred_state = profile
+                        .preferred_state
+                        .as_deref()
+                        .unwrap_or("online")
+                        .to_string();
+                }
+
+                // Increment the shared connection counter for this DID.
+                // If this is the first connection, or all previous connections had gone
+                // away, broadcast a status update — but only once.
+                let (first_connection, was_away) = {
+                    let mut map = presence_map.lock().await;
+                    let entry = map.entry(d.clone()).or_insert(DIDConnectionState {
+                        count: 0,
+                        last_active: tokio::time::Instant::now(),
+                        is_away: false,
+                    });
+                    entry.count += 1;
+                    let first = entry.count == 1;
+                    let was_away = entry.is_away;
+                    // A new connection counts as activity — clear any pending away flag.
+                    if was_away {
+                        entry.is_away = false;
+                        entry.last_active = tokio::time::Instant::now();
                     }
-                    _ => {}
+                    (first, was_away)
+                };
+
+                if first_connection || was_away {
+                    if let Ok(updated) =
+                        crate::db::set_user_state(&pool, d, &preferred_state, false).await
+                    {
+                        let _ = bus.send(AppEvent::UserStatusChanged {
+                            did: d.clone(),
+                            status: updated.status.unwrap_or_default(),
+                            emoji: updated.emoji,
+                            state: updated.state,
+                            display_name: updated.display_name,
+                            avatar_url: updated.avatar_url,
+                        });
+                    }
                 }
             }
 
-            let mut last_active = tokio::time::Instant::now();
-            let mut is_away = false;
             let mut away_check = tokio::time::interval(tokio::time::Duration::from_secs(30));
             away_check.tick().await; // consume the immediate first tick
 
@@ -219,9 +268,26 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
                     // ── Away timer check ─────────────────────────────────────
                     _ = away_check.tick() => {
                         if let Some(ref d) = did {
-                            if !is_away && last_active.elapsed() >= AWAY_TIMEOUT {
-                                is_away = true;
-                                if let Ok(updated) = crate::db::set_user_state(&pool, d, "away", false).await {
+                            // Only broadcast once: whichever connection first observes the
+                            // timeout sets is_away=true in the shared map; subsequent
+                            // timer ticks from other connections are no-ops.
+                            let should_set_away = {
+                                let mut map = presence_map.lock().await;
+                                if let Some(entry) = map.get_mut(d) {
+                                    if !entry.is_away && entry.last_active.elapsed() >= AWAY_TIMEOUT {
+                                        entry.is_away = true;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            };
+                            if should_set_away {
+                                if let Ok(updated) =
+                                    crate::db::set_user_state(&pool, d, "away", false).await
+                                {
                                     let _ = bus.send(AppEvent::UserStatusChanged {
                                         did: d.clone(),
                                         status: updated.status.unwrap_or_default(),
@@ -247,16 +313,34 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
 
                                         let reply = match req.action.as_str() {
                                             "heartbeat" => {
-                                                // heartbeat-only: do NOT reset activity timer
+                                                // Heartbeat does NOT update shared last_active.
                                                 ServerMessage::Ack { message: String::new() }
                                             }
                                             action => {
-                                                // Any non-heartbeat action resets the away timer.
-                                                last_active = tokio::time::Instant::now();
-                                                if is_away {
-                                                    is_away = false;
+                                                // Any non-heartbeat action updates the shared
+                                                // last_active and clears is_away (if set), but
+                                                // only broadcasts once if transitioning from away.
+                                                let was_away = if let Some(ref d) = did {
+                                                    let mut map = presence_map.lock().await;
+                                                    if let Some(entry) = map.get_mut(d) {
+                                                        entry.last_active = tokio::time::Instant::now();
+                                                        let away = entry.is_away;
+                                                        if away {
+                                                            entry.is_away = false;
+                                                        }
+                                                        away
+                                                    } else {
+                                                        false
+                                                    }
+                                                } else {
+                                                    false
+                                                };
+
+                                                if was_away {
                                                     if let Some(ref d) = did {
-                                                        if let Ok(updated) = crate::db::set_user_state(&pool, d, &preferred_state, false).await {
+                                                        if let Ok(updated) = crate::db::set_user_state(
+                                                            &pool, d, &preferred_state, false,
+                                                        ).await {
                                                             let _ = bus.send(AppEvent::UserStatusChanged {
                                                                 did: d.clone(),
                                                                 status: updated.status.unwrap_or_default(),
@@ -268,6 +352,7 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
                                                         }
                                                     }
                                                 }
+
                                                 match action {
                                                     "subscribe" | "unsubscribe" => {
                                                         if action == "subscribe" {
@@ -372,17 +457,36 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
                 }
             }
 
-            // ── On disconnect: set offline ────────────────────────────────────
+            // ── On disconnect: only set offline when the last connection closes ──
             if let Some(ref d) = did {
-                if let Ok(updated) = crate::db::set_user_state(&pool, d, "offline", false).await {
-                    let _ = bus.send(AppEvent::UserStatusChanged {
-                        did: d.clone(),
-                        status: updated.status.unwrap_or_default(),
-                        emoji: updated.emoji,
-                        state: updated.state,
-                        display_name: updated.display_name,
-                        avatar_url: updated.avatar_url,
-                    });
+                let last_connection = {
+                    let mut map = presence_map.lock().await;
+                    if let Some(entry) = map.get_mut(d) {
+                        entry.count = entry.count.saturating_sub(1);
+                        if entry.count == 0 {
+                            map.remove(d);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if last_connection {
+                    if let Ok(updated) =
+                        crate::db::set_user_state(&pool, d, "offline", false).await
+                    {
+                        let _ = bus.send(AppEvent::UserStatusChanged {
+                            did: d.clone(),
+                            status: updated.status.unwrap_or_default(),
+                            emoji: updated.emoji,
+                            state: updated.state,
+                            display_name: updated.display_name,
+                            avatar_url: updated.avatar_url,
+                        });
+                    }
                 }
             }
 
