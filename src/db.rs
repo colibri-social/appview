@@ -1435,6 +1435,25 @@ pub async fn get_sidebar_for_community(
 }
 /// Return all members (pending + approved) for a community, enriched with
 /// cached profile data where available. The community owner is always included.
+/// Returns just the member DIDs for a community (owner + approved/pending members).
+/// Lightweight version used to build WS subscription watch-lists.
+pub async fn get_member_dids_for_community(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<String>> {
+    let dids = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT member_did
+        FROM community_members
+        WHERE community_uri = $1
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(dids)
+}
+
 pub async fn get_members_for_community(
     pool: &PgPool,
     community_uri: &str,

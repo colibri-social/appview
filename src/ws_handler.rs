@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rocket::State;
 use rocket_ws as ws;
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use tracing::{debug, error};
 
 use crate::events::{AppEvent, EventBus};
@@ -57,6 +58,9 @@ struct Subscriptions {
     community: Option<Option<HashSet<String>>>,
     /// Filtered by DID. `Some(None)` = all users.
     user_status: Option<Option<HashSet<String>>>,
+    /// DIDs of all members across all subscribed communities.
+    /// Status and profile update events for these DIDs are delivered automatically.
+    community_member_dids: HashSet<String>,
 }
 
 impl Subscriptions {
@@ -151,11 +155,16 @@ impl Subscriptions {
                 Some(Some(uris)) => uris.contains(community_uri),
             },
             AppEvent::UserStatusChanged { did, .. }
-            | AppEvent::UserProfileUpdated { did, .. } => match &self.user_status {
-                None => false,
-                Some(None) => true,
-                Some(Some(dids)) => dids.contains(did),
-            },
+            | AppEvent::UserProfileUpdated { did, .. } => {
+                // Deliver if explicitly watching this DID via user_status subscription…
+                let explicit = match &self.user_status {
+                    None => false,
+                    Some(None) => true,
+                    Some(Some(dids)) => dids.contains(did),
+                };
+                // …or if the DID is a member of any subscribed community.
+                explicit || self.community_member_dids.contains(did)
+            }
         }
     }
 }
@@ -163,8 +172,9 @@ impl Subscriptions {
 // ── Rocket route ──────────────────────────────────────────────────────────────
 
 #[rocket::get("/api/subscribe")]
-pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>) -> ws::Channel<'static> {
+pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>) -> ws::Channel<'static> {
     let mut rx = bus.subscribe();
+    let pool = pool.inner().clone();
 
     ws.channel(move |stream| {
         Box::pin(async move {
@@ -179,11 +189,25 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>) -> ws::Channel<'stati
                             Some(Ok(ws::Message::Text(text))) => {
                                 match serde_json::from_str::<ClientRequest>(&text) {
                                     Ok(req) => {
-                                        let param = req.community_uri
+                                        let param = req.community_uri.clone()
                                             .or(req.channel)
                                             .or(req.did);
+
                                         let reply = match req.action.as_str() {
                                             "subscribe" => {
+                                                // When subscribing to a community, pre-fetch
+                                                // its member DIDs so status/profile events are
+                                                // delivered automatically.
+                                                if req.event_type == "community" {
+                                                    if let Some(uri) = &req.community_uri {
+                                                        match crate::db::get_member_dids_for_community(&pool, uri).await {
+                                                            Ok(dids) => {
+                                                                subs.community_member_dids.extend(dids);
+                                                            }
+                                                            Err(e) => error!("Failed to fetch member DIDs for {uri}: {e}"),
+                                                        }
+                                                    }
+                                                }
                                                 subs.subscribe(&req.event_type, param);
                                                 ServerMessage::Ack {
                                                     message: format!("Subscribed to {}", req.event_type),
@@ -227,6 +251,41 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>) -> ws::Channel<'stati
                     event = rx.recv() => {
                         match event {
                             Ok(event) if subs.matches(&event) => {
+                                // When a new member joins a subscribed community, add their
+                                // DID to the watch-list so future status/profile events
+                                // are delivered automatically.
+                                if let AppEvent::MemberJoined { member_did, community_uri, .. } = &event {
+                                    if let Some(Some(uris)) = &subs.community {
+                                        if uris.contains(community_uri) {
+                                            subs.community_member_dids.insert(member_did.clone());
+                                        }
+                                    } else if subs.community == Some(None) {
+                                        subs.community_member_dids.insert(member_did.clone());
+                                    }
+                                }
+                                // When a member leaves, rebuild the watch-list so we stop
+                                // delivering their events (unless they're in another subscribed community).
+                                if let AppEvent::MemberLeft { community_uri, .. } = &event {
+                                    let rebuild = match &subs.community {
+                                        Some(Some(uris)) => uris.contains(community_uri),
+                                        Some(None) => true,
+                                        None => false,
+                                    };
+                                    if rebuild {
+                                        let subscribed_uris: Vec<String> = match &subs.community {
+                                            Some(Some(uris)) => uris.iter().cloned().collect(),
+                                            Some(None) => vec![community_uri.clone()],
+                                            None => vec![],
+                                        };
+                                        let mut new_dids = HashSet::new();
+                                        for uri in &subscribed_uris {
+                                            if let Ok(dids) = crate::db::get_member_dids_for_community(&pool, uri).await {
+                                                new_dids.extend(dids);
+                                            }
+                                        }
+                                        subs.community_member_dids = new_dids;
+                                    }
+                                }
                                 match serde_json::to_string(&event) {
                                     Ok(json) => {
                                         if sink.send(ws::Message::Text(json)).await.is_err() {
