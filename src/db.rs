@@ -136,7 +136,7 @@ pub async fn get_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1 AND NOT m.blocked
@@ -155,7 +155,7 @@ pub async fn get_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1 AND m.created_at < $2 AND NOT m.blocked
@@ -173,7 +173,7 @@ pub async fn get_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1 AND NOT m.blocked
@@ -196,7 +196,7 @@ pub async fn get_message_by_rkey(pool: &PgPool, rkey: &str) -> Result<Option<Mes
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-               a.display_name, a.avatar_url, a.banner_url, a.handle, a.status AS status_text, a.emoji
+               a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
         WHERE m.rkey = $1 AND NOT m.blocked
@@ -220,7 +220,7 @@ pub async fn get_message_by_author_and_rkey(
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-               a.display_name, a.avatar_url, a.banner_url, a.handle, a.status AS status_text, a.emoji
+               a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
         WHERE m.author_did = $1 AND m.rkey = $2 AND NOT m.blocked
@@ -282,7 +282,7 @@ pub async fn enrich_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.rkey = ANY($1) AND NOT m.blocked
@@ -509,18 +509,20 @@ pub async fn upsert_author_profile(
     avatar_url: Option<&str>,
     banner_url: Option<&str>,
     handle: Option<&str>,
+    description: Option<&str>,
 ) -> Result<AuthorProfile> {
     let profile = sqlx::query_as::<_, AuthorProfile>(
         r#"
-        INSERT INTO author_profiles (did, display_name, avatar_url, banner_url, handle)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO author_profiles (did, display_name, avatar_url, banner_url, handle, description)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (did) DO UPDATE
           SET display_name = EXCLUDED.display_name,
               avatar_url   = EXCLUDED.avatar_url,
               banner_url   = EXCLUDED.banner_url,
               handle       = EXCLUDED.handle,
+              description  = EXCLUDED.description,
               updated_at   = NOW()
-        RETURNING did, display_name, avatar_url, banner_url, handle, status, emoji, updated_at
+        RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at
         "#,
     )
     .bind(did)
@@ -528,6 +530,7 @@ pub async fn upsert_author_profile(
     .bind(avatar_url)
     .bind(banner_url)
     .bind(handle)
+    .bind(description)
     .fetch_one(pool)
     .await?;
 
@@ -550,7 +553,7 @@ pub async fn upsert_actor_status(
           SET status     = EXCLUDED.status,
               emoji      = EXCLUDED.emoji,
               updated_at = NOW()
-        RETURNING did, display_name, avatar_url, banner_url, handle, status, emoji, updated_at
+        RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at
         "#,
     )
     .bind(did)
@@ -565,7 +568,7 @@ pub async fn upsert_actor_status(
 /// Retrieve a cached author profile. Returns `None` if never fetched.
 pub async fn get_author_profile(pool: &PgPool, did: &str) -> Result<Option<AuthorProfile>> {
     let profile = sqlx::query_as::<_, AuthorProfile>(
-        "SELECT did, display_name, avatar_url, banner_url, handle, status, emoji, updated_at FROM author_profiles WHERE did = $1",
+        "SELECT did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at FROM author_profiles WHERE did = $1",
     )
     .bind(did)
     .fetch_optional(pool)
@@ -1445,6 +1448,7 @@ pub async fn get_members_for_community(
                ap.display_name,
                ap.avatar_url,
                ap.banner_url,
+               ap.description,
                ap.handle,
                ap.status     AS status_text,
                ap.emoji
@@ -1454,7 +1458,7 @@ pub async fn get_members_for_community(
 
         UNION ALL
 
-        SELECT member_did, status, display_name, avatar_url, banner_url, handle, status_text, emoji
+        SELECT member_did, status, display_name, avatar_url, banner_url, description, handle, status_text, emoji
           FROM (
               SELECT DISTINCT ON (cm.member_did)
                      cm.member_did,
@@ -1462,6 +1466,7 @@ pub async fn get_members_for_community(
                      ap.display_name,
                      ap.avatar_url,
                      ap.banner_url,
+               ap.description,
                      ap.handle,
                      ap.status AS status_text,
                      ap.emoji

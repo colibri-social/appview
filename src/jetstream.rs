@@ -594,6 +594,7 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
                 data.avatar_url.as_deref(),
                 data.banner_url.as_deref(),
                 data.handle.as_deref(),
+                data.description.as_deref(),
             )
             .await
             {
@@ -1068,6 +1069,7 @@ pub async fn ensure_profile_cached(
                 data.avatar_url.as_deref(),
                 data.banner_url.as_deref(),
                 data.handle.as_deref(),
+                data.description.as_deref(),
             )
             .await
             {

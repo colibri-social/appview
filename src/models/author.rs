@@ -7,6 +7,7 @@ pub struct AuthorProfile {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
+    pub description: Option<String>,
     pub handle: Option<String>,
     pub status: Option<String>,
     pub emoji: Option<String>,

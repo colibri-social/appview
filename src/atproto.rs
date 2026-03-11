@@ -8,6 +8,7 @@ pub struct ProfileData {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
+    pub description: Option<String>,
     pub handle: Option<String>,
 }
 
@@ -78,6 +79,7 @@ struct BskyProfileResponse {
     display_name: Option<String>,
     avatar: Option<String>,
     banner: Option<String>,
+    description: Option<String>,
     handle: Option<String>,
 }
 
@@ -152,6 +154,7 @@ pub async fn fetch_profile(client: &reqwest::Client, did: &str) -> Result<Option
         avatar_url: body.avatar,
         banner_url: body.banner,
         handle: body.handle,
+        description: body.description,
     }))
 }
 
