@@ -519,7 +519,7 @@ pub async fn upsert_author_profile(
           SET display_name = EXCLUDED.display_name,
               avatar_url   = EXCLUDED.avatar_url,
               banner_url   = EXCLUDED.banner_url,
-              handle       = EXCLUDED.handle,
+              handle       = COALESCE(EXCLUDED.handle, author_profiles.handle),
               description  = EXCLUDED.description,
               updated_at   = NOW()
         RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at

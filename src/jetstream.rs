@@ -129,6 +129,17 @@ struct ColibriActorData {
     emoji: Option<String>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BskyProfileRecord {
+    display_name: Option<String>,
+    description: Option<String>,
+    /// Avatar blob ref — the actual URL is resolved via the CDN.
+    avatar: Option<serde_json::Value>,
+    /// Banner blob ref.
+    banner: Option<serde_json::Value>,
+}
+
 pub async fn run(pool: PgPool, http: reqwest::Client, bus: EventBus) {
     let url = std::env::var("JETSTREAM_URL")
         .ok()
@@ -298,7 +309,7 @@ async fn handle_event(
         }
         "app.bsky.actor.profile" => {
             trace!(did = %event.did, op = %commit.operation, "Dispatching profile event");
-            handle_profile_update(&event.did, pool, http, bus).await
+            handle_profile_update(commit, &event.did, pool, bus).await
         }
         other => {
             trace!(did = %event.did, collection = other, "Ignoring unhandled collection");
@@ -575,7 +586,13 @@ async fn handle_reaction(
 
 // ── Profile handler ───────────────────────────────────────────────────────────
 
-async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client, bus: &EventBus) -> Result<()> {
+async fn handle_profile_update(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+    // Only process creates/updates; deletes don't carry new profile data.
+    if commit.operation == "delete" {
+        return Ok(());
+    }
+
+    // Only update profiles we already have cached.
     match db::get_author_profile(pool, did).await {
         Ok(None) => return Ok(()),
         Ok(Some(_)) => {}
@@ -585,35 +602,53 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client,
         }
     }
 
-    match atproto::fetch_profile(http, did).await {
-        Ok(Some(data)) => {
-            match db::upsert_author_profile(
-                pool,
-                did,
-                data.display_name.as_deref(),
-                data.avatar_url.as_deref(),
-                data.banner_url.as_deref(),
-                data.handle.as_deref(),
-                data.description.as_deref(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    trace!("Profile updated for {did}");
-                    let _ = bus.send(AppEvent::UserProfileUpdated {
-                        did: did.to_string(),
-                        display_name: data.display_name,
-                        avatar_url: data.avatar_url,
-                        banner_url: data.banner_url,
-                        description: data.description,
-                        handle: data.handle,
-                    });
-                }
-                Err(e) => error!("Failed to update profile for {did}: {e}"),
-            }
+    let record: BskyProfileRecord = match commit
+        .record
+        .and_then(|v| serde_json::from_value(v).ok())
+    {
+        Some(r) => r,
+        None => {
+            debug!(did, "Profile update: missing or malformed record, skipping");
+            return Ok(());
         }
-        Ok(None) => {}
-        Err(e) => error!("Failed to fetch profile for {did}: {e}"),
+    };
+
+    // Blob refs have the shape {"$type":"blob","ref":{"$link":"<cid>"},...}.
+    // Resolve them to CDN URLs.
+    let avatar_url = record
+        .avatar
+        .as_ref()
+        .and_then(|v| v.get("ref")?.get("$link")?.as_str())
+        .map(|cid| format!("https://cdn.bsky.app/img/avatar/plain/{did}/{cid}@jpeg"));
+    let banner_url = record
+        .banner
+        .as_ref()
+        .and_then(|v| v.get("ref")?.get("$link")?.as_str())
+        .map(|cid| format!("https://cdn.bsky.app/img/feed_thumbnail/plain/{did}/{cid}@jpeg"));
+
+    match db::upsert_author_profile(
+        pool,
+        did,
+        record.display_name.as_deref(),
+        avatar_url.as_deref(),
+        banner_url.as_deref(),
+        None, // handle not present in profile record; preserved by DO UPDATE
+        record.description.as_deref(),
+    )
+    .await
+    {
+        Ok(stored) => {
+            trace!("Profile updated for {did}");
+            let _ = bus.send(AppEvent::UserProfileUpdated {
+                did: did.to_string(),
+                display_name: stored.display_name,
+                avatar_url: stored.avatar_url,
+                banner_url: stored.banner_url,
+                description: stored.description,
+                handle: stored.handle,
+            });
+        }
+        Err(e) => error!("Failed to update profile for {did}: {e}"),
     }
 
     Ok(())
