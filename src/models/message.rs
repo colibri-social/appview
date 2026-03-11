@@ -41,6 +41,7 @@ pub struct MessageWithAuthor {
     pub handle: Option<String>,
     pub status_text: Option<String>,
     pub emoji: Option<String>,
+    pub state: Option<String>,
 }
 
 /// Full API / WebSocket response: message + author profile + parent + reactions.
@@ -74,6 +75,7 @@ impl From<(Message, Option<AuthorProfile>)> for MessageWithAuthor {
             handle: profile.as_ref().and_then(|p| p.handle.clone()),
             status_text: profile.as_ref().and_then(|p| p.status.clone()),
             emoji: profile.as_ref().and_then(|p| p.emoji.clone()),
+            state: profile.as_ref().and_then(|p| p.state.clone()),
         }
     }
 }

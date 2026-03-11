@@ -246,8 +246,12 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
                                             .or(req.did);
 
                                         let reply = match req.action.as_str() {
-                                            "subscribe" | "unsubscribe" => {
-                                                // Non-heartbeat: reset away timer, restore state if needed.
+                                            "heartbeat" => {
+                                                // heartbeat-only: do NOT reset activity timer
+                                                ServerMessage::Ack { message: String::new() }
+                                            }
+                                            action => {
+                                                // Any non-heartbeat action resets the away timer.
                                                 last_active = tokio::time::Instant::now();
                                                 if is_away {
                                                     is_away = false;
@@ -264,28 +268,32 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>,
                                                         }
                                                     }
                                                 }
-                                                if req.action == "subscribe" {
-                                                    if req.event_type == "community" {
-                                                        if let Some(uri) = &req.community_uri {
-                                                            match crate::db::get_member_dids_for_community(&pool, uri).await {
-                                                                Ok(dids) => { subs.community_member_dids.extend(dids); }
-                                                                Err(e) => error!("Failed to fetch member DIDs for {uri}: {e}"),
+                                                match action {
+                                                    "subscribe" | "unsubscribe" => {
+                                                        if action == "subscribe" {
+                                                            if req.event_type == "community" {
+                                                                if let Some(uri) = &req.community_uri {
+                                                                    match crate::db::get_member_dids_for_community(&pool, uri).await {
+                                                                        Ok(dids) => { subs.community_member_dids.extend(dids); }
+                                                                        Err(e) => error!("Failed to fetch member DIDs for {uri}: {e}"),
+                                                                    }
+                                                                }
                                                             }
+                                                            subs.subscribe(&req.event_type, param);
+                                                            ServerMessage::Ack { message: format!("Subscribed to {}", req.event_type) }
+                                                        } else {
+                                                            subs.unsubscribe(&req.event_type, param);
+                                                            ServerMessage::Ack { message: format!("Unsubscribed from {}", req.event_type) }
                                                         }
                                                     }
-                                                    subs.subscribe(&req.event_type, param);
-                                                    ServerMessage::Ack { message: format!("Subscribed to {}", req.event_type) }
-                                                } else {
-                                                    subs.unsubscribe(&req.event_type, param);
-                                                    ServerMessage::Ack { message: format!("Unsubscribed from {}", req.event_type) }
+                                                    // Generic activity ping — client sends this after
+                                                    // any user action (e.g. sending a message via REST).
+                                                    "activity" => ServerMessage::Ack { message: String::new() },
+                                                    other => ServerMessage::Error {
+                                                        message: format!("Unknown action: {other}"),
+                                                    },
                                                 }
                                             }
-                                            "heartbeat" => {
-                                                ServerMessage::Ack { message: String::new() }
-                                            }
-                                            other => ServerMessage::Error {
-                                                message: format!("Unknown action: {other}"),
-                                            },
                                         };
                                         let json = serde_json::to_string(&reply).unwrap_or_default();
                                         if sink.send(ws::Message::Text(json)).await.is_err() {

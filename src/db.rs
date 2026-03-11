@@ -136,7 +136,7 @@ pub async fn get_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji, a.state
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1 AND NOT m.blocked
@@ -155,7 +155,7 @@ pub async fn get_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji, a.state
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1 AND m.created_at < $2 AND NOT m.blocked
@@ -173,7 +173,7 @@ pub async fn get_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji, a.state
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.channel = $1 AND NOT m.blocked
@@ -196,7 +196,7 @@ pub async fn get_message_by_rkey(pool: &PgPool, rkey: &str) -> Result<Option<Mes
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-               a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
+               a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji, a.state
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
         WHERE m.rkey = $1 AND NOT m.blocked
@@ -220,7 +220,7 @@ pub async fn get_message_by_author_and_rkey(
         r#"
         SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-               a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
+               a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji, a.state
         FROM messages m
         LEFT JOIN author_profiles a ON m.author_did = a.did
         WHERE m.author_did = $1 AND m.rkey = $2 AND NOT m.blocked
@@ -282,7 +282,7 @@ pub async fn enrich_messages(
             r#"
             SELECT m.id, m.rkey, m.author_did, m.text, m.channel,
                    m.created_at, m.indexed_at, m.edited, m.parent, m.facets, m.attachments,
-                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji
+                   a.display_name, a.avatar_url, a.banner_url, a.description, a.handle, a.status AS status_text, a.emoji, a.state
             FROM messages m
             LEFT JOIN author_profiles a ON m.author_did = a.did
             WHERE m.rkey = ANY($1) AND NOT m.blocked
@@ -1515,14 +1515,15 @@ pub async fn get_members_for_community(
                ap.description,
                ap.handle,
                ap.status     AS status_text,
-               ap.emoji
+               ap.emoji,
+               ap.state
           FROM communities co
           LEFT JOIN author_profiles ap ON ap.did = co.owner_did
          WHERE co.uri = $1
 
         UNION ALL
 
-        SELECT member_did, status, display_name, avatar_url, banner_url, description, handle, status_text, emoji
+        SELECT member_did, status, display_name, avatar_url, banner_url, description, handle, status_text, emoji, state
           FROM (
               SELECT DISTINCT ON (cm.member_did)
                      cm.member_did,
@@ -1533,7 +1534,8 @@ pub async fn get_members_for_community(
                ap.description,
                      ap.handle,
                      ap.status AS status_text,
-                     ap.emoji
+                     ap.emoji,
+                     ap.state
                 FROM community_members cm
                 LEFT JOIN author_profiles ap ON ap.did = cm.member_did
                WHERE cm.community_uri = $2

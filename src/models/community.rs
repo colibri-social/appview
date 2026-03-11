@@ -66,6 +66,7 @@ pub struct CommunityMember {
     pub handle: Option<String>,
     pub status_text: Option<String>,
     pub emoji: Option<String>,
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
