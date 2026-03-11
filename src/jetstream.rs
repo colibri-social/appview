@@ -298,7 +298,7 @@ async fn handle_event(
         }
         "app.bsky.actor.profile" => {
             trace!(did = %event.did, op = %commit.operation, "Dispatching profile event");
-            handle_profile_update(&event.did, pool, http).await
+            handle_profile_update(&event.did, pool, http, bus).await
         }
         other => {
             trace!(did = %event.did, collection = other, "Ignoring unhandled collection");
@@ -575,7 +575,7 @@ async fn handle_reaction(
 
 // ── Profile handler ───────────────────────────────────────────────────────────
 
-async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client) -> Result<()> {
+async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client, bus: &EventBus) -> Result<()> {
     match db::get_author_profile(pool, did).await {
         Ok(None) => return Ok(()),
         Ok(Some(_)) => {}
@@ -587,7 +587,7 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
 
     match atproto::fetch_profile(http, did).await {
         Ok(Some(data)) => {
-            if let Err(e) = db::upsert_author_profile(
+            match db::upsert_author_profile(
                 pool,
                 did,
                 data.display_name.as_deref(),
@@ -598,9 +598,18 @@ async fn handle_profile_update(did: &str, pool: &PgPool, http: &reqwest::Client)
             )
             .await
             {
-                error!("Failed to update profile for {did}: {e}");
-            } else {
-                trace!("Profile updated for {did}");
+                Ok(_) => {
+                    trace!("Profile updated for {did}");
+                    let _ = bus.send(AppEvent::UserProfileUpdated {
+                        did: did.to_string(),
+                        display_name: data.display_name,
+                        avatar_url: data.avatar_url,
+                        banner_url: data.banner_url,
+                        description: data.description,
+                        handle: data.handle,
+                    });
+                }
+                Err(e) => error!("Failed to update profile for {did}: {e}"),
             }
         }
         Ok(None) => {}

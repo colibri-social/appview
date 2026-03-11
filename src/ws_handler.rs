@@ -150,7 +150,8 @@ impl Subscriptions {
                 Some(None) => true,
                 Some(Some(uris)) => uris.contains(community_uri),
             },
-            AppEvent::UserStatusChanged { did, .. } => match &self.user_status {
+            AppEvent::UserStatusChanged { did, .. }
+            | AppEvent::UserProfileUpdated { did, .. } => match &self.user_status {
                 None => false,
                 Some(None) => true,
                 Some(Some(dids)) => dids.contains(did),

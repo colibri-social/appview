@@ -122,6 +122,19 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         avatar_url: Option<String>,
     },
+    UserProfileUpdated {
+        did: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        banner_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+    },
 }
 
 pub type EventBus = broadcast::Sender<AppEvent>;
