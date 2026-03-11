@@ -36,6 +36,10 @@ pub struct MessageWithAuthor {
     pub attachments: Option<sqlx::types::Json<serde_json::Value>>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub banner_url: Option<String>,
+    pub handle: Option<String>,
+    pub status_text: Option<String>,
+    pub emoji: Option<String>,
 }
 
 /// Full API / WebSocket response: message + author profile + parent + reactions.
@@ -64,6 +68,10 @@ impl From<(Message, Option<AuthorProfile>)> for MessageWithAuthor {
             attachments: msg.attachments,
             display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
             avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+            banner_url: profile.as_ref().and_then(|p| p.banner_url.clone()),
+            handle: profile.as_ref().and_then(|p| p.handle.clone()),
+            status_text: profile.as_ref().and_then(|p| p.status.clone()),
+            emoji: profile.as_ref().and_then(|p| p.emoji.clone()),
         }
     }
 }

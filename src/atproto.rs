@@ -7,6 +7,8 @@ use tracing::warn;
 pub struct ProfileData {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub banner_url: Option<String>,
+    pub handle: Option<String>,
 }
 
 pub struct RawRecord {
@@ -75,6 +77,8 @@ pub struct RawApproval {
 struct BskyProfileResponse {
     display_name: Option<String>,
     avatar: Option<String>,
+    banner: Option<String>,
+    handle: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +150,8 @@ pub async fn fetch_profile(client: &reqwest::Client, did: &str) -> Result<Option
     Ok(Some(ProfileData {
         display_name: body.display_name,
         avatar_url: body.avatar,
+        banner_url: body.banner,
+        handle: body.handle,
     }))
 }
 
