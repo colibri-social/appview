@@ -11,5 +11,7 @@ pub struct AuthorProfile {
     pub handle: Option<String>,
     pub status: Option<String>,
     pub emoji: Option<String>,
+    pub state: Option<String>,
+    pub preferred_state: Option<String>,
     pub updated_at: DateTime<Utc>,
 }

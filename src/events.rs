@@ -118,6 +118,8 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         emoji: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         avatar_url: Option<String>,

@@ -685,6 +685,7 @@ async fn handle_actor_data(
                         did: did.to_string(),
                         status,
                         emoji: record.emoji,
+                        state: profile.state.clone(),
                         display_name: profile.display_name,
                         avatar_url: profile.avatar_url,
                     });
@@ -701,6 +702,7 @@ async fn handle_actor_data(
                         did: did.to_string(),
                         status: String::new(),
                         emoji: None,
+                        state: profile.state.clone(),
                         display_name: profile.display_name,
                         avatar_url: profile.avatar_url,
                     });

@@ -171,18 +171,70 @@ impl Subscriptions {
 
 // ── Rocket route ──────────────────────────────────────────────────────────────
 
-#[rocket::get("/api/subscribe")]
-pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>) -> ws::Channel<'static> {
+const AWAY_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(300);
+
+#[rocket::get("/api/subscribe?<did>")]
+pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>, did: Option<String>) -> ws::Channel<'static> {
     let mut rx = bus.subscribe();
+    let bus = bus.inner().clone();
     let pool = pool.inner().clone();
+    let did = did.filter(|d| !d.is_empty());
 
     ws.channel(move |stream| {
         Box::pin(async move {
             let (mut sink, mut stream) = stream.split();
             let mut subs = Subscriptions::default();
 
+            // ── On connect: restore preferred state ──────────────────────────
+            let mut preferred_state = "online".to_string();
+            if let Some(ref d) = did {
+                match crate::db::get_author_profile(&pool, d).await {
+                    Ok(Some(profile)) => {
+                        preferred_state = profile.preferred_state
+                            .as_deref()
+                            .unwrap_or("online")
+                            .to_string();
+                        if let Ok(updated) = crate::db::set_user_state(&pool, d, &preferred_state, false).await {
+                            let _ = bus.send(AppEvent::UserStatusChanged {
+                                did: d.clone(),
+                                status: updated.status.unwrap_or_default(),
+                                emoji: updated.emoji,
+                                state: updated.state,
+                                display_name: updated.display_name,
+                                avatar_url: updated.avatar_url,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut last_active = tokio::time::Instant::now();
+            let mut is_away = false;
+            let mut away_check = tokio::time::interval(tokio::time::Duration::from_secs(30));
+            away_check.tick().await; // consume the immediate first tick
+
             loop {
                 tokio::select! {
+                    // ── Away timer check ─────────────────────────────────────
+                    _ = away_check.tick() => {
+                        if let Some(ref d) = did {
+                            if !is_away && last_active.elapsed() >= AWAY_TIMEOUT {
+                                is_away = true;
+                                if let Ok(updated) = crate::db::set_user_state(&pool, d, "away", false).await {
+                                    let _ = bus.send(AppEvent::UserStatusChanged {
+                                        did: d.clone(),
+                                        status: updated.status.unwrap_or_default(),
+                                        emoji: updated.emoji,
+                                        state: updated.state,
+                                        display_name: updated.display_name,
+                                        avatar_url: updated.avatar_url,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     // ── Incoming message from this client ────────────────────
                     msg = stream.next() => {
                         match msg {
@@ -194,35 +246,42 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>)
                                             .or(req.did);
 
                                         let reply = match req.action.as_str() {
-                                            "subscribe" => {
-                                                // When subscribing to a community, pre-fetch
-                                                // its member DIDs so status/profile events are
-                                                // delivered automatically.
-                                                if req.event_type == "community" {
-                                                    if let Some(uri) = &req.community_uri {
-                                                        match crate::db::get_member_dids_for_community(&pool, uri).await {
-                                                            Ok(dids) => {
-                                                                subs.community_member_dids.extend(dids);
-                                                            }
-                                                            Err(e) => error!("Failed to fetch member DIDs for {uri}: {e}"),
+                                            "subscribe" | "unsubscribe" => {
+                                                // Non-heartbeat: reset away timer, restore state if needed.
+                                                last_active = tokio::time::Instant::now();
+                                                if is_away {
+                                                    is_away = false;
+                                                    if let Some(ref d) = did {
+                                                        if let Ok(updated) = crate::db::set_user_state(&pool, d, &preferred_state, false).await {
+                                                            let _ = bus.send(AppEvent::UserStatusChanged {
+                                                                did: d.clone(),
+                                                                status: updated.status.unwrap_or_default(),
+                                                                emoji: updated.emoji,
+                                                                state: updated.state,
+                                                                display_name: updated.display_name,
+                                                                avatar_url: updated.avatar_url,
+                                                            });
                                                         }
                                                     }
                                                 }
-                                                subs.subscribe(&req.event_type, param);
-                                                ServerMessage::Ack {
-                                                    message: format!("Subscribed to {}", req.event_type),
-                                                }
-                                            }
-                                            "unsubscribe" => {
-                                                subs.unsubscribe(&req.event_type, param);
-                                                ServerMessage::Ack {
-                                                    message: format!("Unsubscribed from {}", req.event_type),
+                                                if req.action == "subscribe" {
+                                                    if req.event_type == "community" {
+                                                        if let Some(uri) = &req.community_uri {
+                                                            match crate::db::get_member_dids_for_community(&pool, uri).await {
+                                                                Ok(dids) => { subs.community_member_dids.extend(dids); }
+                                                                Err(e) => error!("Failed to fetch member DIDs for {uri}: {e}"),
+                                                            }
+                                                        }
+                                                    }
+                                                    subs.subscribe(&req.event_type, param);
+                                                    ServerMessage::Ack { message: format!("Subscribed to {}", req.event_type) }
+                                                } else {
+                                                    subs.unsubscribe(&req.event_type, param);
+                                                    ServerMessage::Ack { message: format!("Unsubscribed from {}", req.event_type) }
                                                 }
                                             }
                                             "heartbeat" => {
-                                                ServerMessage::Ack {
-                                                    message: format!(""),
-                                                }
+                                                ServerMessage::Ack { message: String::new() }
                                             }
                                             other => ServerMessage::Error {
                                                 message: format!("Unknown action: {other}"),
@@ -302,6 +361,20 @@ pub fn subscribe(ws: ws::WebSocket, bus: &State<EventBus>, pool: &State<PgPool>)
                             Err(_) => break,
                         }
                     }
+                }
+            }
+
+            // ── On disconnect: set offline ────────────────────────────────────
+            if let Some(ref d) = did {
+                if let Ok(updated) = crate::db::set_user_state(&pool, d, "offline", false).await {
+                    let _ = bus.send(AppEvent::UserStatusChanged {
+                        did: d.clone(),
+                        status: updated.status.unwrap_or_default(),
+                        emoji: updated.emoji,
+                        state: updated.state,
+                        display_name: updated.display_name,
+                        avatar_url: updated.avatar_url,
+                    });
                 }
             }
 

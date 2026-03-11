@@ -397,6 +397,44 @@ async fn block_message(
 
 struct RangeHeader(Option<String>);
 
+/// Set the presence state for a user.
+/// Valid states: `online`, `away`, `dnd`.
+/// This updates both the current state and the preferred state (persisted across reconnects).
+///
+/// Query params: `did`, `state`
+#[post("/api/user/state?<did>&<state>")]
+async fn set_user_state(
+    _key: ApiKey,
+    did: &str,
+    state: &str,
+    pool: &State<sqlx::PgPool>,
+    bus: &State<events::EventBus>,
+) -> Status {
+    match state {
+        "online" | "away" | "dnd" => {}
+        _ => return Status::UnprocessableEntity,
+    }
+    match db::set_user_state(pool, did, state, true).await {
+        Ok(updated) => {
+            let _ = bus.send(events::AppEvent::UserStatusChanged {
+                did: did.to_string(),
+                status: updated.status.unwrap_or_default(),
+                emoji: updated.emoji,
+                state: updated.state,
+                display_name: updated.display_name,
+                avatar_url: updated.avatar_url,
+            });
+            Status::NoContent
+        }
+        Err(e) => {
+            error!("set_user_state error: {e}");
+            Status::InternalServerError
+        }
+    }
+}
+
+
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for RangeHeader {
     type Error = ();
@@ -613,6 +651,7 @@ fn rocket() -> _ {
                 revoke_invite,
                 use_invite,
                 block_message,
+                set_user_state,
                 list_invites,
                 get_blob,
                 ws_handler::subscribe,

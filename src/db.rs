@@ -522,7 +522,7 @@ pub async fn upsert_author_profile(
               handle       = COALESCE(EXCLUDED.handle, author_profiles.handle),
               description  = EXCLUDED.description,
               updated_at   = NOW()
-        RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at
+        RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
         "#,
     )
     .bind(did)
@@ -553,7 +553,7 @@ pub async fn upsert_actor_status(
           SET status     = EXCLUDED.status,
               emoji      = EXCLUDED.emoji,
               updated_at = NOW()
-        RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at
+        RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
         "#,
     )
     .bind(did)
@@ -568,12 +568,55 @@ pub async fn upsert_actor_status(
 /// Retrieve a cached author profile. Returns `None` if never fetched.
 pub async fn get_author_profile(pool: &PgPool, did: &str) -> Result<Option<AuthorProfile>> {
     let profile = sqlx::query_as::<_, AuthorProfile>(
-        "SELECT did, display_name, avatar_url, banner_url, description, handle, status, emoji, updated_at FROM author_profiles WHERE did = $1",
+        "SELECT did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at FROM author_profiles WHERE did = $1",
     )
     .bind(did)
     .fetch_optional(pool)
     .await?;
 
+    Ok(profile)
+}
+
+/// Set the current presence state for a user.
+/// If `update_preferred` is true, also persists the state as `preferred_state`
+/// (used when the user manually sets their state).
+/// Returns the updated profile.
+pub async fn set_user_state(
+    pool: &PgPool,
+    did: &str,
+    state: &str,
+    update_preferred: bool,
+) -> Result<AuthorProfile> {
+    let profile = if update_preferred {
+        sqlx::query_as::<_, AuthorProfile>(
+            r#"
+            UPDATE author_profiles
+               SET state           = $2,
+                   preferred_state = $2,
+                   updated_at      = NOW()
+             WHERE did = $1
+            RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
+            "#,
+        )
+        .bind(did)
+        .bind(state)
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, AuthorProfile>(
+            r#"
+            UPDATE author_profiles
+               SET state      = $2,
+                   updated_at = NOW()
+             WHERE did = $1
+            RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
+            "#,
+        )
+        .bind(did)
+        .bind(state)
+        .fetch_one(pool)
+        .await?
+    };
     Ok(profile)
 }
 
