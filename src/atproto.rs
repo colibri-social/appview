@@ -71,6 +71,11 @@ pub struct RawApproval {
     pub membership_uri: String,
 }
 
+pub struct RawActorData {
+    pub status: String,
+    pub emoji: Option<String>,
+}
+
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -130,6 +135,8 @@ struct ColibriRecord {
     channel_order: Option<serde_json::Value>,
     // social.colibri.approval fields
     membership: Option<String>,
+    // social.colibri.actor.data fields
+    status: Option<String>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -421,6 +428,24 @@ pub async fn list_approval_records(
         })
         .collect();
     Ok((records, body.cursor))
+}
+
+/// Fetch the most recent `social.colibri.actor.data` record for a DID from their PDS.
+/// Returns `None` if no such record exists.
+pub async fn fetch_actor_data(
+    client: &reqwest::Client,
+    pds_url: &str,
+    did: &str,
+) -> Result<Option<RawActorData>> {
+    let body = fetch_records(client, pds_url, did, "social.colibri.actor.data", None).await?;
+    let entry = body.records.into_iter().next();
+    Ok(entry.and_then(|e| {
+        let val = e.value?;
+        Some(RawActorData {
+            status: val.status.unwrap_or_default(),
+            emoji: val.emoji,
+        })
+    }))
 }
 
 // ── Shared fetch helper ───────────────────────────────────────────────────────

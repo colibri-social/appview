@@ -104,7 +104,37 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
             }
         };
 
-        let _ = jetstream::ensure_profile_cached(pool, http, did).await;
+        // Always re-fetch bsky profile to pick up banner_url, handle, description.
+        match atproto::fetch_profile(http, did).await {
+            Ok(Some(data)) => {
+                if let Err(e) = db::upsert_author_profile(
+                    pool,
+                    did,
+                    data.display_name.as_deref(),
+                    data.avatar_url.as_deref(),
+                    data.banner_url.as_deref(),
+                    data.handle.as_deref(),
+                    data.description.as_deref(),
+                )
+                .await
+                {
+                    warn!(did, "Backfill/sweep: failed to upsert bsky profile: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => warn!(did, "Backfill/sweep: failed to fetch bsky profile: {e}"),
+        }
+
+        // Fetch social.colibri.actor.data to backfill status/emoji.
+        match atproto::fetch_actor_data(http, &pds_url, did).await {
+            Ok(Some(data)) => {
+                if let Err(e) = db::upsert_actor_status(pool, did, &data.status, data.emoji.as_deref()).await {
+                    warn!(did, "Backfill/sweep: failed to upsert actor status: {e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => warn!(did, "Backfill/sweep: failed to fetch actor data: {e}"),
+        }
 
         // Fetch newest page only (reverse=false gives oldest-first, so we use
         // a single page without cursor which returns the most recent records).
