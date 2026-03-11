@@ -1443,9 +1443,11 @@ pub async fn get_member_dids_for_community(
 ) -> Result<Vec<String>> {
     let dids = sqlx::query_scalar(
         r#"
-        SELECT DISTINCT member_did
-        FROM community_members
-        WHERE community_uri = $1
+        SELECT DISTINCT did FROM (
+            SELECT member_did AS did FROM community_members WHERE community_uri = $1
+            UNION
+            SELECT owner_did  AS did FROM communities        WHERE uri          = $1
+        ) combined
         "#,
     )
     .bind(community_uri)
