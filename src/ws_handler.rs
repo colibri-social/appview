@@ -272,34 +272,37 @@ pub fn subscribe(
                     // ── Away timer check ─────────────────────────────────────
                     _ = away_check.tick() => {
                         if let Some(ref d) = did {
-                            // Only broadcast once: whichever connection first observes the
-                            // timeout sets is_away=true in the shared map; subsequent
-                            // timer ticks from other connections are no-ops.
-                            let should_set_away = {
-                                let mut map = presence_map.lock().await;
-                                if let Some(entry) = map.get_mut(d) {
-                                    if !entry.is_away && entry.last_active.elapsed() >= AWAY_TIMEOUT {
-                                        entry.is_away = true;
-                                        true
+                            // Skip away logic if user has manually set their state to dnd or offline.
+                            if preferred_state != "dnd" && preferred_state != "offline" {
+                                // Only broadcast once: whichever connection first observes the
+                                // timeout sets is_away=true in the shared map; subsequent
+                                // timer ticks from other connections are no-ops.
+                                let should_set_away = {
+                                    let mut map = presence_map.lock().await;
+                                    if let Some(entry) = map.get_mut(d) {
+                                        if !entry.is_away && entry.last_active.elapsed() >= AWAY_TIMEOUT {
+                                            entry.is_away = true;
+                                            true
+                                        } else {
+                                            false
+                                        }
                                     } else {
                                         false
                                     }
-                                } else {
-                                    false
-                                }
-                            };
-                            if should_set_away {
-                                if let Ok(updated) =
-                                    crate::db::set_user_state(&pool, d, "away", false).await
-                                {
-                                    let _ = bus.send(AppEvent::UserStatusChanged {
-                                        did: d.clone(),
-                                        status: updated.status.unwrap_or_default(),
-                                        emoji: updated.emoji,
-                                        state: updated.state,
-                                        display_name: updated.display_name,
-                                        avatar_url: updated.avatar_url,
-                                    });
+                                };
+                                if should_set_away {
+                                    if let Ok(updated) =
+                                        crate::db::set_user_state(&pool, d, "away", false).await
+                                    {
+                                        let _ = bus.send(AppEvent::UserStatusChanged {
+                                            did: d.clone(),
+                                            status: updated.status.unwrap_or_default(),
+                                            emoji: updated.emoji,
+                                            state: updated.state,
+                                            display_name: updated.display_name,
+                                            avatar_url: updated.avatar_url,
+                                        });
+                                    }
                                 }
                             }
                         }
