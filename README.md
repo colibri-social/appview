@@ -491,9 +491,10 @@ Send JSON subscription requests; receive JSON events.
 { "action": "set_state", "state": "online" }
 { "action": "set_state", "state": "away" }
 { "action": "set_state", "state": "dnd" }
+{ "action": "set_state", "state": "offline" }
 ```
 
-Valid states for `set_state`: `online`, `away`, `dnd`. (Offline is managed automatically by the WebSocket connection.)
+Valid states for `set_state`: `online`, `away`, `dnd`, `offline`.
 
 Multiple subscriptions are cumulative. You can subscribe to several channels and/or several communities at once.
 

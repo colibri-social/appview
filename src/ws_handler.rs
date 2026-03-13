@@ -383,7 +383,7 @@ pub fn subscribe(
                                                             if let Some(new_state) = &req.state {
                                                                 // Validate state.
                                                                 match new_state.as_str() {
-                                                                    "online" | "away" | "dnd" => {
+                                                                    "online" | "away" | "dnd" | "offline" => {
                                                                         if let Ok(updated) = crate::db::set_user_state(&pool, d, new_state, true).await {
                                                                             let _ = bus.send(AppEvent::UserStatusChanged {
                                                                                 did: d.clone(),
@@ -399,7 +399,7 @@ pub fn subscribe(
                                                                             ServerMessage::Error { message: "Failed to update state".to_string() }
                                                                         }
                                                                     }
-                                                                    _ => ServerMessage::Error { message: "Invalid state. Must be online, away, or dnd".to_string() },
+                                                                    _ => ServerMessage::Error { message: "Invalid state. Must be online, away, dnd, or offline".to_string() },
                                                                 }
                                                             } else {
                                                                 ServerMessage::Error { message: "state parameter is required".to_string() }
