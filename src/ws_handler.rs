@@ -43,6 +43,7 @@ pub type PresenceMap = Arc<Mutex<HashMap<String, DIDConnectionState>>>;
 #[derive(Debug, Deserialize)]
 struct ClientRequest {
     action: String,
+    #[serde(default)]
     event_type: String,
     /// Filter parameter: channel name for "message", DID for "user_status".
     #[serde(default)]
@@ -52,6 +53,9 @@ struct ClientRequest {
     /// Community AT-URI filter for "community" event type.
     #[serde(default)]
     community_uri: Option<String>,
+    /// For "set_state" action: the desired state (online/away/dnd).
+    #[serde(default)]
+    state: Option<String>,
 }
 
 // ── Server → client ───────────────────────────────────────────────────────────
@@ -374,6 +378,36 @@ pub fn subscribe(
                                                     // Generic activity ping — client sends this after
                                                     // any user action (e.g. sending a message via REST).
                                                     "activity" => ServerMessage::Ack { message: String::new() },
+                                                    "set_state" => {
+                                                        if let Some(ref d) = did {
+                                                            if let Some(new_state) = &req.state {
+                                                                // Validate state.
+                                                                match new_state.as_str() {
+                                                                    "online" | "away" | "dnd" => {
+                                                                        if let Ok(updated) = crate::db::set_user_state(&pool, d, new_state, true).await {
+                                                                            let _ = bus.send(AppEvent::UserStatusChanged {
+                                                                                did: d.clone(),
+                                                                                status: updated.status.unwrap_or_default(),
+                                                                                emoji: updated.emoji,
+                                                                                state: updated.state,
+                                                                                display_name: updated.display_name,
+                                                                                avatar_url: updated.avatar_url,
+                                                                            });
+                                                                            preferred_state = new_state.clone();
+                                                                            ServerMessage::Ack { message: String::new() }
+                                                                        } else {
+                                                                            ServerMessage::Error { message: "Failed to update state".to_string() }
+                                                                        }
+                                                                    }
+                                                                    _ => ServerMessage::Error { message: "Invalid state. Must be online, away, or dnd".to_string() },
+                                                                }
+                                                            } else {
+                                                                ServerMessage::Error { message: "state parameter is required".to_string() }
+                                                            }
+                                                        } else {
+                                                            ServerMessage::Error { message: "DID required for set_state".to_string() }
+                                                        }
+                                                    }
                                                     other => ServerMessage::Error {
                                                         message: format!("Unknown action: {other}"),
                                                     },
