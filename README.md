@@ -227,7 +227,9 @@ All channels for a community.
 | ----------- | -------- | ------------------------------------------------------------------- |
 | `community` | ✅       | Community AT-URI (`at://did:plc:xxx/social.colibri.community/rkey`) |
 
-**Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`, `community_uri`.
+**Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`, `community_uri`, and `voice_members`.
+
+`voice_members` is the sorted list of DIDs currently connected to that channel's voice room (`[]` if empty).
 
 #### `GET /api/sidebar`
 
@@ -253,14 +255,16 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 					"rkey": "3mch1",
 					"name": "announcements",
 					"channel_type": "text",
-					"category_rkey": "3mxxx"
+					"category_rkey": "3mxxx",
+					"voice_members": []
 				},
 				{
 					"uri": "...",
 					"rkey": "3mch2",
 					"name": "general",
 					"channel_type": "text",
-					"category_rkey": "3mxxx"
+					"category_rkey": "3mxxx",
+					"voice_members": ["did:plc:abc"]
 				}
 			]
 		}
@@ -271,7 +275,8 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 			"rkey": "...",
 			"name": "off-topic",
 			"channel_type": "text",
-			"category_rkey": null
+			"category_rkey": null,
+			"voice_members": []
 		}
 	]
 }

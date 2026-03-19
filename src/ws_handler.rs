@@ -31,6 +31,18 @@ pub type PresenceMap = Arc<Mutex<HashMap<String, DIDConnectionState>>>;
 type VoiceKey = (String, String);
 pub type VoiceMap = Arc<Mutex<HashMap<VoiceKey, HashSet<String>>>>;
 
+pub async fn get_voice_members_for_channel(
+    voice_map: &VoiceMap,
+    community_uri: &str,
+    channel_rkey: &str,
+) -> Vec<String> {
+    let map = voice_map.lock().await;
+    let key = (community_uri.to_string(), channel_rkey.to_string());
+    map.get(&key)
+        .map(|members| sorted_members(members))
+        .unwrap_or_default()
+}
+
 pub fn new_voice_map() -> VoiceMap {
     Arc::new(Mutex::new(HashMap::new()))
 }

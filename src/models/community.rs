@@ -38,6 +38,34 @@ pub struct Channel {
     pub category_rkey: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ChannelWithVoice {
+    pub uri: String,
+    pub rkey: String,
+    pub community_uri: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub channel_type: String,
+    pub category_rkey: Option<String>,
+    #[serde(default)]
+    pub voice_members: Vec<String>,
+}
+
+impl From<Channel> for ChannelWithVoice {
+    fn from(channel: Channel) -> Self {
+        ChannelWithVoice {
+            uri: channel.uri,
+            rkey: channel.rkey,
+            community_uri: channel.community_uri,
+            name: channel.name,
+            description: channel.description,
+            channel_type: channel.channel_type,
+            category_rkey: channel.category_rkey,
+            voice_members: Vec::new(),
+        }
+    }
+}
+
 /// A category with its channels nested inside — used for the sidebar endpoint.
 #[derive(Debug, Serialize)]
 pub struct SidebarCategory {
@@ -53,6 +81,21 @@ pub struct SidebarCategory {
 pub struct SidebarResponse {
     pub categories: Vec<SidebarCategory>,
     pub uncategorized: Vec<Channel>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SidebarCategoryWithVoice {
+    pub uri: String,
+    pub rkey: String,
+    pub name: String,
+    pub channel_order: Option<sqlx::types::Json<serde_json::Value>>,
+    pub channels: Vec<ChannelWithVoice>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SidebarResponseWithVoice {
+    pub categories: Vec<SidebarCategoryWithVoice>,
+    pub uncategorized: Vec<ChannelWithVoice>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]

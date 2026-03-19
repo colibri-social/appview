@@ -26,7 +26,8 @@ use tracing::error;
 use models::{
     author::AuthorProfile,
     community::{
-        Channel, CommunitiesResponse, Community, CommunityMember, CreateInviteRequest, InviteCodeInfo,
+        Channel, ChannelWithVoice, CommunitiesResponse, Community, CommunityMember, CreateInviteRequest,
+        InviteCodeInfo,
     },
     message::MessageResponse,
     reaction::ReactionSummary,
@@ -211,14 +212,25 @@ async fn get_reactions_for_channel(
 async fn get_channels(
     community: &str,
     pool: &State<sqlx::PgPool>,
-) -> Result<Json<Vec<Channel>>, Status> {
-    db::get_channels_for_community(pool, community)
-        .await
-        .map(Json)
-        .map_err(|e| {
+    voice_map: &State<ws_handler::VoiceMap>,
+) -> Result<Json<Vec<crate::models::community::ChannelWithVoice>>, Status> {
+    match db::get_channels_for_community(pool, community).await {
+        Ok(channels) => {
+            let voice_map = voice_map.inner().clone();
+            let mut enriched = Vec::with_capacity(channels.len());
+            for channel in channels {
+                let mut cw = crate::models::community::ChannelWithVoice::from(channel);
+                cw.voice_members =
+                    ws_handler::get_voice_members_for_channel(&voice_map, community, &cw.rkey).await;
+                enriched.push(cw);
+            }
+            Ok(Json(enriched))
+        }
+        Err(e) => {
             error!("get_channels error: {e}");
-            Status::InternalServerError
-        })
+            Err(Status::InternalServerError)
+        }
+    }
 }
 
 /// Retrieve channels and categories combined into a sidebar-ready structure.
@@ -236,14 +248,51 @@ async fn get_channels(
 async fn get_sidebar(
     community: &str,
     pool: &State<sqlx::PgPool>,
-) -> Result<Json<crate::models::community::SidebarResponse>, Status> {
-    db::get_sidebar_for_community(pool, community)
-        .await
-        .map(Json)
-        .map_err(|e| {
+    voice_map: &State<ws_handler::VoiceMap>,
+) -> Result<Json<crate::models::community::SidebarResponseWithVoice>, Status> {
+    match db::get_sidebar_for_community(pool, community).await {
+        Ok(sidebar) => {
+            let voice_map = voice_map.inner().clone();
+            let mut categories = Vec::with_capacity(sidebar.categories.len());
+            for cat in sidebar.categories {
+                let mut enriched_channels = Vec::with_capacity(cat.channels.len());
+                for channel in cat.channels {
+                    let mut cw = crate::models::community::ChannelWithVoice::from(channel);
+                    cw.voice_members = ws_handler::get_voice_members_for_channel(
+                        &voice_map,
+                        community,
+                        &cw.rkey,
+                    )
+                    .await;
+                    enriched_channels.push(cw);
+                }
+                categories.push(crate::models::community::SidebarCategoryWithVoice {
+                    uri: cat.uri,
+                    rkey: cat.rkey,
+                    name: cat.name,
+                    channel_order: cat.channel_order,
+                    channels: enriched_channels,
+                });
+            }
+            let mut uncategorized =
+                Vec::with_capacity(sidebar.uncategorized.len());
+            for channel in sidebar.uncategorized {
+                let mut cw = crate::models::community::ChannelWithVoice::from(channel);
+                cw.voice_members =
+                    ws_handler::get_voice_members_for_channel(&voice_map, community, &cw.rkey)
+                        .await;
+                uncategorized.push(cw);
+            }
+            Ok(Json(crate::models::community::SidebarResponseWithVoice {
+                categories,
+                uncategorized,
+            }))
+        }
+        Err(e) => {
             error!("get_sidebar error: {e}");
-            Status::InternalServerError
-        })
+            Err(Status::InternalServerError)
+        }
+    }
 }
 
 /// Look up a community by AT-URI or rkey.
