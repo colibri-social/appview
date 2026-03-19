@@ -633,6 +633,7 @@ fn rocket() -> _ {
         .manage(RoomState::new())
         .manage(reqwest::Client::new())
         .manage(std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, ws_handler::DIDConnectionState>::new())))
+        .manage(ws_handler::new_voice_map())
         // ── Routes ───────────────────────────────────────────────────────────
         .mount(
             "/",

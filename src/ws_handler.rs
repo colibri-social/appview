@@ -28,6 +28,87 @@ pub struct DIDConnectionState {
 /// Application-wide presence map.  Registered as Rocket managed state.
 pub type PresenceMap = Arc<Mutex<HashMap<String, DIDConnectionState>>>;
 
+type VoiceKey = (String, String);
+pub type VoiceMap = Arc<Mutex<HashMap<VoiceKey, HashSet<String>>>>;
+
+pub fn new_voice_map() -> VoiceMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+fn sorted_members(members: &HashSet<String>) -> Vec<String> {
+    let mut list: Vec<_> = members.iter().cloned().collect();
+    list.sort();
+    list
+}
+
+async fn add_voice_member(
+    voice_map: &VoiceMap,
+    community_uri: &str,
+    channel_rkey: &str,
+    did: &str,
+) -> Option<Vec<String>> {
+    let mut map = voice_map.lock().await;
+    let key = (community_uri.to_string(), channel_rkey.to_string());
+    let members = map.entry(key).or_insert_with(HashSet::new);
+    if members.insert(did.to_string()) {
+        Some(sorted_members(members))
+    } else {
+        None
+    }
+}
+
+async fn remove_voice_member(
+    voice_map: &VoiceMap,
+    community_uri: &str,
+    channel_rkey: &str,
+    did: &str,
+) -> Option<Vec<String>> {
+    let mut map = voice_map.lock().await;
+    let key = (community_uri.to_string(), channel_rkey.to_string());
+    if let Some(members) = map.get_mut(&key) {
+        if members.remove(did) {
+            if members.is_empty() {
+                map.remove(&key);
+                Some(vec![])
+            } else {
+                Some(sorted_members(members))
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+async fn remove_voice_member_from_all(
+    voice_map: &VoiceMap,
+    did: &str,
+) -> Vec<(String, String, Vec<String>)> {
+    let mut map = voice_map.lock().await;
+    let keys_to_update: Vec<_> = map
+        .iter()
+        .filter(|(_, members)| members.contains(did))
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    let mut updates = Vec::new();
+    for key in keys_to_update {
+        if let Some(members) = map.get_mut(&key) {
+            members.remove(did);
+            let member_list = if members.is_empty() {
+                map.remove(&key);
+                Vec::new()
+            } else {
+                sorted_members(members)
+            };
+            updates.push((key.0.clone(), key.1.clone(), member_list));
+        }
+    }
+
+    updates
+}
+
 // ── Client → server ───────────────────────────────────────────────────────────
 
 /// A subscription request sent by the client over the WebSocket.
@@ -53,9 +134,15 @@ struct ClientRequest {
     /// Community AT-URI filter for "community" event type.
     #[serde(default)]
     community_uri: Option<String>,
-    /// For "set_state" action: the desired state (online/away/dnd).
+    /// For "set_state" action: the desired state (online/away/dnd/offline).
     #[serde(default)]
     state: Option<String>,
+    /// For "voice_event" action: the voice channel's record key.
+    #[serde(default)]
+    voice_channel_rkey: Option<String>,
+    /// For "voice_event" action: "join" (default) or "leave".
+    #[serde(default)]
+    voice_action: Option<String>,
 }
 
 // ── Server → client ───────────────────────────────────────────────────────────
@@ -172,7 +259,8 @@ impl Subscriptions {
             | AppEvent::MemberJoined { community_uri, .. }
             | AppEvent::MemberLeft { community_uri, .. }
             | AppEvent::CommunityUpserted { community_uri, .. }
-            | AppEvent::CommunityDeleted { community_uri, .. } => match &self.community {
+            | AppEvent::CommunityDeleted { community_uri, .. }
+            | AppEvent::VoiceChannelUpdated { community_uri, .. } => match &self.community {
                 None => false,
                 Some(None) => true,
                 Some(Some(uris)) => uris.contains(community_uri),
@@ -202,12 +290,14 @@ pub fn subscribe(
     bus: &State<EventBus>,
     pool: &State<PgPool>,
     presence_map: &State<PresenceMap>,
+    voice_map: &State<VoiceMap>,
     did: Option<String>,
 ) -> ws::Channel<'static> {
     let mut rx = bus.subscribe();
     let bus = bus.inner().clone();
     let pool = pool.inner().clone();
     let presence_map = presence_map.inner().clone();
+    let voice_map = voice_map.inner().clone();
     let did = did.filter(|d| !d.is_empty());
 
     ws.channel(move |stream| {
@@ -381,6 +471,67 @@ pub fn subscribe(
                                                     // Generic activity ping — client sends this after
                                                     // any user action (e.g. sending a message via REST).
                                                     "activity" => ServerMessage::Ack { message: String::new() },
+                                                    "voice_event" => {
+                                                        if let Some(ref d) = did {
+                                                            if let (Some(community_uri), Some(channel_rkey)) = (
+                                                                req.community_uri.clone(),
+                                                                req.voice_channel_rkey.clone(),
+                                                            ) {
+                                                                let voice_action =
+                                                                    req.voice_action.as_deref().unwrap_or("join");
+                                                                match voice_action {
+                                                                    "join" => {
+                                                                        if let Some(member_list) = add_voice_member(
+                                                                            &voice_map,
+                                                                            &community_uri,
+                                                                            &channel_rkey,
+                                                                            d,
+                                                                        )
+                                                                        .await
+                                                                        {
+                                                                            let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                                                                                community_uri: community_uri.clone(),
+                                                                                channel_rkey: channel_rkey.clone(),
+                                                                                member_dids: member_list,
+                                                                            });
+                                                                        }
+                                                                        ServerMessage::Ack { message: String::new() }
+                                                                    }
+                                                                    "leave" => {
+                                                                        if let Some(member_list) = remove_voice_member(
+                                                                            &voice_map,
+                                                                            &community_uri,
+                                                                            &channel_rkey,
+                                                                            d,
+                                                                        )
+                                                                        .await
+                                                                        {
+                                                                            let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                                                                                community_uri: community_uri.clone(),
+                                                                                channel_rkey: channel_rkey.clone(),
+                                                                                member_dids: member_list,
+                                                                            });
+                                                                        }
+                                                                        ServerMessage::Ack { message: String::new() }
+                                                                    }
+                                                                    other => ServerMessage::Error {
+                                                                        message: format!(
+                                                                            "Invalid voice_action: {other}. Use join or leave"
+                                                                        ),
+                                                                    },
+                                                                }
+                                                            } else {
+                                                                ServerMessage::Error {
+                                                                    message: "community_uri and voice_channel_rkey are required for voice_event"
+                                                                        .to_string(),
+                                                                }
+                                                            }
+                                                        } else {
+                                                            ServerMessage::Error {
+                                                                message: "DID required for voice_event".to_string(),
+                                                            }
+                                                        }
+                                                    }
                                                     "set_state" => {
                                                         if let Some(ref d) = did {
                                                             if let Some(new_state) = &req.state {
@@ -397,6 +548,16 @@ pub fn subscribe(
                                                                                 avatar_url: updated.avatar_url,
                                                                             });
                                                                             preferred_state = new_state.clone();
+                                                                            if new_state == "offline" {
+                                                                                let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
+                                                                                for (community_uri, channel_rkey, members) in voice_updates {
+                                                                                    let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                                                                                        community_uri,
+                                                                                        channel_rkey,
+                                                                                        member_dids: members,
+                                                                                    });
+                                                                                }
+                                                                            }
                                                                             ServerMessage::Ack { message: String::new() }
                                                                         } else {
                                                                             ServerMessage::Error { message: "Failed to update state".to_string() }
@@ -512,6 +673,14 @@ pub fn subscribe(
                 };
 
                 if last_connection {
+                    let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
+                    for (community_uri, channel_rkey, members) in voice_updates {
+                        let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                            community_uri,
+                            channel_rkey,
+                            member_dids: members,
+                        });
+                    }
                     if let Ok(updated) =
                         crate::db::set_user_state(&pool, d, "offline", false).await
                     {

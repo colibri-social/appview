@@ -137,6 +137,12 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         handle: Option<String>,
     },
+    /// Fired whenever the active member list of a voice channel changes.
+    VoiceChannelUpdated {
+        community_uri: String,
+        channel_rkey: String,
+        member_dids: Vec<String>,
+    },
 }
 
 pub type EventBus = broadcast::Sender<AppEvent>;

@@ -487,6 +487,10 @@ Send JSON subscription requests; receive JSON events.
 // Signal user activity (e.g. after sending a message via REST) — resets away timer
 { "action": "activity" }
 
+// Voice presence updates — send when the user joins or leaves a voice channel
+{ "action": "voice_event", "community_uri": "<community-uri>", "voice_channel_rkey": "<record-key>", "voice_action": "join" }
+{ "action": "voice_event", "community_uri": "<community-uri>", "voice_channel_rkey": "<record-key>", "voice_action": "leave" }
+
 // Set presence state — updates both current state and preferred state (restored on reconnect)
 { "action": "set_state", "state": "online" }
 { "action": "set_state", "state": "away" }
@@ -689,6 +693,24 @@ A membership record was deleted (user left or was removed).
 	"member_did": "did:plc:yyy"
 }
 ```
+
+#### `voice_channel_updated`
+
+Emitted whenever the active member list of a voice channel changes (join, leave, disconnect, or `set_state` to `offline`).
+
+```json
+{
+  "type": "voice_channel_updated",
+  "community_uri": "at://did:plc:xxx/social.colibri.community/3mxxx",
+  "channel_rkey": "3mvoice1",
+  "member_dids": [
+    "did:plc:abc",
+    "did:plc:xyz"
+  ]
+}
+```
+
+`member_dids` is the full sorted list of DIDs currently marked as present in that voice channel. When the list becomes empty clients receive the event with `[]`, which should clear any UI state.
 
 ---
 
