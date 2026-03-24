@@ -121,6 +121,39 @@ async fn remove_voice_member_from_all(
     updates
 }
 
+async fn remove_voice_member_from_all_except(
+    voice_map: &VoiceMap,
+    community_uri: &str,
+    channel_rkey: &str,
+    did: &str,
+) -> Vec<(String, String, Vec<String>)> {
+    let mut map = voice_map.lock().await;
+    let keys_to_update: Vec<_> = map
+        .iter()
+        .filter(|((community, rkey), members)| {
+            members.contains(did)
+                && !(community == community_uri && rkey == channel_rkey)
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    let mut updates = Vec::new();
+    for key in keys_to_update {
+        if let Some(members) = map.get_mut(&key) {
+            members.remove(did);
+            let member_list = if members.is_empty() {
+                map.remove(&key);
+                Vec::new()
+            } else {
+                sorted_members(members)
+            };
+            updates.push((key.0.clone(), key.1.clone(), member_list));
+        }
+    }
+
+    updates
+}
+
 // ── Client → server ───────────────────────────────────────────────────────────
 
 /// A subscription request sent by the client over the WebSocket.
@@ -393,6 +426,14 @@ pub fn subscribe(
                                     }
                                 };
                                 if should_set_away {
+                                    let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
+                                    for (community_uri, channel_rkey, members) in voice_updates {
+                                        let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                                            community_uri,
+                                            channel_rkey,
+                                            member_dids: members,
+                                        });
+                                    }
                                     if let Ok(updated) =
                                         crate::db::set_user_state(&pool, d, "away", false).await
                                     {
@@ -493,6 +534,23 @@ pub fn subscribe(
                                                                     req.voice_action.as_deref().unwrap_or("join");
                                                                 match voice_action {
                                                                     "join" => {
+                                                                        let removal_updates =
+                                                                            remove_voice_member_from_all_except(
+                                                                                &voice_map,
+                                                                                &community_uri,
+                                                                                &channel_rkey,
+                                                                                d,
+                                                                            )
+                                                                            .await;
+                                                                        for (community_uri, channel_rkey, members) in
+                                                                            removal_updates
+                                                                        {
+                                                                            let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                                                                                community_uri,
+                                                                                channel_rkey,
+                                                                                member_dids: members,
+                                                                            });
+                                                                        }
                                                                         if let Some(member_list) = add_voice_member(
                                                                             &voice_map,
                                                                             &community_uri,
