@@ -31,6 +31,24 @@ pub type PresenceMap = Arc<Mutex<HashMap<String, DIDConnectionState>>>;
 type VoiceKey = (String, String);
 pub type VoiceMap = Arc<Mutex<HashMap<VoiceKey, HashSet<String>>>>;
 
+async fn capture_voice_snapshot(voice_map: &VoiceMap) -> Vec<(String, String, Vec<String>)> {
+    let map = voice_map.lock().await;
+    map.iter()
+        .map(|((community, channel), members)| {
+            (
+                community.clone(),
+                channel.clone(),
+                sorted_members(members),
+            )
+        })
+        .collect()
+}
+
+async fn log_voice_state(voice_map: &VoiceMap, context: &str) {
+    let snapshot = capture_voice_snapshot(voice_map).await;
+    dbg!(context, snapshot);
+}
+
 pub async fn get_voice_members_for_channel(
     voice_map: &VoiceMap,
     community_uri: &str,
@@ -426,6 +444,7 @@ pub fn subscribe(
                                     }
                                 };
                                 if should_set_away {
+                                    dbg!("away timeout triggered", d);
                                     let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
                                     for (community_uri, channel_rkey, members) in voice_updates {
                                         let _ = bus.send(AppEvent::VoiceChannelUpdated {
@@ -434,6 +453,7 @@ pub fn subscribe(
                                             member_dids: members,
                                         });
                                     }
+                                    log_voice_state(&voice_map, "after away cleanup").await;
                                     if let Ok(updated) =
                                         crate::db::set_user_state(&pool, d, "away", false).await
                                     {
@@ -534,6 +554,12 @@ pub fn subscribe(
                                                                     req.voice_action.as_deref().unwrap_or("join");
                                                                 match voice_action {
                                                                     "join" => {
+                                                                        dbg!(
+                                                                            "voice_event join",
+                                                                            &community_uri,
+                                                                            &channel_rkey,
+                                                                            &d,
+                                                                        );
                                                                         let removal_updates =
                                                                             remove_voice_member_from_all_except(
                                                                                 &voice_map,
@@ -565,9 +591,16 @@ pub fn subscribe(
                                                                                 member_dids: member_list,
                                                                             });
                                                                         }
+                                                                        log_voice_state(&voice_map, "after voice join").await;
                                                                         ServerMessage::Ack { message: String::new() }
                                                                     }
                                                                     "leave" => {
+                                                                        dbg!(
+                                                                            "voice_event leave",
+                                                                            &community_uri,
+                                                                            &channel_rkey,
+                                                                            &d,
+                                                                        );
                                                                         let member_list = match remove_voice_member(
                                                                             &voice_map,
                                                                             &community_uri,
@@ -578,12 +611,20 @@ pub fn subscribe(
                                                                         {
                                                                             Some(list) => list,
                                                                             None => {
-                                                                                get_voice_members_for_channel(
+                                                                                let current = get_voice_members_for_channel(
                                                                                     &voice_map,
                                                                                     &community_uri,
                                                                                     &channel_rkey,
                                                                                 )
-                                                                                .await
+                                                                                .await;
+                                                                                dbg!(
+                                                                                    "leave requested but DID not tracked",
+                                                                                    &d,
+                                                                                    &community_uri,
+                                                                                    &channel_rkey,
+                                                                                    &current,
+                                                                                );
+                                                                                current
                                                                             }
                                                                         };
                                                                         let _ = bus.send(AppEvent::VoiceChannelUpdated {
@@ -591,6 +632,8 @@ pub fn subscribe(
                                                                             channel_rkey: channel_rkey.clone(),
                                                                             member_dids: member_list,
                                                                         });
+                                                                        log_voice_state(&voice_map, "after voice leave")
+                                                                            .await;
                                                                         ServerMessage::Ack { message: String::new() }
                                                                     }
                                                                     other => ServerMessage::Error {
@@ -636,6 +679,7 @@ pub fn subscribe(
                                                                                         member_dids: members,
                                                                                     });
                                                                                 }
+                                                                                log_voice_state(&voice_map, "after offline cleanup").await;
                                                                             }
                                                                             ServerMessage::Ack { message: String::new() }
                                                                         } else {
@@ -760,6 +804,7 @@ pub fn subscribe(
                             member_dids: members,
                         });
                     }
+                    log_voice_state(&voice_map, "after disconnect cleanup").await;
                     if let Ok(updated) =
                         crate::db::set_user_state(&pool, d, "offline", false).await
                     {
