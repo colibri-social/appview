@@ -25,9 +25,10 @@ use tracing::error;
 
 use models::{
     author::AuthorProfile,
+    channel_read::ChannelRead,
     community::{
-        Channel, ChannelWithVoice, CommunitiesResponse, Community, CommunityMember,
-        CreateInviteRequest, InviteCodeInfo,
+        Channel, ChannelWithVoice, CommunitiesResponse, Community, CommunityBanRequest,
+        CommunityMember, CreateInviteRequest, InviteCodeInfo,
     },
     message::MessageResponse,
     reaction::ReactionSummary,
@@ -327,6 +328,23 @@ async fn get_members(
         })
 }
 
+/// Retrieve all channel read cursors for a DID.
+///
+/// Query param: `did` (required)
+#[get("/api/channel-reads?<did>")]
+async fn get_channel_reads(
+    did: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Vec<ChannelRead>>, Status> {
+    db::get_channel_reads(pool, did)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_channel_reads error: {e}");
+            Status::InternalServerError
+        })
+}
+
 /// Retrieve all communities for a user (both owned and joined) in one roundtrip.
 ///
 /// Query param: `did` (required)
@@ -435,6 +453,44 @@ async fn block_message(
         Ok(None) => Status::NotFound,
         Err(e) => {
             error!("block_message error: {e}");
+            Status::InternalServerError
+        }
+    }
+}
+
+/// Ban a DID from posting or reacting in a community.
+///
+/// Body: `{ "community_uri": "...", "member_did": "did:..." }`
+#[post("/api/community/ban", data = "<body>")]
+async fn ban_community_member(
+    _key: ApiKey,
+    body: Json<CommunityBanRequest>,
+    pool: &State<sqlx::PgPool>,
+) -> Status {
+    match db::ban_member_from_community(pool, &body.community_uri, &body.member_did).await {
+        Ok(_) => Status::NoContent,
+        Err(e) => {
+            error!("ban_community_member error: {e}");
+            Status::InternalServerError
+        }
+    }
+}
+
+/// Unban a DID so they can participate again.
+///
+/// Query params: `community` (AT-URI), `member_did`
+#[delete("/api/community/ban?<community>&<member_did>")]
+async fn unban_community_member(
+    _key: ApiKey,
+    community: &str,
+    member_did: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Status {
+    match db::unban_member_from_community(pool, community, member_did).await {
+        Ok(true) => Status::NoContent,
+        Ok(false) => Status::NotFound,
+        Err(e) => {
+            error!("unban_community_member error: {e}");
             Status::InternalServerError
         }
     }
@@ -689,11 +745,14 @@ fn rocket() -> _ {
                 get_channels,
                 get_sidebar,
                 get_members,
+                get_channel_reads,
                 get_invite,
                 create_invite,
                 revoke_invite,
                 use_invite,
                 block_message,
+                ban_community_member,
+                unban_community_member,
                 set_user_state,
                 list_invites,
                 get_blob,

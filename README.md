@@ -205,6 +205,15 @@ The response now includes a `requires_approval_to_join` boolean, which mirrors t
 
 Returns `404` if the community is not cached.
 
+### Community bans
+
+Use the protected invite API key to ban or unban members from posting or reacting within a community. Banned DIDs are silently dropped by the Jetstream consumer — their messages and reactions are never indexed or broadcast.
+
+- `POST /api/community/ban` (body `{ "community_uri": "...", "member_did": "did:..." }`) — adds the DID to the ban list. Returns `204 No Content`.
+- `DELETE /api/community/ban?community=<uri>&member_did=<did>` — removes the ban entry so the DID can participate again; `404` is returned if the DID was not banned.
+
+All ban endpoints require `Authorization: Bearer <INVITE_API_KEY>`.
+
 #### `GET /api/communities`
 
 All communities for a user — both owned and joined — in a single roundtrip.
@@ -454,6 +463,35 @@ curl -H "Range: bytes=0-1023" "http://localhost:8000/api/blob?did=did:plc:xxx&ci
 ```
 
 Returns `404` if the DID cannot be resolved, `502` if the PDS request fails.
+
+### Channel reads
+
+#### `GET /api/channel-reads`
+
+Retrieve all channel read cursors for a DID. These records are synced from the user's PDS via Jetstream, reflecting `social.colibri.channel.read` events.
+
+Each read cursor indicates the last timestamp the user marked a channel as read. Clients can compare this cursor to message timestamps to determine which channels have unread messages.
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `did`     | ✅       | User DID    |
+
+**Response:**
+
+```json
+[
+  {
+    "channel_uri": "at://did:plc:xxx/social.colibri.channel/3mxxx",
+    "cursor_at": "2024-03-15T14:30:00Z"
+  },
+  {
+    "channel_uri": "at://did:plc:yyy/social.colibri.channel/3myyy",
+    "cursor_at": "2024-03-15T12:00:00Z"
+  }
+]
+```
+
+The `cursor_at` timestamp is parsed from the `cursor` field in the ATProto record. Results are sorted newest first.
 
 ---
 

@@ -129,3 +129,9 @@ pub struct CreateInviteRequest {
     pub owner_did: String,
     pub max_uses: Option<i32>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct CommunityBanRequest {
+    pub community_uri: String,
+    pub member_did: String,
+}

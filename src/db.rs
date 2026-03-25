@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::models::{
     author::AuthorProfile,
+    channel_read::ChannelRead,
     community::{CommunitiesResponse, Community, InviteCodeInfo},
     message::{Message, MessageResponse, MessageWithAuthor},
     reaction::{Reaction, ReactionSummary},
@@ -1008,6 +1009,54 @@ pub async fn delete_membership(pool: &PgPool, membership_uri: &str) -> Result<()
     Ok(())
 }
 
+/// Ban a DID from participating in a community.
+pub async fn ban_member_from_community(
+    pool: &PgPool,
+    community_uri: &str,
+    member_did: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO community_bans (community_uri, member_did) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(community_uri)
+    .bind(member_did)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Unban a DID from a community. Returns true if a row was deleted.
+pub async fn unban_member_from_community(
+    pool: &PgPool,
+    community_uri: &str,
+    member_did: &str,
+) -> Result<bool> {
+    let rows =
+        sqlx::query("DELETE FROM community_bans WHERE community_uri = $1 AND member_did = $2")
+            .bind(community_uri)
+            .bind(member_did)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    Ok(rows > 0)
+}
+
+/// Return true if a DID is banned from a community.
+pub async fn is_member_banned(
+    pool: &PgPool,
+    community_uri: &str,
+    member_did: &str,
+) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM community_bans WHERE community_uri = $1 AND member_did = $2)",
+    )
+    .bind(community_uri)
+    .bind(member_did)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
+}
+
 /// Mark approved members without approval URIs as pending and return their DIDs/URIs.
 pub async fn mark_members_without_approval_pending(
     pool: &PgPool,
@@ -1198,6 +1247,59 @@ pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<Commun
     .await?;
 
     Ok(CommunitiesResponse { owned, joined })
+}
+
+/// Upsert a channel read cursor for a DID.
+pub async fn upsert_channel_read(
+    pool: &PgPool,
+    did: &str,
+    channel_uri: &str,
+    cursor_at: DateTime<Utc>,
+    record_rkey: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channel_reads (did, channel_uri, cursor_at, record_rkey)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (did, channel_uri) DO UPDATE
+          SET cursor_at   = EXCLUDED.cursor_at,
+              record_rkey = EXCLUDED.record_rkey,
+              updated_at  = NOW()
+        "#,
+    )
+    .bind(did)
+    .bind(channel_uri)
+    .bind(cursor_at)
+    .bind(record_rkey)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove a channel read cursor when the record is deleted.
+pub async fn delete_channel_read(pool: &PgPool, did: &str, record_rkey: &str) -> Result<()> {
+    sqlx::query("DELETE FROM channel_reads WHERE did = $1 AND record_rkey = $2")
+        .bind(did)
+        .bind(record_rkey)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Return all channel reads for a DID.
+pub async fn get_channel_reads(pool: &PgPool, did: &str) -> Result<Vec<ChannelRead>> {
+    let reads = sqlx::query_as::<_, ChannelRead>(
+        r#"
+        SELECT channel_uri, cursor_at
+          FROM channel_reads
+         WHERE did = $1
+         ORDER BY cursor_at DESC
+        "#,
+    )
+    .bind(did)
+    .fetch_all(pool)
+    .await?;
+    Ok(reads)
 }
 
 // ── Invite codes ──────────────────────────────────────────────────────────────

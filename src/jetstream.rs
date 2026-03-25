@@ -113,6 +113,13 @@ struct ColibriChannel {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ColibriChannelRead {
+    channel: String,
+    cursor: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ColibriMembership {
     /// AT-URI of the community the member wants to join.
     community: String,
@@ -297,6 +304,10 @@ async fn handle_event(
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching channel event");
             handle_channel(commit, &event.did, pool, bus).await
         }
+        "social.colibri.channel.read" => {
+            trace!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching channel read event");
+            handle_channel_read(commit, &event.did, pool).await
+        }
         "social.colibri.category" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching category event");
             handle_category(commit, &event.did, pool, bus).await
@@ -355,6 +366,10 @@ async fn handle_message(
             if let Ok(Some((community_uri, owner_did, requires_approval_to_join))) =
                 db::get_community_for_channel(pool, &record.channel).await
             {
+                if let Ok(true) = db::is_member_banned(pool, &community_uri, did).await {
+                    debug!(did, community_uri = %community_uri, "Message dropped: banned member");
+                    return Ok(());
+                }
                 if did != owner_did {
                     let allowed = if requires_approval_to_join {
                         db::is_approved_member(pool, &community_uri, did)
@@ -429,6 +444,10 @@ async fn handle_message(
             if let Ok(Some((community_uri, owner_did, requires_approval_to_join))) =
                 db::get_community_for_channel(pool, &record.channel).await
             {
+                if let Ok(true) = db::is_member_banned(pool, &community_uri, did).await {
+                    debug!(did, community_uri = %community_uri, "Message update dropped: banned member");
+                    return Ok(());
+                }
                 if did != owner_did {
                     let allowed = if requires_approval_to_join {
                         db::is_approved_member(pool, &community_uri, did)
@@ -544,6 +563,28 @@ async fn handle_reaction(
 
             let target_rkey = db::extract_rkey(&record.target_message).to_owned();
 
+            let channel_info = match db::get_message_channel(pool, &target_rkey).await {
+                Ok(info) => info,
+                Err(e) => {
+                    error!(did, rkey = %commit.rkey, "Failed to fetch message channel for reaction: {e}");
+                    None
+                }
+            };
+            if let Some((channel, _)) = channel_info.as_ref() {
+                if let Ok(Some((community_uri, _, _))) =
+                    db::get_community_for_channel(pool, channel).await
+                {
+                    if let Ok(true) = db::is_member_banned(pool, &community_uri, did).await {
+                        debug!(
+                            did,
+                            community_uri = %community_uri,
+                            "Reaction dropped: banned member"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+
             let reaction = match db::save_reaction(
                 pool,
                 &commit.rkey,
@@ -568,9 +609,7 @@ async fn handle_reaction(
                 }
             };
 
-            if let Ok(Some((channel, target_author_did))) =
-                db::get_message_channel(pool, &target_rkey).await
-            {
+            if let Some((channel, target_author_did)) = channel_info {
                 let _ = bus.send(AppEvent::ReactionAdded {
                     rkey: reaction.rkey,
                     author_did: reaction.author_did,
@@ -915,6 +954,46 @@ async fn handle_channel(
             }
         }
         other => trace!(did, op = other, "Channel: unhandled operation"),
+    }
+    Ok(())
+}
+
+// ── Channel read handler ───────────────────────────────────────────────────────
+
+async fn handle_channel_read(commit: CommitData, did: &str, pool: &PgPool) -> Result<()> {
+    match commit.operation.as_str() {
+        "create" | "update" => {
+            let record: ColibriChannelRead =
+                match commit.record.and_then(|v| serde_json::from_value(v).ok()) {
+                    Some(r) => r,
+                    None => {
+                        debug!(
+                            did,
+                            rkey = %commit.rkey,
+                            "Channel read: missing/malformed record, skipping"
+                        );
+                        return Ok(());
+                    }
+                };
+            let cursor_at = match DateTime::parse_from_rfc3339(&record.cursor) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc),
+                Err(e) => {
+                    debug!(did, cursor = %record.cursor, "Channel read: invalid cursor: {e}");
+                    return Ok(());
+                }
+            };
+            if let Err(e) =
+                db::upsert_channel_read(pool, did, &record.channel, cursor_at, &commit.rkey).await
+            {
+                error!(did, rkey = %commit.rkey, "Failed to persist channel read: {e}");
+            }
+        }
+        "delete" => {
+            if let Err(e) = db::delete_channel_read(pool, did, &commit.rkey).await {
+                error!(did, rkey = %commit.rkey, "Failed to delete channel read: {e}");
+            }
+        }
+        other => trace!(did, rkey = %commit.rkey, op = other, "Channel read: unhandled operation"),
     }
     Ok(())
 }
