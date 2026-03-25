@@ -1,5 +1,8 @@
 # colibri-appview
 
+> [!WARNING]
+> This implementation is almost entirely vibe-coded for the purpose of being able to quickly get started with development of the main application. It will be re-written in the near future to take advantage of [Tap](https://github.com/bluesky-social/indigo/blob/main/cmd/tap/README.md) and be reworked to include all user data storage as well as any OAuth capabilities, which currently reside within the website's backend. If you are interested in helping with this, start a [discussion](https://github.com/colibri-social/appview/discussions) on this repo!
+
 An [ATProto](https://atproto.com/) appview for the **Colibri** social platform, built with [Rocket.rs](https://rocket.rs/).
 
 ## Overview
