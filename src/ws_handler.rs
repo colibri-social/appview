@@ -30,6 +30,7 @@ pub type PresenceMap = Arc<Mutex<HashMap<String, DIDConnectionState>>>;
 
 type VoiceKey = (String, String);
 pub type VoiceMap = Arc<Mutex<HashMap<VoiceKey, HashSet<String>>>>;
+pub type VoiceMembershipMap = Arc<Mutex<HashMap<String, VoiceKey>>>;
 
 async fn capture_voice_snapshot(voice_map: &VoiceMap) -> Vec<(String, String, Vec<String>)> {
     let map = voice_map.lock().await;
@@ -65,41 +66,75 @@ pub fn new_voice_map() -> VoiceMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+pub fn new_voice_membership_map() -> VoiceMembershipMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 fn sorted_members(members: &HashSet<String>) -> Vec<String> {
     let mut list: Vec<_> = members.iter().cloned().collect();
     list.sort();
     list
 }
 
-async fn add_voice_member(
+async fn set_voice_channel(
     voice_map: &VoiceMap,
+    membership_map: &VoiceMembershipMap,
     community_uri: &str,
     channel_rkey: &str,
     did: &str,
-) -> Option<Vec<String>> {
-    let mut map = voice_map.lock().await;
-    let key = (community_uri.to_string(), channel_rkey.to_string());
-    let members = map.entry(key).or_insert_with(HashSet::new);
-    if members.insert(did.to_string()) {
-        Some(sorted_members(members))
-    } else {
-        None
-    }
-}
-
-async fn remove_voice_member_from_all(
-    voice_map: &VoiceMap,
-    did: &str,
 ) -> Vec<(String, String, Vec<String>)> {
-    let mut map = voice_map.lock().await;
-    let keys_to_update: Vec<_> = map
-        .iter()
-        .filter(|(_, members)| members.contains(did))
-        .map(|(key, _)| key.clone())
-        .collect();
+    let desired_key = (community_uri.to_string(), channel_rkey.to_string());
+    let previous = {
+        let mut membership = membership_map.lock().await;
+        let current = membership.get(did).cloned();
+        if current.as_ref() == Some(&desired_key) {
+            return Vec::new();
+        }
+        membership.insert(did.to_string(), desired_key.clone());
+        current
+    };
 
     let mut updates = Vec::new();
-    for key in keys_to_update {
+    {
+        let mut map = voice_map.lock().await;
+        if let Some((prev_community, prev_channel)) = previous {
+            if let Some(members) = map.get_mut(&(prev_community.clone(), prev_channel.clone())) {
+                members.remove(did);
+                let member_list = if members.is_empty() {
+                    map.remove(&(prev_community.clone(), prev_channel.clone()));
+                    Vec::new()
+                } else {
+                    sorted_members(members)
+                };
+                updates.push((prev_community, prev_channel, member_list));
+            }
+        }
+        let members = map.entry(desired_key.clone()).or_insert_with(HashSet::new);
+        if members.insert(did.to_string()) {
+            updates.push((
+                desired_key.0.clone(),
+                desired_key.1.clone(),
+                sorted_members(members),
+            ));
+        }
+    }
+
+    updates
+}
+
+async fn clear_voice_channel(
+    voice_map: &VoiceMap,
+    membership_map: &VoiceMembershipMap,
+    did: &str,
+) -> Option<(String, String, Vec<String>)> {
+    let target = {
+        let mut membership = membership_map.lock().await;
+        membership.remove(did)
+    };
+
+    if let Some((community_uri, channel_rkey)) = target {
+        let mut map = voice_map.lock().await;
+        let key = (community_uri.clone(), channel_rkey.clone());
         if let Some(members) = map.get_mut(&key) {
             members.remove(did);
             let member_list = if members.is_empty() {
@@ -108,44 +143,11 @@ async fn remove_voice_member_from_all(
             } else {
                 sorted_members(members)
             };
-            updates.push((key.0.clone(), key.1.clone(), member_list));
+            return Some((community_uri, channel_rkey, member_list));
         }
     }
 
-    updates
-}
-
-async fn remove_voice_member_from_all_except(
-    voice_map: &VoiceMap,
-    community_uri: &str,
-    channel_rkey: &str,
-    did: &str,
-) -> Vec<(String, String, Vec<String>)> {
-    let mut map = voice_map.lock().await;
-    let keys_to_update: Vec<_> = map
-        .iter()
-        .filter(|((community, rkey), members)| {
-            members.contains(did)
-                && !(community == community_uri && rkey == channel_rkey)
-        })
-        .map(|(key, _)| key.clone())
-        .collect();
-
-    let mut updates = Vec::new();
-    for key in keys_to_update {
-        if let Some(members) = map.get_mut(&key) {
-            members.remove(did);
-            let member_list = if members.is_empty() {
-                map.remove(&key);
-                Vec::new()
-            } else {
-                sorted_members(members)
-            };
-            updates.push((key.0.clone(), key.1.clone(), member_list));
-        }
-    }
-
-    updates
+    None
 }
 
 // ── Client → server ───────────────────────────────────────────────────────────
@@ -330,6 +332,7 @@ pub fn subscribe(
     pool: &State<PgPool>,
     presence_map: &State<PresenceMap>,
     voice_map: &State<VoiceMap>,
+    voice_membership_map: &State<VoiceMembershipMap>,
     did: Option<String>,
 ) -> ws::Channel<'static> {
     let mut rx = bus.subscribe();
@@ -337,6 +340,7 @@ pub fn subscribe(
     let pool = pool.inner().clone();
     let presence_map = presence_map.inner().clone();
     let voice_map = voice_map.inner().clone();
+    let voice_membership_map = voice_membership_map.inner().clone();
     let did = did.filter(|d| !d.is_empty());
 
     ws.channel(move |stream| {
@@ -421,8 +425,9 @@ pub fn subscribe(
                                 };
                                 if should_set_away {
                                     dbg!("away timeout triggered", d);
-                                    let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
-                                    for (community_uri, channel_rkey, members) in voice_updates {
+                                    if let Some((community_uri, channel_rkey, members)) =
+                                        clear_voice_channel(&voice_map, &voice_membership_map, d).await
+                                    {
                                         let _ = bus.send(AppEvent::VoiceChannelUpdated {
                                             community_uri,
                                             channel_rkey,
@@ -536,35 +541,21 @@ pub fn subscribe(
                                                                             &channel_rkey,
                                                                             &d,
                                                                         );
-                                                                        let removal_updates =
-                                                                            remove_voice_member_from_all_except(
-                                                                                &voice_map,
-                                                                                &community_uri,
-                                                                                &channel_rkey,
-                                                                                d,
-                                                                            )
-                                                                            .await;
+                                                                        let updates = set_voice_channel(
+                                                                            &voice_map,
+                                                                            &voice_membership_map,
+                                                                            &community_uri,
+                                                                            &channel_rkey,
+                                                                            d,
+                                                                        )
+                                                                        .await;
                                                                         for (community_uri, channel_rkey, members) in
-                                                                            removal_updates
+                                                                            updates
                                                                         {
                                                                             let _ = bus.send(AppEvent::VoiceChannelUpdated {
                                                                                 community_uri,
                                                                                 channel_rkey,
                                                                                 member_dids: members,
-                                                                            });
-                                                                        }
-                                                                        if let Some(member_list) = add_voice_member(
-                                                                            &voice_map,
-                                                                            &community_uri,
-                                                                            &channel_rkey,
-                                                                            d,
-                                                                        )
-                                                                        .await
-                                                                        {
-                                                                            let _ = bus.send(AppEvent::VoiceChannelUpdated {
-                                                                                community_uri: community_uri.clone(),
-                                                                                channel_rkey: channel_rkey.clone(),
-                                                                                member_dids: member_list,
                                                                             });
                                                                         }
                                                                         log_voice_state(&voice_map, "after voice join").await;
@@ -577,38 +568,18 @@ pub fn subscribe(
                                                                             &channel_rkey,
                                                                             &d,
                                                                         );
-                                                                        let voice_updates =
-                                                                            remove_voice_member_from_all(
+                                                                        if let Some((community_uri, channel_rkey, members)) =
+                                                                            clear_voice_channel(
                                                                                 &voice_map,
+                                                                                &voice_membership_map,
                                                                                 d,
                                                                             )
-                                                                            .await;
-                                                                        let mut sent_requested = false;
-                                                                        for (updated_uri, updated_rkey, members) in
-                                                                            &voice_updates
+                                                                            .await
                                                                         {
-                                                                            if updated_uri == &community_uri
-                                                                                && updated_rkey == &channel_rkey
-                                                                            {
-                                                                                sent_requested = true;
-                                                                            }
                                                                             let _ = bus.send(AppEvent::VoiceChannelUpdated {
-                                                                                community_uri: updated_uri.clone(),
-                                                                                channel_rkey: updated_rkey.clone(),
-                                                                                member_dids: members.clone(),
-                                                                            });
-                                                                        }
-                                                                        if !sent_requested {
-                                                                            let member_list = get_voice_members_for_channel(
-                                                                                &voice_map,
-                                                                                &community_uri,
-                                                                                &channel_rkey,
-                                                                            )
-                                                                            .await;
-                                                                            let _ = bus.send(AppEvent::VoiceChannelUpdated {
-                                                                                community_uri: community_uri.clone(),
-                                                                                channel_rkey: channel_rkey.clone(),
-                                                                                member_dids: member_list,
+                                                                                community_uri,
+                                                                                channel_rkey,
+                                                                                member_dids: members,
                                                                             });
                                                                         }
                                                                         log_voice_state(&voice_map, "after voice leave")
@@ -650,8 +621,9 @@ pub fn subscribe(
                                                                             });
                                                                             preferred_state = new_state.clone();
                                                                             if new_state == "offline" {
-                                                                                let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
-                                                                                for (community_uri, channel_rkey, members) in voice_updates {
+                                                                                if let Some((community_uri, channel_rkey, members)) =
+                                                                                    clear_voice_channel(&voice_map, &voice_membership_map, d).await
+                                                                                {
                                                                                     let _ = bus.send(AppEvent::VoiceChannelUpdated {
                                                                                         community_uri,
                                                                                         channel_rkey,
@@ -775,8 +747,9 @@ pub fn subscribe(
                 };
 
                 if last_connection {
-                    let voice_updates = remove_voice_member_from_all(&voice_map, d).await;
-                    for (community_uri, channel_rkey, members) in voice_updates {
+                    if let Some((community_uri, channel_rkey, members)) =
+                        clear_voice_channel(&voice_map, &voice_membership_map, d).await
+                    {
                         let _ = bus.send(AppEvent::VoiceChannelUpdated {
                             community_uri,
                             channel_rkey,
