@@ -1008,6 +1008,27 @@ pub async fn delete_membership(pool: &PgPool, membership_uri: &str) -> Result<()
     Ok(())
 }
 
+/// Mark approved members without approval URIs as pending and return their DIDs/URIs.
+pub async fn mark_members_without_approval_pending(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<(String, String)>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        UPDATE community_members
+           SET status = 'pending'
+         WHERE community_uri = $1
+           AND approval_uri IS NULL
+           AND status = 'approved'
+         RETURNING member_did, membership_uri
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// Look up (community_uri, member_did) for a membership URI.
 pub async fn get_membership_info(
     pool: &PgPool,

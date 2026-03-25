@@ -291,7 +291,7 @@ async fn handle_event(
         }
         "social.colibri.community" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching community event");
-            handle_community(commit, &event.did, pool, bus).await
+            handle_community(commit, &event.did, pool, http, bus).await
         }
         "social.colibri.channel" => {
             debug!(did = %event.did, rkey = %commit.rkey, op = %commit.operation, "Dispatching channel event");
@@ -751,9 +751,15 @@ async fn handle_community(
     commit: CommitData,
     did: &str,
     pool: &PgPool,
+    http: &reqwest::Client,
     bus: &EventBus,
 ) -> Result<()> {
     let uri = format!("at://{}/social.colibri.community/{}", did, commit.rkey);
+    let previous_requires = db::get_community(pool, &uri)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.requires_approval_to_join);
     match commit.operation.as_str() {
         "create" | "update" => {
             let record: ColibriCommunity = match commit
@@ -781,6 +787,32 @@ async fn handle_community(
             {
                 error!(did, rkey = %commit.rkey, "DB error saving community: {e}");
             } else {
+                let switched_to_requires =
+                    matches!(previous_requires, Some(false)) && record.requires_approval_to_join;
+                if switched_to_requires {
+                    match db::mark_members_without_approval_pending(pool, &uri).await {
+                        Ok(demoted) => {
+                            if !demoted.is_empty() {
+                                info!(community = %uri, demoted = demoted.len(), "Community now requires approval → members without approvals reverted to pending");
+                            }
+                            for (member_did, membership_uri) in demoted {
+                                let profile = ensure_profile_cached(pool, http, &member_did).await;
+                                let _ = bus.send(AppEvent::MemberPending {
+                                    community_uri: uri.clone(),
+                                    member_did: member_did.clone(),
+                                    membership_uri,
+                                    display_name: profile
+                                        .as_ref()
+                                        .and_then(|p| p.display_name.clone()),
+                                    avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            error!(community = %uri, "Failed to demote members without approvals: {e}")
+                        }
+                    }
+                }
                 info!(did, rkey = %commit.rkey, name = %record.name, "Community indexed");
                 let _ = bus.send(AppEvent::CommunityUpserted {
                     community_uri: uri,

@@ -80,7 +80,7 @@ All endpoints return JSON. CORS is open (`*`).
 - Each DID can only be active in one voice channel. Joining a different channel triggers a `voice_channel_updated` event for the previous room before the new join is emitted, so clients see the previous membership cleared.
 - If a connection sends no non-heartbeat action for more than five minutes, it is marked away and the DID is removed from any active voice call so voice membership stays in sync.
 
-The Jetstream consumer enforces the community's `requiresApprovalToJoin` flag when indexing messages. Communities with `requiresApprovalToJoin = true` (default) only accept messages from approved members and the owner; those that set the flag to `false` allow any DID with a membership declaration to send messages even before approval.
+The Jetstream consumer enforces the community's `requiresApprovalToJoin` flag when indexing messages. Communities with `requiresApprovalToJoin = true` (default) only accept messages from approved members and the owner; those that set the flag to `false` allow any DID with a membership declaration to send messages even before approval. If a community flips from open to approval-only while the appview is running, any member lacking an approval record is reverted to `pending` and a `member_pending` event is emitted so clients can refresh their UI.
 
 ### Messages
 
