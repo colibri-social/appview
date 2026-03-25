@@ -568,7 +568,7 @@ pub fn subscribe(
                                                                         ServerMessage::Ack { message: String::new() }
                                                                     }
                                                                     "leave" => {
-                                                                        if let Some(member_list) = remove_voice_member(
+                                                                        let member_list = match remove_voice_member(
                                                                             &voice_map,
                                                                             &community_uri,
                                                                             &channel_rkey,
@@ -576,12 +576,21 @@ pub fn subscribe(
                                                                         )
                                                                         .await
                                                                         {
-                                                                            let _ = bus.send(AppEvent::VoiceChannelUpdated {
-                                                                                community_uri: community_uri.clone(),
-                                                                                channel_rkey: channel_rkey.clone(),
-                                                                                member_dids: member_list,
-                                                                            });
-                                                                        }
+                                                                            Some(list) => list,
+                                                                            None => {
+                                                                                get_voice_members_for_channel(
+                                                                                    &voice_map,
+                                                                                    &community_uri,
+                                                                                    &channel_rkey,
+                                                                                )
+                                                                                .await
+                                                                            }
+                                                                        };
+                                                                        let _ = bus.send(AppEvent::VoiceChannelUpdated {
+                                                                            community_uri: community_uri.clone(),
+                                                                            channel_rkey: channel_rkey.clone(),
+                                                                            member_dids: member_list,
+                                                                        });
                                                                         ServerMessage::Ack { message: String::new() }
                                                                     }
                                                                     other => ServerMessage::Error {
