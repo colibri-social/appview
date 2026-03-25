@@ -31,11 +31,23 @@ enum Signal {
     /// Join a voice/video room.
     Join { room: String, peer_id: String },
     /// Forward a WebRTC SDP offer to another peer in the same room.
-    Offer { room: String, target_peer_id: String, sdp: String },
+    Offer {
+        room: String,
+        target_peer_id: String,
+        sdp: String,
+    },
     /// Forward a WebRTC SDP answer to another peer in the same room.
-    Answer { room: String, target_peer_id: String, sdp: String },
+    Answer {
+        room: String,
+        target_peer_id: String,
+        sdp: String,
+    },
     /// Forward an ICE candidate to another peer in the same room.
-    Ice { room: String, target_peer_id: String, candidate: String },
+    Ice {
+        room: String,
+        target_peer_id: String,
+        candidate: String,
+    },
     /// Leave the room cleanly.
     Leave { room: String },
 }
@@ -46,16 +58,37 @@ enum Signal {
 enum SignalResponse {
     /// Confirmation that this peer has joined; includes the list of other peers
     /// currently in the room so the new peer can initiate offers.
-    Joined { room: String, peer_id: String, peers: Vec<String> },
-    PeerJoined { room: String, peer_id: String },
-    PeerLeft { room: String, peer_id: String },
+    Joined {
+        room: String,
+        peer_id: String,
+        peers: Vec<String>,
+    },
+    PeerJoined {
+        room: String,
+        peer_id: String,
+    },
+    PeerLeft {
+        room: String,
+        peer_id: String,
+    },
     /// Relayed SDP offer (from another peer).
-    Offer { from_peer_id: String, sdp: String },
+    Offer {
+        from_peer_id: String,
+        sdp: String,
+    },
     /// Relayed SDP answer (from another peer).
-    Answer { from_peer_id: String, sdp: String },
+    Answer {
+        from_peer_id: String,
+        sdp: String,
+    },
     /// Relayed ICE candidate (from another peer).
-    Ice { from_peer_id: String, candidate: String },
-    Error { message: String },
+    Ice {
+        from_peer_id: String,
+        candidate: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 // ── Rocket route ──────────────────────────────────────────────────────────────
@@ -163,7 +196,10 @@ fn process_signal(
             *current_room = Some(room.clone());
             *current_peer_id = Some(peer_id.clone());
 
-            info!("Peer {peer_id} joined room {room} ({} peers total)", existing.len() + 1);
+            info!(
+                "Peer {peer_id} joined room {room} ({} peers total)",
+                existing.len() + 1
+            );
 
             let _ = self_tx.send(encode(&SignalResponse::Joined {
                 room,
@@ -172,28 +208,55 @@ fn process_signal(
             }));
         }
 
-        Signal::Offer { room, target_peer_id, sdp } => {
+        Signal::Offer {
+            room,
+            target_peer_id,
+            sdp,
+        } => {
             let from = peer_id_or_return!(current_peer_id);
-            relay_to(&rooms, &room, &target_peer_id, &SignalResponse::Offer {
-                from_peer_id: from,
-                sdp,
-            });
+            relay_to(
+                &rooms,
+                &room,
+                &target_peer_id,
+                &SignalResponse::Offer {
+                    from_peer_id: from,
+                    sdp,
+                },
+            );
         }
 
-        Signal::Answer { room, target_peer_id, sdp } => {
+        Signal::Answer {
+            room,
+            target_peer_id,
+            sdp,
+        } => {
             let from = peer_id_or_return!(current_peer_id);
-            relay_to(&rooms, &room, &target_peer_id, &SignalResponse::Answer {
-                from_peer_id: from,
-                sdp,
-            });
+            relay_to(
+                &rooms,
+                &room,
+                &target_peer_id,
+                &SignalResponse::Answer {
+                    from_peer_id: from,
+                    sdp,
+                },
+            );
         }
 
-        Signal::Ice { room, target_peer_id, candidate } => {
+        Signal::Ice {
+            room,
+            target_peer_id,
+            candidate,
+        } => {
             let from = peer_id_or_return!(current_peer_id);
-            relay_to(&rooms, &room, &target_peer_id, &SignalResponse::Ice {
-                from_peer_id: from,
-                candidate,
-            });
+            relay_to(
+                &rooms,
+                &room,
+                &target_peer_id,
+                &SignalResponse::Ice {
+                    from_peer_id: from,
+                    candidate,
+                },
+            );
         }
 
         Signal::Leave { room } => {

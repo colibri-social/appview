@@ -104,6 +104,7 @@ pub enum AppEvent {
         picture: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         category_order: Option<serde_json::Value>,
+        requires_approval_to_join: bool,
     },
     CommunityDeleted {
         community_uri: String,

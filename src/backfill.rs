@@ -7,7 +7,7 @@ use crate::{atproto, db, emoji, jetstream};
 
 // How long since the last indexed message before we assume Jetstream is lagging.
 const LAG_THRESHOLD_SECS: i64 = 300; // 5 min
-// How often the sweep-loop wakes up to check lag.
+                                     // How often the sweep-loop wakes up to check lag.
 const SWEEP_CHECK_SECS: u64 = 60;
 
 /// Top-level entry point — spawns two independent tasks:
@@ -92,7 +92,10 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         return;
     }
 
-    info!(dids = dids.len(), "Backfill/sweep: sweeping recent records for all known DIDs");
+    info!(
+        dids = dids.len(),
+        "Backfill/sweep: sweeping recent records for all known DIDs"
+    );
     let mut total_inserted = 0usize;
 
     for did in &dids {
@@ -128,7 +131,9 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         // Fetch social.colibri.actor.data to backfill status/emoji.
         match atproto::fetch_actor_data(http, &pds_url, did).await {
             Ok(Some(data)) => {
-                if let Err(e) = db::upsert_actor_status(pool, did, &data.status, data.emoji.as_deref()).await {
+                if let Err(e) =
+                    db::upsert_actor_status(pool, did, &data.status, data.emoji.as_deref()).await
+                {
                     warn!(did, "Backfill/sweep: failed to upsert actor status: {e}");
                 }
             }
@@ -138,9 +143,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
 
         // Fetch newest page only (reverse=false gives oldest-first, so we use
         // a single page without cursor which returns the most recent records).
-        if let Ok((records, _)) =
-            atproto::list_message_records(http, &pds_url, did, None).await
-        {
+        if let Ok((records, _)) = atproto::list_message_records(http, &pds_url, did, None).await {
             for record in records {
                 let created_at = DateTime::parse_from_rfc3339(&record.created_at)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -168,9 +171,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
             }
         }
 
-        if let Ok((records, _)) =
-            atproto::list_reaction_records(http, &pds_url, did, None).await
-        {
+        if let Ok((records, _)) = atproto::list_reaction_records(http, &pds_url, did, None).await {
             for record in records {
                 if !emoji::is_valid_emoji(&record.emoji) {
                     continue;
@@ -195,9 +196,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
             }
         }
 
-        if let Ok((records, _)) =
-            atproto::list_community_records(http, &pds_url, did, None).await
-        {
+        if let Ok((records, _)) = atproto::list_community_records(http, &pds_url, did, None).await {
             let live_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
             for record in &records {
                 match db::save_community(
@@ -209,6 +208,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     record.description.as_deref(),
                     record.picture.as_ref(),
                     record.category_order.as_ref(),
+                    record.requires_approval_to_join,
                 )
                 .await
                 {
@@ -216,21 +216,25 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         debug!(did, rkey = %record.rkey, "Backfill/sweep: community upserted");
                         total_inserted += 1;
                     }
-                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error community: {e}"),
+                    Err(e) => {
+                        error!(did, rkey = %record.rkey, "Backfill/sweep: DB error community: {e}")
+                    }
                 }
             }
             match db::prune_communities_for_owner(pool, did, &live_rkeys).await {
                 Ok(deleted) if !deleted.is_empty() => {
-                    info!(did, count = deleted.len(), "Backfill/sweep: pruned deleted communities");
+                    info!(
+                        did,
+                        count = deleted.len(),
+                        "Backfill/sweep: pruned deleted communities"
+                    );
                 }
                 Err(e) => error!(did, "Backfill/sweep: prune communities error: {e}"),
                 _ => {}
             }
         }
 
-        if let Ok((records, _)) =
-            atproto::list_category_records(http, &pds_url, did, None).await
-        {
+        if let Ok((records, _)) = atproto::list_category_records(http, &pds_url, did, None).await {
             let live_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
             for record in &records {
                 let community_uri = format!(
@@ -252,21 +256,25 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         debug!(did, rkey = %record.rkey, "Backfill/sweep: category upserted");
                         total_inserted += 1;
                     }
-                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error category: {e}"),
+                    Err(e) => {
+                        error!(did, rkey = %record.rkey, "Backfill/sweep: DB error category: {e}")
+                    }
                 }
             }
             match db::prune_categories_for_owner(pool, did, &live_rkeys).await {
                 Ok(deleted) if !deleted.is_empty() => {
-                    info!(did, count = deleted.len(), "Backfill/sweep: pruned deleted categories");
+                    info!(
+                        did,
+                        count = deleted.len(),
+                        "Backfill/sweep: pruned deleted categories"
+                    );
                 }
                 Err(e) => error!(did, "Backfill/sweep: prune categories error: {e}"),
                 _ => {}
             }
         }
 
-        if let Ok((records, _)) =
-            atproto::list_channel_records(http, &pds_url, did, None).await
-        {
+        if let Ok((records, _)) = atproto::list_channel_records(http, &pds_url, did, None).await {
             let live_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
             for record in &records {
                 let community_uri = format!(
@@ -290,20 +298,25 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         debug!(did, rkey = %record.rkey, "Backfill/sweep: channel upserted");
                         total_inserted += 1;
                     }
-                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error channel: {e}"),
+                    Err(e) => {
+                        error!(did, rkey = %record.rkey, "Backfill/sweep: DB error channel: {e}")
+                    }
                 }
             }
             match db::prune_channels_for_owner(pool, did, &live_rkeys).await {
                 Ok(deleted) if !deleted.is_empty() => {
-                    info!(did, count = deleted.len(), "Backfill/sweep: pruned deleted channels");
+                    info!(
+                        did,
+                        count = deleted.len(),
+                        "Backfill/sweep: pruned deleted channels"
+                    );
                 }
                 Err(e) => error!(did, "Backfill/sweep: prune channels error: {e}"),
                 _ => {}
             }
         }
 
-        if let Ok((records, _)) =
-            atproto::list_membership_records(http, &pds_url, did, None).await
+        if let Ok((records, _)) = atproto::list_membership_records(http, &pds_url, did, None).await
         {
             for record in records {
                 match db::save_membership(
@@ -319,14 +332,14 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         debug!(did, rkey = %record.rkey, "Backfill/sweep: membership upserted");
                         total_inserted += 1;
                     }
-                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error membership: {e}"),
+                    Err(e) => {
+                        error!(did, rkey = %record.rkey, "Backfill/sweep: DB error membership: {e}")
+                    }
                 }
             }
         }
 
-        if let Ok((records, _)) =
-            atproto::list_approval_records(http, &pds_url, did, None).await
-        {
+        if let Ok((records, _)) = atproto::list_approval_records(http, &pds_url, did, None).await {
             // Collect unique member DIDs while saving approvals, so each member's
             // PDS is only contacted once even if they have multiple approvals.
             let mut member_dids: std::collections::HashSet<String> =
@@ -340,7 +353,9 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         debug!(did, rkey = %record.rkey, "Backfill/sweep: approval upserted");
                         total_inserted += 1;
                     }
-                    Err(e) => error!(did, rkey = %record.rkey, "Backfill/sweep: DB error approval: {e}"),
+                    Err(e) => {
+                        error!(did, rkey = %record.rkey, "Backfill/sweep: DB error approval: {e}")
+                    }
                 }
 
                 if let Some(member_did) = record
@@ -378,8 +393,12 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                         )
                         .await
                         {
-                            Ok(_) => debug!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: member membership upserted"),
-                            Err(e) => error!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: DB error member membership: {e}"),
+                            Ok(_) => {
+                                debug!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: member membership upserted")
+                            }
+                            Err(e) => {
+                                error!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: DB error member membership: {e}")
+                            }
                         }
                     }
                 }
@@ -389,11 +408,13 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         sleep(Duration::from_millis(100)).await;
     }
 
-    info!(dids = dids.len(), total_inserted, "Backfill/sweep: complete");
+    info!(
+        dids = dids.len(),
+        total_inserted, "Backfill/sweep: complete"
+    );
 }
 
 // ── Per-(DID, collection) historical helpers ──────────────────────────────────
-
 
 async fn backfill_item(
     pool: &PgPool,
@@ -417,9 +438,7 @@ async fn backfill_item(
     let _ = jetstream::ensure_profile_cached(pool, http, did).await;
 
     match collection {
-        "social.colibri.message" => {
-            backfill_messages(pool, http, did, &pds_url, collection).await
-        }
+        "social.colibri.message" => backfill_messages(pool, http, did, &pds_url, collection).await,
         "social.colibri.reaction" => {
             backfill_reactions(pool, http, did, &pds_url, collection).await
         }
@@ -429,9 +448,7 @@ async fn backfill_item(
         "social.colibri.category" => {
             backfill_categories(pool, http, did, &pds_url, collection).await
         }
-        "social.colibri.channel" => {
-            backfill_channels(pool, http, did, &pds_url, collection).await
-        }
+        "social.colibri.channel" => backfill_channels(pool, http, did, &pds_url, collection).await,
         "social.colibri.membership" => {
             backfill_memberships(pool, http, did, &pds_url, collection).await
         }
@@ -464,7 +481,12 @@ async fn backfill_messages(
             atproto::list_message_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing message records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing message records"
+        );
 
         for record in records {
             let created_at = DateTime::parse_from_rfc3339(&record.created_at)
@@ -491,7 +513,9 @@ async fn backfill_messages(
                 Ok(None) => {
                     debug!(did, rkey = %record.rkey, "Backfill: message already present, skipping");
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving message: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving message: {e}")
+                }
             }
         }
 
@@ -533,7 +557,12 @@ async fn backfill_reactions(
             atproto::list_reaction_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing reaction records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing reaction records"
+        );
 
         for record in records {
             if !emoji::is_valid_emoji(&record.emoji) {
@@ -558,7 +587,9 @@ async fn backfill_reactions(
                 Ok(None) => {
                     debug!(did, rkey = %record.rkey, "Backfill: reaction already present, skipping");
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving reaction: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving reaction: {e}")
+                }
             }
         }
 
@@ -572,7 +603,13 @@ async fn backfill_reactions(
             }
             None => {
                 db::mark_backfill_complete(pool, did, collection).await?;
-                info!(did, total, skipped, pages = page, "Backfill: reactions complete");
+                info!(
+                    did,
+                    total,
+                    skipped,
+                    pages = page,
+                    "Backfill: reactions complete"
+                );
                 break;
             }
         }
@@ -600,7 +637,12 @@ async fn backfill_communities(
             atproto::list_community_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing community records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing community records"
+        );
 
         for record in records {
             all_rkeys.push(record.rkey.clone());
@@ -613,6 +655,7 @@ async fn backfill_communities(
                 record.description.as_deref(),
                 record.picture.as_ref(),
                 record.category_order.as_ref(),
+                record.requires_approval_to_join,
             )
             .await
             {
@@ -620,7 +663,9 @@ async fn backfill_communities(
                     debug!(did, rkey = %record.rkey, name = %record.name, "Backfill: community upserted");
                     total += 1;
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving community: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving community: {e}")
+                }
             }
         }
 
@@ -635,7 +680,11 @@ async fn backfill_communities(
             None => {
                 match db::prune_communities_for_owner(pool, did, &all_rkeys).await {
                     Ok(deleted) if !deleted.is_empty() => {
-                        info!(did, count = deleted.len(), "Backfill: pruned deleted communities");
+                        info!(
+                            did,
+                            count = deleted.len(),
+                            "Backfill: pruned deleted communities"
+                        );
                     }
                     Err(e) => error!(did, "Backfill: prune communities error: {e}"),
                     _ => {}
@@ -669,7 +718,12 @@ async fn backfill_categories(
             atproto::list_category_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing category records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing category records"
+        );
 
         for record in records {
             all_rkeys.push(record.rkey.clone());
@@ -692,7 +746,9 @@ async fn backfill_categories(
                     debug!(did, rkey = %record.rkey, name = %record.name, "Backfill: category upserted");
                     total += 1;
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving category: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving category: {e}")
+                }
             }
         }
 
@@ -707,7 +763,11 @@ async fn backfill_categories(
             None => {
                 match db::prune_categories_for_owner(pool, did, &all_rkeys).await {
                     Ok(deleted) if !deleted.is_empty() => {
-                        info!(did, count = deleted.len(), "Backfill: pruned deleted categories");
+                        info!(
+                            did,
+                            count = deleted.len(),
+                            "Backfill: pruned deleted categories"
+                        );
                     }
                     Err(e) => error!(did, "Backfill: prune categories error: {e}"),
                     _ => {}
@@ -741,7 +801,12 @@ async fn backfill_channels(
             atproto::list_channel_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing channel records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing channel records"
+        );
 
         for record in records {
             all_rkeys.push(record.rkey.clone());
@@ -766,7 +831,9 @@ async fn backfill_channels(
                     debug!(did, rkey = %record.rkey, name = %record.name, "Backfill: channel upserted");
                     total += 1;
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving channel: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving channel: {e}")
+                }
             }
         }
 
@@ -781,7 +848,11 @@ async fn backfill_channels(
             None => {
                 match db::prune_channels_for_owner(pool, did, &all_rkeys).await {
                     Ok(deleted) if !deleted.is_empty() => {
-                        info!(did, count = deleted.len(), "Backfill: pruned deleted channels");
+                        info!(
+                            did,
+                            count = deleted.len(),
+                            "Backfill: pruned deleted channels"
+                        );
                     }
                     Err(e) => error!(did, "Backfill: prune channels error: {e}"),
                     _ => {}
@@ -814,23 +885,24 @@ async fn backfill_memberships(
             atproto::list_membership_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing membership records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing membership records"
+        );
 
         for record in records {
-            match db::save_membership(
-                pool,
-                &record.uri,
-                &record.community_uri,
-                did,
-                &record.rkey,
-            )
-            .await
+            match db::save_membership(pool, &record.uri, &record.community_uri, did, &record.rkey)
+                .await
             {
                 Ok(_) => {
                     debug!(did, rkey = %record.rkey, "Backfill: membership upserted");
                     total += 1;
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving membership: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving membership: {e}")
+                }
             }
         }
 
@@ -874,7 +946,12 @@ async fn backfill_approvals(
             atproto::list_approval_records(http, pds_url, did, cursor.as_deref()).await?;
 
         let page_count = records.len();
-        debug!(did, page, count = page_count, "Backfill: processing approval records");
+        debug!(
+            did,
+            page,
+            count = page_count,
+            "Backfill: processing approval records"
+        );
 
         for record in records {
             // Extract the member DID from the membership AT-URI:
@@ -887,13 +964,14 @@ async fn backfill_approvals(
                 member_dids.insert(member_did.to_string());
             }
 
-            match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey).await
-            {
+            match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey).await {
                 Ok(_) => {
                     debug!(did, rkey = %record.rkey, "Backfill: approval upserted");
                     total += 1;
                 }
-                Err(e) => error!(did, rkey = %record.rkey, "Backfill: DB error saving approval: {e}"),
+                Err(e) => {
+                    error!(did, rkey = %record.rkey, "Backfill: DB error saving approval: {e}")
+                }
             }
         }
 
@@ -936,8 +1014,12 @@ async fn backfill_approvals(
                 )
                 .await
                 {
-                    Ok(_) => debug!(member_did, rkey = %record.rkey, "Backfill: member membership upserted"),
-                    Err(e) => error!(member_did, rkey = %record.rkey, "Backfill: DB error saving member membership: {e}"),
+                    Ok(_) => {
+                        debug!(member_did, rkey = %record.rkey, "Backfill: member membership upserted")
+                    }
+                    Err(e) => {
+                        error!(member_did, rkey = %record.rkey, "Backfill: DB error saving member membership: {e}")
+                    }
                 }
             }
         }

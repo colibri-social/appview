@@ -16,6 +16,10 @@ use crate::{
     models::message::{MessageResponse, MessageWithAuthor},
 };
 
+fn default_requires_approval_to_join() -> bool {
+    true
+}
+
 const DEFAULT_JETSTREAM_URL: &str = concat!(
     "wss://jetstream.colibri.social/subscribe",
     "?wantedCollections=social.colibri.message",
@@ -89,6 +93,8 @@ struct ColibriCommunity {
     picture: Option<serde_json::Value>,
     #[serde(default)]
     category_order: Option<serde_json::Value>,
+    #[serde(default = "default_requires_approval_to_join")]
+    requires_approval_to_join: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -346,16 +352,27 @@ async fn handle_message(
 
             // Gate: only index messages from community members/owners.
             // If the channel is not yet indexed, allow through (lenient).
-            if let Ok(Some((community_uri, owner_did))) =
+            if let Ok(Some((community_uri, owner_did, requires_approval_to_join))) =
                 db::get_community_for_channel(pool, &record.channel).await
             {
-                if did != owner_did
-                    && !db::is_approved_member(pool, &community_uri, did)
-                        .await
-                        .unwrap_or(false)
-                {
-                    debug!(did, channel = %record.channel, "Message dropped: not a community member");
-                    return Ok(());
+                if did != owner_did {
+                    let allowed = if requires_approval_to_join {
+                        db::is_approved_member(pool, &community_uri, did)
+                            .await
+                            .unwrap_or(false)
+                    } else {
+                        db::has_membership_declaration(pool, &community_uri, did)
+                            .await
+                            .unwrap_or(false)
+                    };
+                    if !allowed {
+                        debug!(
+                            did,
+                            channel = %record.channel,
+                            "Message dropped: not a community member"
+                        );
+                        return Ok(());
+                    }
                 }
             }
 
@@ -409,16 +426,27 @@ async fn handle_message(
             };
 
             // Gate: only allow updates from members/owners.
-            if let Ok(Some((community_uri, owner_did))) =
+            if let Ok(Some((community_uri, owner_did, requires_approval_to_join))) =
                 db::get_community_for_channel(pool, &record.channel).await
             {
-                if did != owner_did
-                    && !db::is_approved_member(pool, &community_uri, did)
-                        .await
-                        .unwrap_or(false)
-                {
-                    debug!(did, channel = %record.channel, "Message update dropped: not a community member");
-                    return Ok(());
+                if did != owner_did {
+                    let allowed = if requires_approval_to_join {
+                        db::is_approved_member(pool, &community_uri, did)
+                            .await
+                            .unwrap_or(false)
+                    } else {
+                        db::has_membership_declaration(pool, &community_uri, did)
+                            .await
+                            .unwrap_or(false)
+                    };
+                    if !allowed {
+                        debug!(
+                            did,
+                            channel = %record.channel,
+                            "Message update dropped: not a community member"
+                        );
+                        return Ok(());
+                    }
                 }
             }
 
@@ -586,7 +614,12 @@ async fn handle_reaction(
 
 // ── Profile handler ───────────────────────────────────────────────────────────
 
-async fn handle_profile_update(commit: CommitData, did: &str, pool: &PgPool, bus: &EventBus) -> Result<()> {
+async fn handle_profile_update(
+    commit: CommitData,
+    did: &str,
+    pool: &PgPool,
+    bus: &EventBus,
+) -> Result<()> {
     // Only process creates/updates; deletes don't carry new profile data.
     if commit.operation == "delete" {
         return Ok(());
@@ -602,9 +635,7 @@ async fn handle_profile_update(commit: CommitData, did: &str, pool: &PgPool, bus
         }
     }
 
-    let record: BskyProfileRecord = match commit
-        .record
-        .and_then(|v| serde_json::from_value(v).ok())
+    let record: BskyProfileRecord = match commit.record.and_then(|v| serde_json::from_value(v).ok())
     {
         Some(r) => r,
         None => {
@@ -744,6 +775,7 @@ async fn handle_community(
                 record.description.as_deref(),
                 record.picture.as_ref(),
                 record.category_order.as_ref(),
+                record.requires_approval_to_join,
             )
             .await
             {
@@ -758,6 +790,7 @@ async fn handle_community(
                     description: record.description,
                     picture: record.picture,
                     category_order: record.category_order,
+                    requires_approval_to_join: record.requires_approval_to_join,
                 });
             }
         }

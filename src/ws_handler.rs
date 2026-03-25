@@ -36,11 +36,7 @@ async fn capture_voice_snapshot(voice_map: &VoiceMap) -> Vec<(String, String, Ve
     let map = voice_map.lock().await;
     map.iter()
         .map(|((community, channel), members)| {
-            (
-                community.clone(),
-                channel.clone(),
-                sorted_members(members),
-            )
+            (community.clone(), channel.clone(), sorted_members(members))
         })
         .collect()
 }
@@ -306,8 +302,7 @@ impl Subscriptions {
                 Some(None) => true,
                 Some(Some(uris)) => uris.contains(community_uri),
             },
-            AppEvent::UserStatusChanged { did, .. }
-            | AppEvent::UserProfileUpdated { did, .. } => {
+            AppEvent::UserStatusChanged { did, .. } | AppEvent::UserProfileUpdated { did, .. } => {
                 // Deliver if explicitly watching this DID via user_status subscription…
                 let explicit = match &self.user_status {
                     None => false,

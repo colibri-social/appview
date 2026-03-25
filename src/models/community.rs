@@ -10,6 +10,7 @@ pub struct Community {
     pub description: Option<String>,
     pub picture: Option<sqlx::types::Json<serde_json::Value>>,
     pub category_order: Option<sqlx::types::Json<serde_json::Value>>,
+    pub requires_approval_to_join: bool,
 }
 
 #[derive(Debug, Serialize)]

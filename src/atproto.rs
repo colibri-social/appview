@@ -35,6 +35,7 @@ pub struct RawCommunity {
     pub description: Option<String>,
     pub picture: Option<serde_json::Value>,
     pub category_order: Option<serde_json::Value>,
+    pub requires_approval_to_join: bool,
 }
 
 pub struct RawChannel {
@@ -131,6 +132,8 @@ struct ColibriRecord {
     // social.colibri.community extra fields
     picture: Option<serde_json::Value>,
     category_order: Option<serde_json::Value>,
+    #[serde(default)]
+    requires_approval_to_join: Option<bool>,
     // social.colibri.category extra field
     channel_order: Option<serde_json::Value>,
     // social.colibri.approval fields
@@ -318,6 +321,7 @@ pub async fn list_community_records(
                 description: val.description,
                 picture: val.picture,
                 category_order: val.category_order,
+                requires_approval_to_join: val.requires_approval_to_join.unwrap_or(true),
             })
         })
         .collect();

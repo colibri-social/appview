@@ -26,8 +26,8 @@ use tracing::error;
 use models::{
     author::AuthorProfile,
     community::{
-        Channel, ChannelWithVoice, CommunitiesResponse, Community, CommunityMember, CreateInviteRequest,
-        InviteCodeInfo,
+        Channel, ChannelWithVoice, CommunitiesResponse, Community, CommunityMember,
+        CreateInviteRequest, InviteCodeInfo,
     },
     message::MessageResponse,
     reaction::ReactionSummary,
@@ -221,7 +221,8 @@ async fn get_channels(
             for channel in channels {
                 let mut cw = crate::models::community::ChannelWithVoice::from(channel);
                 cw.voice_members =
-                    ws_handler::get_voice_members_for_channel(&voice_map, community, &cw.rkey).await;
+                    ws_handler::get_voice_members_for_channel(&voice_map, community, &cw.rkey)
+                        .await;
                 enriched.push(cw);
             }
             Ok(Json(enriched))
@@ -258,12 +259,9 @@ async fn get_sidebar(
                 let mut enriched_channels = Vec::with_capacity(cat.channels.len());
                 for channel in cat.channels {
                     let mut cw = crate::models::community::ChannelWithVoice::from(channel);
-                    cw.voice_members = ws_handler::get_voice_members_for_channel(
-                        &voice_map,
-                        community,
-                        &cw.rkey,
-                    )
-                    .await;
+                    cw.voice_members =
+                        ws_handler::get_voice_members_for_channel(&voice_map, community, &cw.rkey)
+                            .await;
                     enriched_channels.push(cw);
                 }
                 categories.push(crate::models::community::SidebarCategoryWithVoice {
@@ -274,8 +272,7 @@ async fn get_sidebar(
                     channels: enriched_channels,
                 });
             }
-            let mut uncategorized =
-                Vec::with_capacity(sidebar.uncategorized.len());
+            let mut uncategorized = Vec::with_capacity(sidebar.uncategorized.len());
             for channel in sidebar.uncategorized {
                 let mut cw = crate::models::community::ChannelWithVoice::from(channel);
                 cw.voice_members =
@@ -443,7 +440,6 @@ async fn block_message(
     }
 }
 
-
 struct RangeHeader(Option<String>);
 
 /// Set the presence state for a user.
@@ -481,8 +477,6 @@ async fn set_user_state(
         }
     }
 }
-
-
 
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for RangeHeader {
@@ -608,11 +602,7 @@ impl<'r> Responder<'r, 'static> for BlobResponse {
 /// Returns 204 on success, 404 if the code doesn't exist, 410 if the code is
 /// inactive or exhausted.
 #[post("/api/invite/<code>/use")]
-async fn use_invite(
-    _key: ApiKey,
-    code: &str,
-    pool: &State<sqlx::PgPool>,
-) -> Status {
+async fn use_invite(_key: ApiKey, code: &str, pool: &State<sqlx::PgPool>) -> Status {
     match db::use_invite_code(pool, code).await {
         Ok(true) => Status::NoContent,
         Ok(false) => Status::Gone,
@@ -622,7 +612,6 @@ async fn use_invite(
         }
     }
 }
-
 
 ///
 /// Query param: `community` (required) — the full AT-URI of the community
@@ -681,7 +670,9 @@ fn rocket() -> _ {
         .manage(events::create_event_bus(4096))
         .manage(RoomState::new())
         .manage(reqwest::Client::new())
-        .manage(std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, ws_handler::DIDConnectionState>::new())))
+        .manage(std::sync::Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::<String, ws_handler::DIDConnectionState>::new(),
+        )))
         .manage(ws_handler::new_voice_map())
         .manage(ws_handler::new_voice_membership_map())
         // ── Routes ───────────────────────────────────────────────────────────

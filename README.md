@@ -80,6 +80,8 @@ All endpoints return JSON. CORS is open (`*`).
 - Each DID can only be active in one voice channel. Joining a different channel triggers a `voice_channel_updated` event for the previous room before the new join is emitted, so clients see the previous membership cleared.
 - If a connection sends no non-heartbeat action for more than five minutes, it is marked away and the DID is removed from any active voice call so voice membership stays in sync.
 
+The Jetstream consumer enforces the community's `requiresApprovalToJoin` flag when indexing messages. Communities with `requiresApprovalToJoin = true` (default) only accept messages from approved members and the owner; those that set the flag to `false` allow any DID with a membership declaration to send messages even before approval.
+
 ### Messages
 
 #### `GET /api/messages`
@@ -198,6 +200,8 @@ Look up a single cached community by AT-URI or rkey.
 curl "http://localhost:8000/api/community?community=at://did:plc:xxx/social.colibri.community/3mxxx"
 curl "http://localhost:8000/api/community?community=3mxxx"
 ```
+
+The response now includes a `requires_approval_to_join` boolean, which mirrors the BlueSky `requiresApprovalToJoin` flag. When `false`, the appview will accept messages from DIDs that merely have a membership declaration; when `true`, only approved members (and the owner) are allowed to post in that community.
 
 Returns `404` if the community is not cached.
 

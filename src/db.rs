@@ -102,11 +102,7 @@ pub async fn delete_message(
 
 /// Mark a message as blocked (hidden from all clients). Returns the message
 /// metadata needed to emit a MessageDeleted event, or None if not found.
-pub async fn block_message(
-    pool: &PgPool,
-    author_did: &str,
-    rkey: &str,
-) -> Result<Option<Message>> {
+pub async fn block_message(pool: &PgPool, author_did: &str, rkey: &str) -> Result<Option<Message>> {
     let msg = sqlx::query_as::<_, Message>(
         r#"
         UPDATE messages SET blocked = TRUE
@@ -808,16 +804,18 @@ pub async fn save_community(
     description: Option<&str>,
     picture: Option<&serde_json::Value>,
     category_order: Option<&serde_json::Value>,
+    requires_approval_to_join: bool,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO communities (uri, owner_did, rkey, name, description, picture, category_order)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO communities (uri, owner_did, rkey, name, description, picture, category_order, requires_approval_to_join)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (uri) DO UPDATE
           SET name           = EXCLUDED.name,
               description    = EXCLUDED.description,
               picture        = EXCLUDED.picture,
-              category_order = EXCLUDED.category_order
+              category_order = EXCLUDED.category_order,
+              requires_approval_to_join = EXCLUDED.requires_approval_to_join
         "#,
     )
     .bind(uri)
@@ -827,6 +825,7 @@ pub async fn save_community(
     .bind(description)
     .bind(picture.map(|v| sqlx::types::Json(v)))
     .bind(category_order.map(|v| sqlx::types::Json(v)))
+    .bind(requires_approval_to_join)
     .execute(pool)
     .await?;
     Ok(())
@@ -938,12 +937,19 @@ pub async fn prune_channels_for_owner(
 pub async fn get_community_for_channel(
     pool: &PgPool,
     channel_rkey: &str,
-) -> Result<Option<(String, String)>> {
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT community_uri, owner_did FROM channels WHERE rkey = $1 LIMIT 1")
-            .bind(channel_rkey)
-            .fetch_optional(pool)
-            .await?;
+) -> Result<Option<(String, String, bool)>> {
+    let row: Option<(String, String, bool)> = sqlx::query_as(
+        r#"
+        SELECT c.community_uri, c.owner_did, co.requires_approval_to_join
+          FROM channels c
+          JOIN communities co ON co.uri = c.community_uri
+         WHERE c.rkey = $1
+         LIMIT 1
+        "#,
+    )
+    .bind(channel_rkey)
+    .fetch_optional(pool)
+    .await?;
     Ok(row)
 }
 
@@ -1109,11 +1115,33 @@ pub async fn is_approved_member(pool: &PgPool, community_uri: &str, did: &str) -
     Ok(exists)
 }
 
+/// Return true if `did` has submitted a membership declaration for `community_uri`.
+pub async fn has_membership_declaration(
+    pool: &PgPool,
+    community_uri: &str,
+    did: &str,
+) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM community_members
+             WHERE community_uri = $1
+               AND member_did    = $2
+        )
+        "#,
+    )
+    .bind(community_uri)
+    .bind(did)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
+}
+
 /// Look up a single community by AT-URI or rkey.
 pub async fn get_community(pool: &PgPool, uri_or_rkey: &str) -> Result<Option<Community>> {
     let community = sqlx::query_as::<_, Community>(
         r#"
-        SELECT uri, owner_did, rkey, name, description, picture, category_order
+        SELECT uri, owner_did, rkey, name, description, picture, category_order, requires_approval_to_join
           FROM communities
          WHERE uri = $1 OR rkey = $1
          LIMIT 1
@@ -1128,7 +1156,7 @@ pub async fn get_community(pool: &PgPool, uri_or_rkey: &str) -> Result<Option<Co
 /// Return all communities owned by or joined (approved) by a DID.
 pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(
-        "SELECT uri, owner_did, rkey, name, description, picture, category_order FROM communities WHERE owner_did = $1",
+        "SELECT uri, owner_did, rkey, name, description, picture, category_order, requires_approval_to_join FROM communities WHERE owner_did = $1",
     )
     .bind(did)
     .fetch_all(pool)
@@ -1137,7 +1165,7 @@ pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<Commun
     let joined = sqlx::query_as::<_, Community>(
         r#"
         SELECT DISTINCT ON (c.uri)
-               c.uri, c.owner_did, c.rkey, c.name, c.description, c.picture, c.category_order
+               c.uri, c.owner_did, c.rkey, c.name, c.description, c.picture, c.category_order, c.requires_approval_to_join
           FROM communities c
           JOIN community_members cm ON cm.community_uri = c.uri
          WHERE cm.member_did = $1
@@ -1213,18 +1241,20 @@ pub async fn get_invite_code(
         c_description: Option<String>,
         c_picture: Option<sqlx::types::Json<serde_json::Value>>,
         c_category_order: Option<sqlx::types::Json<serde_json::Value>>,
+        c_requires_approval_to_join: bool,
     }
 
     let row = sqlx::query_as::<_, Row>(
         r#"
-        SELECT i.code, i.community_uri, i.created_by_did, i.max_uses, i.use_count, i.active,
-               c.uri AS c_uri, c.owner_did AS c_owner_did, c.rkey AS c_rkey,
-               c.name AS c_name, c.description AS c_description,
-               c.picture AS c_picture, c.category_order AS c_category_order
-          FROM invite_codes i
-          JOIN communities c ON c.uri = i.community_uri
-         WHERE i.code = $1
-        "#,
+            SELECT i.code, i.community_uri, i.created_by_did, i.max_uses, i.use_count, i.active,
+                   c.uri AS c_uri, c.owner_did AS c_owner_did, c.rkey AS c_rkey,
+                   c.name AS c_name, c.description AS c_description,
+                   c.picture AS c_picture, c.category_order AS c_category_order,
+                   c.requires_approval_to_join AS c_requires_approval_to_join
+              FROM invite_codes i
+              JOIN communities c ON c.uri = i.community_uri
+             WHERE i.code = $1
+            "#,
     )
     .bind(code)
     .fetch_optional(pool)
@@ -1248,6 +1278,7 @@ pub async fn get_invite_code(
                 description: r.c_description,
                 picture: r.c_picture,
                 category_order: r.c_category_order,
+                requires_approval_to_join: r.c_requires_approval_to_join,
             },
         )
     }))
