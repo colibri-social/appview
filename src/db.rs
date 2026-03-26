@@ -1106,6 +1106,20 @@ pub async fn get_membership_info_by_approval(
     Ok(row)
 }
 
+/// Check if a community requires approval to join.
+pub async fn get_community_requires_approval(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Option<bool>> {
+    let requires_approval: Option<bool> = sqlx::query_scalar(
+        "SELECT requires_approval_to_join FROM communities WHERE uri = $1 LIMIT 1",
+    )
+    .bind(community_uri)
+    .fetch_optional(pool)
+    .await?;
+    Ok(requires_approval)
+}
+
 /// Upgrade a pending membership to approved when the owner writes an approval.
 pub async fn save_approval(
     pool: &PgPool,

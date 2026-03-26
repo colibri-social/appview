@@ -718,7 +718,9 @@ A category was created or updated.
 
 #### `member_pending`
 
-A user requested to join (membership record created, awaiting approval).
+Sent when:
+- A user requests to join (membership record created, awaiting approval)
+- A user's approval record is deleted in a community that does NOT require approval (demotion, user can still chat)
 
 ```json
 {
@@ -744,7 +746,9 @@ A user was approved and is now a full member.
 
 #### `member_left`
 
-A membership record was deleted (user left or was removed).
+Sent when:
+- A user's membership record is deleted (user left or was removed)
+- A user's approval record is deleted in a community that requires approval (user was kicked/blocked and can no longer participate)
 
 ```json
 {

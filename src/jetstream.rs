@@ -1213,28 +1213,46 @@ async fn handle_approval(
             if let Err(e) = db::delete_approval(pool, &approval_uri).await {
                 error!(did, rkey = %commit.rkey, "DB error deleting approval: {e}");
             } else {
-                info!(did, rkey = %commit.rkey, "Approval deleted → member reverted to pending");
-                // Emit MemberPending so the UI can update status back.
+                info!(did, rkey = %commit.rkey, "Approval deleted");
                 if let Some((community_uri, member_did)) = info {
-                    // Re-fetch membership_uri for the event payload.
-                    if let Ok(Some((_, _))) = db::get_membership_info_by_approval(pool, &approval_uri).await {
-                        // Already deleted, skip.
-                    } else if let Ok(rows) = sqlx::query_as::<_, (String, String)>(
-                        "SELECT membership_uri, member_did FROM community_members WHERE community_uri = $1 AND member_did = $2 LIMIT 1"
-                    )
-                    .bind(&community_uri)
-                    .bind(&member_did)
-                    .fetch_optional(pool)
-                    .await {
-                        if let Some((membership_uri, _)) = rows {
-                            let profile = ensure_profile_cached(pool, http, &member_did).await;
-                            let _ = bus.send(AppEvent::MemberPending {
-                                community_uri,
-                                membership_uri,
-                                display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
-                                avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
-                                member_did,
-                            });
+                    // Check if community requires approval to join
+                    let requires_approval =
+                        db::get_community_requires_approval(pool, &community_uri)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or(true); // Default to true if not found
+
+                    if requires_approval {
+                        // Community requires approval → user is effectively removed/kicked
+                        info!(did, rkey = %commit.rkey, community = %community_uri, "Approval deleted in approval-required community → member kicked");
+                        let profile = ensure_profile_cached(pool, http, &member_did).await;
+                        let _ = bus.send(AppEvent::MemberLeft {
+                            community_uri,
+                            display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                            avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                            member_did,
+                        });
+                    } else {
+                        // Community doesn't require approval → user is just demoted to pending
+                        info!(did, rkey = %commit.rkey, community = %community_uri, "Approval deleted in open community → member reverted to pending");
+                        if let Ok(rows) = sqlx::query_as::<_, (String, String)>(
+                            "SELECT membership_uri, member_did FROM community_members WHERE community_uri = $1 AND member_did = $2 LIMIT 1"
+                        )
+                        .bind(&community_uri)
+                        .bind(&member_did)
+                        .fetch_optional(pool)
+                        .await {
+                            if let Some((membership_uri, _)) = rows {
+                                let profile = ensure_profile_cached(pool, http, &member_did).await;
+                                let _ = bus.send(AppEvent::MemberPending {
+                                    community_uri,
+                                    membership_uri,
+                                    display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                                    avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                                    member_did,
+                                });
+                            }
                         }
                     }
                 }
