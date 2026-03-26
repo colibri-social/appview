@@ -513,11 +513,11 @@ pub async fn upsert_author_profile(
         INSERT INTO author_profiles (did, display_name, avatar_url, banner_url, handle, description)
         VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (did) DO UPDATE
-          SET display_name = EXCLUDED.display_name,
-              avatar_url   = EXCLUDED.avatar_url,
-              banner_url   = EXCLUDED.banner_url,
+          SET display_name = COALESCE(EXCLUDED.display_name, author_profiles.display_name),
+              avatar_url   = COALESCE(EXCLUDED.avatar_url, author_profiles.avatar_url),
+              banner_url   = COALESCE(EXCLUDED.banner_url, author_profiles.banner_url),
               handle       = COALESCE(EXCLUDED.handle, author_profiles.handle),
-              description  = EXCLUDED.description,
+              description  = COALESCE(EXCLUDED.description, author_profiles.description),
               updated_at   = NOW()
         RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
         "#,

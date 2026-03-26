@@ -1314,30 +1314,63 @@ pub async fn ensure_profile_cached(
         return Some(profile);
     }
 
-    match atproto::fetch_profile(http, did).await {
-        Ok(Some(data)) => {
-            match db::upsert_author_profile(
-                pool,
-                did,
-                data.display_name.as_deref(),
-                data.avatar_url.as_deref(),
-                data.banner_url.as_deref(),
-                data.handle.as_deref(),
-                data.description.as_deref(),
-            )
-            .await
-            {
-                Ok(profile) => Some(profile),
-                Err(e) => {
-                    error!("Failed to cache profile for {did}: {e}");
-                    None
+    // Try fetching up to 2 times if we get incomplete data
+    for attempt in 1..=2 {
+        match atproto::fetch_profile(http, did).await {
+            Ok(Some(data)) => {
+                // Validate we got at least some meaningful data
+                let has_data = data.display_name.is_some()
+                    || data.avatar_url.is_some()
+                    || data.handle.is_some();
+
+                if !has_data && attempt < 2 {
+                    warn!("fetch_profile returned empty data for {did}, retrying (attempt {attempt})");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+
+                if !has_data {
+                    warn!("fetch_profile returned empty data for {did} after retries, skipping cache");
+                    return None;
+                }
+
+                match db::upsert_author_profile(
+                    pool,
+                    did,
+                    data.display_name.as_deref(),
+                    data.avatar_url.as_deref(),
+                    data.banner_url.as_deref(),
+                    data.handle.as_deref(),
+                    data.description.as_deref(),
+                )
+                .await
+                {
+                    Ok(profile) => return Some(profile),
+                    Err(e) => {
+                        error!("Failed to cache profile for {did}: {e}");
+                        return None;
+                    }
                 }
             }
-        }
-        Ok(None) => None,
-        Err(e) => {
-            error!("Failed to fetch profile for {did}: {e}");
-            None
+            Ok(None) => {
+                if attempt < 2 {
+                    warn!("fetch_profile returned None for {did}, retrying (attempt {attempt})");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+                return None;
+            }
+            Err(e) => {
+                if attempt < 2 {
+                    warn!("Failed to fetch profile for {did} (attempt {attempt}): {e}, retrying");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+                error!("Failed to fetch profile for {did} after retries: {e}");
+                return None;
+            }
         }
     }
+
+    None
 }

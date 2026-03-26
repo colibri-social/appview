@@ -110,18 +110,27 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
         // Always re-fetch bsky profile to pick up banner_url, handle, description.
         match atproto::fetch_profile(http, did).await {
             Ok(Some(data)) => {
-                if let Err(e) = db::upsert_author_profile(
-                    pool,
-                    did,
-                    data.display_name.as_deref(),
-                    data.avatar_url.as_deref(),
-                    data.banner_url.as_deref(),
-                    data.handle.as_deref(),
-                    data.description.as_deref(),
-                )
-                .await
-                {
-                    warn!(did, "Backfill/sweep: failed to upsert bsky profile: {e}");
+                // Validate we got at least some meaningful data before caching
+                let has_data = data.display_name.is_some()
+                    || data.avatar_url.is_some()
+                    || data.handle.is_some();
+
+                if has_data {
+                    if let Err(e) = db::upsert_author_profile(
+                        pool,
+                        did,
+                        data.display_name.as_deref(),
+                        data.avatar_url.as_deref(),
+                        data.banner_url.as_deref(),
+                        data.handle.as_deref(),
+                        data.description.as_deref(),
+                    )
+                    .await
+                    {
+                        warn!(did, "Backfill/sweep: failed to upsert bsky profile: {e}");
+                    }
+                } else {
+                    warn!(did, "Backfill/sweep: bsky profile returned empty data, skipping");
                 }
             }
             Ok(None) => {}
