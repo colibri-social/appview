@@ -466,9 +466,32 @@ async fn ban_community_member(
     _key: ApiKey,
     body: Json<CommunityBanRequest>,
     pool: &State<sqlx::PgPool>,
+    bus: &State<events::EventBus>,
 ) -> Status {
     match db::ban_member_from_community(pool, &body.community_uri, &body.member_did).await {
-        Ok(_) => Status::NoContent,
+        Ok(_) => {
+            // Fetch profile to include in the event
+            let profile = db::get_author_profile(pool, &body.member_did)
+                .await
+                .ok()
+                .flatten();
+
+            // Send member_left event to notify all community members
+            let _ = bus.send(events::AppEvent::MemberLeft {
+                community_uri: body.community_uri.clone(),
+                member_did: body.member_did.clone(),
+                display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                banner_url: profile.as_ref().and_then(|p| p.banner_url.clone()),
+                description: profile.as_ref().and_then(|p| p.description.clone()),
+                handle: profile.as_ref().and_then(|p| p.handle.clone()),
+                status_text: profile.as_ref().and_then(|p| p.status.clone()),
+                emoji: profile.as_ref().and_then(|p| p.emoji.clone()),
+                state: profile.as_ref().and_then(|p| p.state.clone()),
+            });
+
+            Status::NoContent
+        }
         Err(e) => {
             error!("ban_community_member error: {e}");
             Status::InternalServerError
@@ -494,6 +517,24 @@ async fn unban_community_member(
             Status::InternalServerError
         }
     }
+}
+
+/// Get all banned members for a community.
+///
+/// Query param: `community` (AT-URI). Returns array of member objects with full profile data.
+#[get("/api/community/bans?<community>")]
+async fn get_community_bans(
+    _key: ApiKey,
+    community: &str,
+    pool: &State<sqlx::PgPool>,
+) -> Result<Json<Vec<CommunityMember>>, Status> {
+    db::get_banned_members_with_profiles(pool, community)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            error!("get_community_bans error: {e}");
+            Status::InternalServerError
+        })
 }
 
 struct RangeHeader(Option<String>);
@@ -753,6 +794,7 @@ fn rocket() -> _ {
                 block_message,
                 ban_community_member,
                 unban_community_member,
+                get_community_bans,
                 set_user_state,
                 list_invites,
                 get_blob,

@@ -1138,9 +1138,15 @@ async fn handle_membership(
                     // Notify other community members that this member left
                     let _ = bus.send(AppEvent::MemberLeft {
                         community_uri: community_uri.clone(),
+                        member_did: member_did.clone(),
                         display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
                         avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
-                        member_did: member_did.clone(),
+                        banner_url: profile.as_ref().and_then(|p| p.banner_url.clone()),
+                        description: profile.as_ref().and_then(|p| p.description.clone()),
+                        handle: profile.as_ref().and_then(|p| p.handle.clone()),
+                        status_text: profile.as_ref().and_then(|p| p.status.clone()),
+                        emoji: profile.as_ref().and_then(|p| p.emoji.clone()),
+                        state: profile.as_ref().and_then(|p| p.state.clone()),
                     });
 
                     // Notify the removed user that the community is gone from their view
@@ -1229,9 +1235,15 @@ async fn handle_approval(
                         let profile = ensure_profile_cached(pool, http, &member_did).await;
                         let _ = bus.send(AppEvent::MemberLeft {
                             community_uri,
+                            member_did,
                             display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
                             avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
-                            member_did,
+                            banner_url: profile.as_ref().and_then(|p| p.banner_url.clone()),
+                            description: profile.as_ref().and_then(|p| p.description.clone()),
+                            handle: profile.as_ref().and_then(|p| p.handle.clone()),
+                            status_text: profile.as_ref().and_then(|p| p.status.clone()),
+                            emoji: profile.as_ref().and_then(|p| p.emoji.clone()),
+                            state: profile.as_ref().and_then(|p| p.state.clone()),
                         });
                     } else {
                         // Community doesn't require approval → user is just demoted to pending

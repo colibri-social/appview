@@ -209,10 +209,38 @@ Returns `404` if the community is not cached.
 
 Use the protected invite API key to ban or unban members from posting or reacting within a community. Banned DIDs are silently dropped by the Jetstream consumer — their messages and reactions are never indexed or broadcast.
 
-- `POST /api/community/ban` (body `{ "community_uri": "...", "member_did": "did:..." }`) — adds the DID to the ban list. Returns `204 No Content`.
+When a user is banned, a `member_left` event is broadcast to all community members so clients can update their UI in real-time.
+
+Banned members are also excluded from:
+- `/api/members` responses (community member lists)
+- `/api/communities` responses (user won't see communities they're banned from)
+
+**Endpoints:**
+
+- `POST /api/community/ban` (body `{ "community_uri": "...", "member_did": "did:..." }`) — adds the DID to the ban list and broadcasts a `member_left` event. Returns `204 No Content`.
 - `DELETE /api/community/ban?community=<uri>&member_did=<did>` — removes the ban entry so the DID can participate again; `404` is returned if the DID was not banned.
+- `GET /api/community/bans?community=<uri>` — returns array of banned members with full profile data (same structure as `/api/members`), sorted by most recently banned first.
 
 All ban endpoints require `Authorization: Bearer <INVITE_API_KEY>`.
+
+**Example ban list response:**
+
+```json
+[
+  {
+    "member_did": "did:plc:banned1",
+    "status": "banned",
+    "display_name": "Banned User",
+    "avatar_url": "https://...",
+    "banner_url": "https://...",
+    "description": "User bio",
+    "handle": "banned.bsky.social",
+    "status_text": "Away",
+    "emoji": "😞",
+    "state": "offline"
+  }
+]
+```
 
 #### `GET /api/communities`
 
@@ -222,6 +250,9 @@ Includes:
 - Communities owned by the user
 - Communities where the user is an approved member
 - Communities where the user is pending BUT the community has `requiresApprovalToJoin = false` (open communities where pending members can participate)
+
+**Excludes:**
+- Communities where the user is banned
 
 | Parameter | Required | Description |
 | --------- | -------- | ----------- |
@@ -310,7 +341,9 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 
 #### `GET /api/members`
 
-All members of a community, enriched with cached profile data. The owner is always included with `status: "owner"`.
+All members of a community, enriched with cached profile data. The owner is always included with `status: "owner"`. 
+
+**Note:** Banned members are excluded from this list.
 
 | Parameter   | Required | Description      |
 | ----------- | -------- | ---------------- |
@@ -754,12 +787,23 @@ A user was approved and is now a full member.
 Sent when:
 - A user's membership record is deleted (user left or was removed)
 - A user's approval record is deleted in a community that requires approval (user was kicked/blocked and can no longer participate)
+- A user is banned from a community (via `POST /api/community/ban`)
+
+Includes full member profile data (same fields as `/api/members`):
 
 ```json
 {
 	"type": "member_left",
 	"community_uri": "at://...",
-	"member_did": "did:plc:yyy"
+	"member_did": "did:plc:yyy",
+	"display_name": "User Name",
+	"avatar_url": "https://...",
+	"banner_url": "https://...",
+	"description": "User bio",
+	"handle": "user.bsky.social",
+	"status_text": "Custom status",
+	"emoji": "👋",
+	"state": "offline"
 }
 ```
 

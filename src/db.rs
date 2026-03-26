@@ -1057,6 +1057,46 @@ pub async fn is_member_banned(
     Ok(exists)
 }
 
+/// Get all banned DIDs for a community.
+pub async fn get_banned_members(pool: &PgPool, community_uri: &str) -> Result<Vec<String>> {
+    let dids: Vec<String> = sqlx::query_scalar(
+        "SELECT member_did FROM community_bans WHERE community_uri = $1 ORDER BY banned_at DESC",
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(dids)
+}
+
+/// Get all banned members for a community with full profile data.
+pub async fn get_banned_members_with_profiles(
+    pool: &PgPool,
+    community_uri: &str,
+) -> Result<Vec<crate::models::community::CommunityMember>> {
+    let members = sqlx::query_as::<_, crate::models::community::CommunityMember>(
+        r#"
+        SELECT cb.member_did,
+               'banned' AS status,
+               ap.display_name,
+               ap.avatar_url,
+               ap.banner_url,
+               ap.description,
+               ap.handle,
+               ap.status AS status_text,
+               ap.emoji,
+               ap.state
+          FROM community_bans cb
+          LEFT JOIN author_profiles ap ON ap.did = cb.member_did
+         WHERE cb.community_uri = $1
+         ORDER BY cb.banned_at DESC
+        "#,
+    )
+    .bind(community_uri)
+    .fetch_all(pool)
+    .await?;
+    Ok(members)
+}
+
 /// Mark approved members without approval URIs as pending and return their DIDs/URIs.
 pub async fn mark_members_without_approval_pending(
     pool: &PgPool,
@@ -1239,6 +1279,7 @@ pub async fn get_community(pool: &PgPool, uri_or_rkey: &str) -> Result<Option<Co
 
 /// Return all communities owned by or joined by a DID.
 /// Includes approved members in all communities, plus pending members in open communities.
+/// Excludes communities where the user is banned.
 pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(
         "SELECT uri, owner_did, rkey, name, description, picture, category_order, requires_approval_to_join FROM communities WHERE owner_did = $1",
@@ -1255,8 +1296,14 @@ pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<Commun
           JOIN community_members cm ON cm.community_uri = c.uri
          WHERE cm.member_did = $1
            AND (cm.status = 'approved' OR (cm.status = 'pending' AND c.requires_approval_to_join = false))
+           AND NOT EXISTS (
+               SELECT 1 FROM community_bans cb 
+               WHERE cb.community_uri = c.uri 
+                 AND cb.member_did = $2
+           )
         "#,
     )
+    .bind(did)
     .bind(did)
     .fetch_all(pool)
     .await?;
@@ -1676,6 +1723,7 @@ pub async fn get_members_for_community(
         r#"
         -- Always include the owner (status = 'owner'), then one row per unique member
         -- (prefer approved over pending when a member has multiple declarations).
+        -- Exclude banned members.
         SELECT co.owner_did  AS member_did,
                'owner'       AS status,
                ap.display_name,
@@ -1708,6 +1756,11 @@ pub async fn get_members_for_community(
                 FROM community_members cm
                 LEFT JOIN author_profiles ap ON ap.did = cm.member_did
                WHERE cm.community_uri = $2
+                 AND NOT EXISTS (
+                     SELECT 1 FROM community_bans cb 
+                     WHERE cb.community_uri = cm.community_uri 
+                       AND cb.member_did = cm.member_did
+                 )
                ORDER BY cm.member_did,
                         CASE WHEN cm.status = 'approved' THEN 0 ELSE 1 END
           ) deduped
