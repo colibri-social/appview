@@ -508,9 +508,42 @@ async fn unban_community_member(
     community: &str,
     member_did: &str,
     pool: &State<sqlx::PgPool>,
+    bus: &State<events::EventBus>,
 ) -> Status {
     match db::unban_member_from_community(pool, community, member_did).await {
-        Ok(true) => Status::NoContent,
+        Ok(true) => {
+            // Check if member has a membership declaration and community doesn't require approval
+            let has_membership = db::has_membership_declaration(pool, community, member_did)
+                .await
+                .unwrap_or(false);
+            let requires_approval = db::get_community_requires_approval(pool, community)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(true);
+
+            // If member still has declaration and community doesn't require approval, send member_joined
+            if has_membership && !requires_approval {
+                if let Ok(Some(membership_uri)) =
+                    db::get_membership_uri_for_member(pool, community, member_did).await
+                {
+                    let profile = db::get_author_profile(pool, member_did)
+                        .await
+                        .ok()
+                        .flatten();
+
+                    let _ = bus.send(events::AppEvent::MemberJoined {
+                        community_uri: community.to_string(),
+                        member_did: member_did.to_string(),
+                        membership_uri,
+                        display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
+                        avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
+                    });
+                }
+            }
+
+            Status::NoContent
+        }
         Ok(false) => Status::NotFound,
         Err(e) => {
             error!("unban_community_member error: {e}");

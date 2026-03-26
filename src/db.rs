@@ -1261,6 +1261,22 @@ pub async fn has_membership_declaration(
     Ok(exists)
 }
 
+/// Get the membership URI for a member in a community.
+pub async fn get_membership_uri_for_member(
+    pool: &PgPool,
+    community_uri: &str,
+    did: &str,
+) -> Result<Option<String>> {
+    let uri: Option<String> = sqlx::query_scalar(
+        "SELECT membership_uri FROM community_members WHERE community_uri = $1 AND member_did = $2 LIMIT 1",
+    )
+    .bind(community_uri)
+    .bind(did)
+    .fetch_optional(pool)
+    .await?;
+    Ok(uri)
+}
+
 /// Look up a single community by AT-URI or rkey.
 pub async fn get_community(pool: &PgPool, uri_or_rkey: &str) -> Result<Option<Community>> {
     let community = sqlx::query_as::<_, Community>(

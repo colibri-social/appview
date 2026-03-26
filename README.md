@@ -211,6 +211,10 @@ Use the protected invite API key to ban or unban members from posting or reactin
 
 When a user is banned, a `member_left` event is broadcast to all community members so clients can update their UI in real-time.
 
+When a user is unbanned:
+- If they still have a membership declaration AND the community doesn't require approval records (`requiresApprovalToJoin = false`), a `member_joined` event is broadcast (they can immediately participate again)
+- Otherwise, no event is sent (they must wait for approval in approval-required communities, or rejoin if they left)
+
 Banned members are also excluded from:
 - `/api/members` responses (community member lists)
 - `/api/communities` responses (user won't see communities they're banned from)
@@ -218,7 +222,7 @@ Banned members are also excluded from:
 **Endpoints:**
 
 - `POST /api/community/ban` (body `{ "community_uri": "...", "member_did": "did:..." }`) — adds the DID to the ban list and broadcasts a `member_left` event. Returns `204 No Content`.
-- `DELETE /api/community/ban?community=<uri>&member_did=<did>` — removes the ban entry so the DID can participate again; `404` is returned if the DID was not banned.
+- `DELETE /api/community/ban?community=<uri>&member_did=<did>` — removes the ban entry. If the user still has a membership and the community is open, broadcasts a `member_joined` event. Returns `204 No Content` on success, `404` if the DID was not banned.
 - `GET /api/community/bans?community=<uri>` — returns array of banned members with full profile data (same structure as `/api/members`), sorted by most recently banned first.
 
 All ban endpoints require `Authorization: Bearer <INVITE_API_KEY>`.
