@@ -44,6 +44,7 @@ pub enum AppEvent {
         channel_type: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         category_rkey: Option<String>,
+        owner_only: bool,
     },
     ChannelDeleted {
         community_uri: String,

@@ -291,6 +291,7 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
                     record.description.as_deref(),
                     &record.channel_type,
                     record.category_rkey.as_deref(),
+                    record.owner_only,
                 )
                 .await
                 {
@@ -824,6 +825,7 @@ async fn backfill_channels(
                 record.description.as_deref(),
                 &record.channel_type,
                 record.category_rkey.as_deref(),
+                record.owner_only,
             )
             .await
             {

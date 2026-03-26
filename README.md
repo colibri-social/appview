@@ -82,6 +82,8 @@ All endpoints return JSON. CORS is open (`*`).
 
 The Jetstream consumer enforces the community's `requiresApprovalToJoin` flag when indexing messages. Communities with `requiresApprovalToJoin = true` (default) only accept messages from approved members and the owner; those that set the flag to `false` allow any DID with a membership declaration to send messages even before approval. If a community flips from open to approval-only while the appview is running, any member lacking an approval record is reverted to `pending` and a `member_pending` event is emitted so clients can refresh their UI.
 
+Channels also support an `ownerOnly` record property (returned as `owner_only` by the appview). When `owner_only` is true, only the community owner can create or update messages in that channel.
+
 ### Messages
 
 #### `GET /api/messages`
@@ -288,7 +290,7 @@ All channels for a community.
 | ----------- | -------- | ------------------------------------------------------------------- |
 | `community` | ✅       | Community AT-URI (`at://did:plc:xxx/social.colibri.community/rkey`) |
 
-**Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`, `community_uri`, and `voice_members`.
+**Response:** array of channel objects with `uri`, `rkey`, `name`, `description`, `channel_type`, `category_rkey`, `community_uri`, `owner_only`, and `voice_members`.
 
 `voice_members` is the sorted list of DIDs currently connected to that channel's voice room (`[]` if empty).
 
@@ -317,6 +319,7 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 					"name": "announcements",
 					"channel_type": "text",
 					"category_rkey": "3mxxx",
+					"owner_only": true,
 					"voice_members": []
 				},
 				{
@@ -325,6 +328,7 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 					"name": "general",
 					"channel_type": "text",
 					"category_rkey": "3mxxx",
+					"owner_only": false,
 					"voice_members": ["did:plc:abc"]
 				}
 			]
@@ -337,6 +341,7 @@ Channels and categories combined into a sidebar-ready structure. Categories nest
 			"name": "off-topic",
 			"channel_type": "text",
 			"category_rkey": null,
+			"owner_only": false,
 			"voice_members": []
 		}
 	]
@@ -717,7 +722,8 @@ A channel was created or updated.
 	"name": "announcements",
 	"description": "Important announcements",
 	"channel_type": "text",
-	"category_rkey": "3mcat"
+	"category_rkey": "3mcat",
+	"owner_only": true
 }
 ```
 

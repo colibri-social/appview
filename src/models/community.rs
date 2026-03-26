@@ -37,6 +37,7 @@ pub struct Channel {
     pub description: Option<String>,
     pub channel_type: String,
     pub category_rkey: Option<String>,
+    pub owner_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +51,7 @@ pub struct ChannelWithVoice {
     pub category_rkey: Option<String>,
     #[serde(default)]
     pub voice_members: Vec<String>,
+    pub owner_only: bool,
 }
 
 impl From<Channel> for ChannelWithVoice {
@@ -63,6 +65,7 @@ impl From<Channel> for ChannelWithVoice {
             channel_type: channel.channel_type,
             category_rkey: channel.category_rkey,
             voice_members: Vec::new(),
+            owner_only: channel.owner_only,
         }
     }
 }

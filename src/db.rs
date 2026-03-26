@@ -872,16 +872,18 @@ pub async fn save_channel(
     description: Option<&str>,
     channel_type: &str,
     category_rkey: Option<&str>,
+    owner_only: bool,
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO channels (uri, owner_did, rkey, community_uri, name, description, channel_type, category_rkey)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO channels (uri, owner_did, rkey, community_uri, name, description, channel_type, category_rkey, owner_only)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (uri) DO UPDATE
           SET name = EXCLUDED.name,
               description = EXCLUDED.description,
               channel_type = EXCLUDED.channel_type,
-              category_rkey = EXCLUDED.category_rkey
+              category_rkey = EXCLUDED.category_rkey,
+              owner_only = EXCLUDED.owner_only
         "#,
     )
     .bind(uri)
@@ -892,6 +894,7 @@ pub async fn save_channel(
     .bind(description)
     .bind(channel_type)
     .bind(category_rkey)
+    .bind(owner_only)
     .execute(pool)
     .await?;
     Ok(())
@@ -938,10 +941,10 @@ pub async fn prune_channels_for_owner(
 pub async fn get_community_for_channel(
     pool: &PgPool,
     channel_rkey: &str,
-) -> Result<Option<(String, String, bool)>> {
-    let row: Option<(String, String, bool)> = sqlx::query_as(
+) -> Result<Option<(String, String, bool, bool)>> {
+    let row: Option<(String, String, bool, bool)> = sqlx::query_as(
         r#"
-        SELECT c.community_uri, c.owner_did, co.requires_approval_to_join
+        SELECT c.community_uri, c.owner_did, co.requires_approval_to_join, c.owner_only
           FROM channels c
           JOIN communities co ON co.uri = c.community_uri
          WHERE c.rkey = $1
@@ -1566,7 +1569,7 @@ pub async fn get_channels_for_community(
 ) -> Result<Vec<crate::models::community::Channel>> {
     let channels = sqlx::query_as::<_, crate::models::community::Channel>(
         r#"
-        SELECT uri, rkey, community_uri, name, description, channel_type, category_rkey
+        SELECT uri, rkey, community_uri, name, description, channel_type, category_rkey, owner_only
           FROM channels
          WHERE community_uri = $1
          ORDER BY name

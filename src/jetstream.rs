@@ -109,6 +109,8 @@ struct ColibriChannel {
     category: Option<String>,
     /// rkey of the community record on the same PDS as this channel.
     community: String,
+    #[serde(default)]
+    owner_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,11 +365,19 @@ async fn handle_message(
 
             // Gate: only index messages from community members/owners.
             // If the channel is not yet indexed, allow through (lenient).
-            if let Ok(Some((community_uri, owner_did, requires_approval_to_join))) =
+            if let Ok(Some((community_uri, owner_did, requires_approval_to_join, owner_only))) =
                 db::get_community_for_channel(pool, &record.channel).await
             {
                 if let Ok(true) = db::is_member_banned(pool, &community_uri, did).await {
                     debug!(did, community_uri = %community_uri, "Message dropped: banned member");
+                    return Ok(());
+                }
+                if owner_only && did != owner_did {
+                    debug!(
+                        did,
+                        channel = %record.channel,
+                        "Message dropped: owner-only channel"
+                    );
                     return Ok(());
                 }
                 if did != owner_did {
@@ -441,11 +451,19 @@ async fn handle_message(
             };
 
             // Gate: only allow updates from members/owners.
-            if let Ok(Some((community_uri, owner_did, requires_approval_to_join))) =
+            if let Ok(Some((community_uri, owner_did, requires_approval_to_join, owner_only))) =
                 db::get_community_for_channel(pool, &record.channel).await
             {
                 if let Ok(true) = db::is_member_banned(pool, &community_uri, did).await {
                     debug!(did, community_uri = %community_uri, "Message update dropped: banned member");
+                    return Ok(());
+                }
+                if owner_only && did != owner_did {
+                    debug!(
+                        did,
+                        channel = %record.channel,
+                        "Message update dropped: owner-only channel"
+                    );
                     return Ok(());
                 }
                 if did != owner_did {
@@ -571,7 +589,7 @@ async fn handle_reaction(
                 }
             };
             if let Some((channel, _)) = channel_info.as_ref() {
-                if let Ok(Some((community_uri, _, _))) =
+                if let Ok(Some((community_uri, _, _, _))) =
                     db::get_community_for_channel(pool, channel).await
                 {
                     if let Ok(true) = db::is_member_banned(pool, &community_uri, did).await {
@@ -916,12 +934,13 @@ async fn handle_channel(
                 record.description.as_deref(),
                 &record.channel_type,
                 record.category.as_deref(),
+                record.owner_only,
             )
             .await
             {
                 error!(did, rkey = %commit.rkey, "DB error saving channel: {e}");
             } else {
-                info!(did, rkey = %commit.rkey, name = %record.name, "Channel indexed");
+                info!(did, rkey = %commit.rkey, name = %record.name, owner_only = record.owner_only, "Channel indexed");
                 let _ = bus.send(AppEvent::ChannelCreated {
                     community_uri,
                     uri,
@@ -930,6 +949,7 @@ async fn handle_channel(
                     description: record.description,
                     channel_type: record.channel_type,
                     category_rkey: record.category,
+                    owner_only: record.owner_only,
                 });
             }
         }

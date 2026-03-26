@@ -45,6 +45,7 @@ pub struct RawChannel {
     pub description: Option<String>,
     pub channel_type: String,
     pub category_rkey: Option<String>,
+    pub owner_only: bool,
     /// rkey of the community on the same PDS.
     pub community_rkey: String,
 }
@@ -125,6 +126,8 @@ struct ColibriRecord {
     description: Option<String>,
     #[serde(rename = "type")]
     channel_type: Option<String>,
+    #[serde(default)]
+    owner_only: Option<bool>,
     /// category rkey (channel → category) or community rkey (channel/category → community).
     category: Option<String>,
     /// community rkey (channel/category) or community AT-URI (membership).
@@ -377,6 +380,7 @@ pub async fn list_channel_records(
                 description: val.description,
                 channel_type: val.channel_type.unwrap_or_else(|| "text".to_string()),
                 category_rkey: val.category,
+                owner_only: val.owner_only.unwrap_or(false),
                 community_rkey: val.community?,
             })
         })
