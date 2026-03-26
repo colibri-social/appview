@@ -218,6 +218,11 @@ All ban endpoints require `Authorization: Bearer <INVITE_API_KEY>`.
 
 All communities for a user — both owned and joined — in a single roundtrip.
 
+Includes:
+- Communities owned by the user
+- Communities where the user is an approved member
+- Communities where the user is pending BUT the community has `requiresApprovalToJoin = false` (open communities where pending members can participate)
+
 | Parameter | Required | Description |
 | --------- | -------- | ----------- |
 | `did`     | ✅       | User DID    |

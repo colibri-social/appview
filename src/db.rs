@@ -1237,7 +1237,8 @@ pub async fn get_community(pool: &PgPool, uri_or_rkey: &str) -> Result<Option<Co
     Ok(community)
 }
 
-/// Return all communities owned by or joined (approved) by a DID.
+/// Return all communities owned by or joined by a DID.
+/// Includes approved members in all communities, plus pending members in open communities.
 pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<CommunitiesResponse> {
     let owned = sqlx::query_as::<_, Community>(
         "SELECT uri, owner_did, rkey, name, description, picture, category_order, requires_approval_to_join FROM communities WHERE owner_did = $1",
@@ -1253,7 +1254,7 @@ pub async fn get_communities_for_user(pool: &PgPool, did: &str) -> Result<Commun
           FROM communities c
           JOIN community_members cm ON cm.community_uri = c.uri
          WHERE cm.member_did = $1
-           AND cm.status     = 'approved'
+           AND (cm.status = 'approved' OR (cm.status = 'pending' AND c.requires_approval_to_join = false))
         "#,
     )
     .bind(did)
