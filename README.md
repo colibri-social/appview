@@ -649,6 +649,10 @@ A community was created or its metadata updated.
 
 #### `community_deleted`
 
+Sent when:
+- The community owner deletes their community record (all members receive this)
+- A user's membership record is removed from a community (only that user receives this as a "you were removed" notification)
+
 ```json
 {
 	"type": "community_deleted",

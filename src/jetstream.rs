@@ -1134,12 +1134,26 @@ async fn handle_membership(
                 info!(did, rkey = %commit.rkey, "Membership deleted");
                 if let Some((community_uri, member_did)) = info {
                     let profile = ensure_profile_cached(pool, http, &member_did).await;
+
+                    // Notify other community members that this member left
                     let _ = bus.send(AppEvent::MemberLeft {
-                        community_uri,
+                        community_uri: community_uri.clone(),
                         display_name: profile.as_ref().and_then(|p| p.display_name.clone()),
                         avatar_url: profile.as_ref().and_then(|p| p.avatar_url.clone()),
-                        member_did,
+                        member_did: member_did.clone(),
                     });
+
+                    // Notify the removed user that the community is gone from their view
+                    let community_parts: Vec<&str> = community_uri.split('/').collect();
+                    if let (Some(&owner_did), Some(&rkey)) =
+                        (community_parts.get(2), community_parts.last())
+                    {
+                        let _ = bus.send(AppEvent::CommunityDeleted {
+                            community_uri: community_uri.clone(),
+                            owner_did: owner_did.to_string(),
+                            rkey: rkey.to_string(),
+                        });
+                    }
                 }
             }
         }
