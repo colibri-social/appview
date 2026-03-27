@@ -590,7 +590,7 @@ async fn set_user_state(
         _ => return Status::UnprocessableEntity,
     }
     match db::set_user_state(pool, did, state, true).await {
-        Ok(updated) => {
+        Ok(Some(updated)) => {
             let _ = bus.send(events::AppEvent::UserStatusChanged {
                 did: did.to_string(),
                 status: updated.status.unwrap_or_default(),
@@ -599,6 +599,10 @@ async fn set_user_state(
                 display_name: updated.display_name,
                 avatar_url: updated.avatar_url,
             });
+            Status::NoContent
+        }
+        Ok(None) => {
+            // State didn't change, still success
             Status::NoContent
         }
         Err(e) => {

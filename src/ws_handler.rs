@@ -377,7 +377,7 @@ pub fn subscribe(
                 };
 
                 if first_connection || was_away {
-                    if let Ok(updated) =
+                    if let Ok(Some(updated)) =
                         crate::db::set_user_state(&pool, d, &preferred_state, false).await
                     {
                         let _ = bus.send(AppEvent::UserStatusChanged {
@@ -430,7 +430,7 @@ pub fn subscribe(
                                         });
                                     }
                                     log_voice_state(&voice_map, "after away cleanup").await;
-                                    if let Ok(updated) =
+                                    if let Ok(Some(updated)) =
                                         crate::db::set_user_state(&pool, d, "away", false).await
                                     {
                                         let _ = bus.send(AppEvent::UserStatusChanged {
@@ -484,7 +484,7 @@ pub fn subscribe(
 
                                                 if was_away {
                                                     if let Some(ref d) = did {
-                                                        if let Ok(updated) = crate::db::set_user_state(
+                                                        if let Ok(Some(updated)) = crate::db::set_user_state(
                                                             &pool, d, &preferred_state, false,
                                                         ).await {
                                                             let _ = bus.send(AppEvent::UserStatusChanged {
@@ -605,7 +605,7 @@ pub fn subscribe(
                                                                 // Validate state.
                                                                 match new_state.as_str() {
                                                                     "online" | "away" | "dnd" | "offline" => {
-                                                                        if let Ok(updated) = crate::db::set_user_state(&pool, d, new_state, true).await {
+                                                                        if let Ok(Some(updated)) = crate::db::set_user_state(&pool, d, new_state, true).await {
                                                                             let _ = bus.send(AppEvent::UserStatusChanged {
                                                                                 did: d.clone(),
                                                                                 status: updated.status.unwrap_or_default(),
@@ -724,46 +724,72 @@ pub fn subscribe(
                 }
             }
 
-            // ── On disconnect: only set offline when the last connection closes ──
+            // ── On disconnect: schedule offline after grace period to handle refreshes ──
             if let Some(ref d) = did {
-                let last_connection = {
+                let should_schedule_offline = {
                     let mut map = presence_map.lock().await;
                     if let Some(entry) = map.get_mut(d) {
                         entry.count = entry.count.saturating_sub(1);
-                        if entry.count == 0 {
-                            map.remove(d);
-                            true
-                        } else {
-                            false
-                        }
+                        entry.count == 0
                     } else {
                         false
                     }
                 };
 
-                if last_connection {
-                    if let Some((community_uri, channel_rkey, members)) =
-                        clear_voice_channel(&voice_map, &voice_membership_map, d).await
-                    {
-                        let _ = bus.send(AppEvent::VoiceChannelUpdated {
-                            community_uri,
-                            channel_rkey,
-                            member_dids: members,
-                        });
-                    }
-                    log_voice_state(&voice_map, "after disconnect cleanup").await;
-                    if let Ok(updated) =
-                        crate::db::set_user_state(&pool, d, "offline", false).await
-                    {
-                        let _ = bus.send(AppEvent::UserStatusChanged {
-                            did: d.clone(),
-                            status: updated.status.unwrap_or_default(),
-                            emoji: updated.emoji,
-                            state: updated.state,
-                            display_name: updated.display_name,
-                            avatar_url: updated.avatar_url,
-                        });
-                    }
+                if should_schedule_offline {
+                    // Spawn a delayed task to set offline. If the user reconnects within
+                    // 2 seconds (e.g., page refresh), the new connection will increment
+                    // count back above 0 and this will become a no-op.
+                    let did_clone = d.clone();
+                    let pool_clone = pool.clone();
+                    let bus_clone = bus.clone();
+                    let presence_clone = presence_map.clone();
+                    let voice_clone = voice_map.clone();
+                    let voice_membership_clone = voice_membership_map.clone();
+
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                        // Check if still at 0 connections
+                        let actually_offline = {
+                            let mut map = presence_clone.lock().await;
+                            if let Some(entry) = map.get(&did_clone) {
+                                if entry.count == 0 {
+                                    map.remove(&did_clone);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+
+                        if actually_offline {
+                            if let Some((community_uri, channel_rkey, members)) =
+                                clear_voice_channel(&voice_clone, &voice_membership_clone, &did_clone).await
+                            {
+                                let _ = bus_clone.send(AppEvent::VoiceChannelUpdated {
+                                    community_uri,
+                                    channel_rkey,
+                                    member_dids: members,
+                                });
+                            }
+                            log_voice_state(&voice_clone, "after disconnect cleanup").await;
+                            if let Ok(Some(updated)) =
+                                crate::db::set_user_state(&pool_clone, &did_clone, "offline", false).await
+                            {
+                                let _ = bus_clone.send(AppEvent::UserStatusChanged {
+                                    did: did_clone.clone(),
+                                    status: updated.status.unwrap_or_default(),
+                                    emoji: updated.emoji,
+                                    state: updated.state,
+                                    display_name: updated.display_name,
+                                    avatar_url: updated.avatar_url,
+                                });
+                            }
+                        }
+                    });
                 }
             }
 

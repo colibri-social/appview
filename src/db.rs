@@ -574,16 +574,29 @@ pub async fn get_author_profile(pool: &PgPool, did: &str) -> Result<Option<Autho
     Ok(profile)
 }
 
+/// Find up to `limit` profiles that have no display_name AND no handle.
+/// These profiles need to be re-fetched from ATProto to populate missing data.
+pub async fn get_empty_profiles(pool: &PgPool, limit: i64) -> Result<Vec<String>> {
+    let dids = sqlx::query_scalar::<_, String>(
+        "SELECT did FROM author_profiles WHERE display_name IS NULL AND handle IS NULL LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(dids)
+}
+
 /// Set the current presence state for a user.
 /// If `update_preferred` is true, also persists the state as `preferred_state`
 /// (used when the user manually sets their state).
-/// Returns the updated profile.
+/// Returns the updated profile only if the state actually changed, None otherwise.
 pub async fn set_user_state(
     pool: &PgPool,
     did: &str,
     state: &str,
     update_preferred: bool,
-) -> Result<AuthorProfile> {
+) -> Result<Option<AuthorProfile>> {
     let profile = if update_preferred {
         sqlx::query_as::<_, AuthorProfile>(
             r#"
@@ -592,12 +605,13 @@ pub async fn set_user_state(
                    preferred_state = $2,
                    updated_at      = NOW()
              WHERE did = $1
+               AND (state IS DISTINCT FROM $2 OR preferred_state IS DISTINCT FROM $2)
             RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
             "#,
         )
         .bind(did)
         .bind(state)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?
     } else {
         sqlx::query_as::<_, AuthorProfile>(
@@ -606,12 +620,13 @@ pub async fn set_user_state(
                SET state      = $2,
                    updated_at = NOW()
              WHERE did = $1
+               AND state IS DISTINCT FROM $2
             RETURNING did, display_name, avatar_url, banner_url, description, handle, status, emoji, state, preferred_state, updated_at
             "#,
         )
         .bind(did)
         .bind(state)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?
     };
     Ok(profile)
@@ -1169,7 +1184,7 @@ pub async fn save_approval(
     approval_uri: &str,
     membership_uri: &str,
     approval_rkey: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let rows = sqlx::query(
         r#"
         UPDATE community_members
@@ -1185,11 +1200,12 @@ pub async fn save_approval(
     .execute(pool)
     .await?
     .rows_affected();
+    let mut changed = rows > 0;
 
     // Membership row doesn't exist yet — stage the approval so save_membership
     // can pick it up when the membership record arrives.
     if rows == 0 {
-        sqlx::query(
+        let inserted = sqlx::query(
             r#"
             INSERT INTO pending_approvals (approval_uri, membership_uri, approval_rkey)
             VALUES ($1, $2, $3)
@@ -1200,10 +1216,12 @@ pub async fn save_approval(
         .bind(membership_uri)
         .bind(approval_rkey)
         .execute(pool)
-        .await?;
+        .await?
+        .rows_affected();
+        changed = inserted > 0;
     }
 
-    Ok(())
+    Ok(changed)
 }
 
 /// Revert an approval to pending when the owner deletes their approval record.

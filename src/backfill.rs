@@ -10,7 +10,7 @@ const LAG_THRESHOLD_SECS: i64 = 300; // 5 min
                                      // How often the sweep-loop wakes up to check lag.
 const SWEEP_CHECK_SECS: u64 = 60;
 
-/// Top-level entry point — spawns two independent tasks:
+/// Top-level entry point — spawns three independent tasks:
 ///
 /// 1. **Historical backfill** — walks every (DID, collection) pair fully,
 ///    using a resumable cursor. Runs once per pair, picks up new DIDs as they
@@ -20,14 +20,17 @@ const SWEEP_CHECK_SECS: u64 = 60;
 ///    message has been indexed recently. If the Jetstream appears to be lagging
 ///    (no new messages for >5 min) it fetches the newest page of records from
 ///    every known DID's PDS and inserts anything missing.
+///
+/// 3. **Empty profile repair** — runs every 5 minutes to find and repair profiles
+///    with no display_name AND no handle, attempting to re-fetch from ATProto.
 pub async fn run(pool: PgPool, http: reqwest::Client) {
     let pool2 = pool.clone();
     let http2 = http.clone();
     tokio::spawn(run_historical(pool2, http2));
 
-    // Run an immediate sweep on startup before entering the periodic loop.
-    info!("Backfill: running startup sweep");
-    sweep_all_known_dids(&pool, &http).await;
+    let pool3 = pool.clone();
+    let http3 = http.clone();
+    tokio::spawn(run_empty_profile_repair(pool3, http3));
 
     run_sweep_loop(pool, http).await;
 }
@@ -354,14 +357,18 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
             // PDS is only contacted once even if they have multiple approvals.
             let mut member_dids: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
+            let mut approval_changed = false;
 
             for record in &records {
                 match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey)
                     .await
                 {
-                    Ok(_) => {
+                    Ok(changed) => {
+                        approval_changed |= changed;
                         debug!(did, rkey = %record.rkey, "Backfill/sweep: approval upserted");
-                        total_inserted += 1;
+                        if changed {
+                            total_inserted += 1;
+                        }
                     }
                     Err(e) => {
                         error!(did, rkey = %record.rkey, "Backfill/sweep: DB error approval: {e}")
@@ -380,34 +387,36 @@ async fn sweep_all_known_dids(pool: &PgPool, http: &reqwest::Client) {
             }
 
             // For each unique member DID, ensure all their membership records are
-            // fetched — they may not be reachable through any other path.
-            for member_did in member_dids {
-                let member_pds = match atproto::resolve_pds(http, &member_did).await {
-                    Ok(u) => u,
-                    Err(e) => {
-                        warn!(member_did, "Backfill/sweep: cannot resolve member PDS: {e}");
-                        continue;
-                    }
-                };
+            // fetched only when approvals actually changed in this sweep.
+            if approval_changed {
+                for member_did in member_dids {
+                    let member_pds = match atproto::resolve_pds(http, &member_did).await {
+                        Ok(u) => u,
+                        Err(e) => {
+                            warn!(member_did, "Backfill/sweep: cannot resolve member PDS: {e}");
+                            continue;
+                        }
+                    };
 
-                if let Ok((mem_records, _)) =
-                    atproto::list_membership_records(http, &member_pds, &member_did, None).await
-                {
-                    for mem_record in mem_records {
-                        match db::save_membership(
-                            pool,
-                            &mem_record.uri,
-                            &mem_record.community_uri,
-                            &member_did,
-                            &mem_record.rkey,
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                debug!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: member membership upserted")
-                            }
-                            Err(e) => {
-                                error!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: DB error member membership: {e}")
+                    if let Ok((mem_records, _)) =
+                        atproto::list_membership_records(http, &member_pds, &member_did, None).await
+                    {
+                        for mem_record in mem_records {
+                            match db::save_membership(
+                                pool,
+                                &mem_record.uri,
+                                &mem_record.community_uri,
+                                &member_did,
+                                &mem_record.rkey,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    debug!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: member membership upserted")
+                                }
+                                Err(e) => {
+                                    error!(member_did, rkey = %mem_record.rkey, "Backfill/sweep: DB error member membership: {e}")
+                                }
                             }
                         }
                     }
@@ -976,9 +985,11 @@ async fn backfill_approvals(
             }
 
             match db::save_approval(pool, &record.uri, &record.membership_uri, &record.rkey).await {
-                Ok(_) => {
+                Ok(changed) => {
                     debug!(did, rkey = %record.rkey, "Backfill: approval upserted");
-                    total += 1;
+                    if changed {
+                        total += 1;
+                    }
                 }
                 Err(e) => {
                     error!(did, rkey = %record.rkey, "Backfill: DB error saving approval: {e}")
@@ -1037,4 +1048,90 @@ async fn backfill_approvals(
     }
 
     Ok(())
+}
+
+// ── Empty profile repair ──────────────────────────────────────────────────
+
+/// Periodically repair profiles that are empty (missing display_name AND handle).
+/// Runs immediately on startup, then every 5 minutes, fetching up to 50 profiles
+/// at a time from ATProto.
+async fn run_empty_profile_repair(pool: PgPool, http: reqwest::Client) {
+    info!("Backfill/empty-profile-repair: active");
+    
+    // Run an immediate repair on startup
+    info!("Backfill/empty-profile-repair: running startup repair");
+    repair_empty_profiles(&pool, &http).await;
+    
+    // Then enter the periodic loop
+    let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes
+    // `interval.tick()` fires immediately the first time; consume that instant tick
+    // so we don't run the same repair twice on startup.
+    interval.tick().await;
+    
+    loop {
+        interval.tick().await;
+        repair_empty_profiles(&pool, &http).await;
+    }
+}
+
+/// Repair a batch of empty profiles from ATProto.
+async fn repair_empty_profiles(pool: &PgPool, http: &reqwest::Client) {
+    // Get up to 50 empty profiles
+    let empty_dids = match db::get_empty_profiles(pool, 50).await {
+        Ok(dids) => dids,
+        Err(e) => {
+            error!("Backfill/empty-profile-repair: failed to fetch empty profiles: {e}");
+            return;
+        }
+    };
+    
+    if empty_dids.is_empty() {
+        debug!("Backfill/empty-profile-repair: no empty profiles found");
+        return;
+    }
+    
+    info!(count = empty_dids.len(), "Backfill/empty-profile-repair: processing empty profiles");
+    
+    for did in empty_dids {
+        match atproto::fetch_profile(http, &did).await {
+            Ok(Some(data)) => {
+                // Check if we got meaningful data
+                let has_data = data.display_name.is_some()
+                    || data.avatar_url.is_some()
+                    || data.handle.is_some();
+                
+                if has_data {
+                    match db::upsert_author_profile(
+                        pool,
+                        &did,
+                        data.display_name.as_deref(),
+                        data.avatar_url.as_deref(),
+                        data.banner_url.as_deref(),
+                        data.handle.as_deref(),
+                        data.description.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            debug!(did, "Backfill/empty-profile-repair: profile updated");
+                        }
+                        Err(e) => {
+                            error!(did, "Backfill/empty-profile-repair: failed to update profile: {e}");
+                        }
+                    }
+                } else {
+                    warn!(did, "Backfill/empty-profile-repair: fetched data still empty, will retry later");
+                }
+            }
+            Ok(None) => {
+                warn!(did, "Backfill/empty-profile-repair: fetch returned None");
+            }
+            Err(e) => {
+                warn!(did, "Backfill/empty-profile-repair: failed to fetch profile: {e}");
+            }
+        }
+        
+        // Rate limit to avoid hammering ATProto
+        sleep(Duration::from_millis(100)).await;
+    }
 }

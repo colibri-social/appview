@@ -1311,7 +1311,16 @@ pub async fn ensure_profile_cached(
     did: &str,
 ) -> Option<crate::models::author::AuthorProfile> {
     if let Ok(Some(profile)) = db::get_author_profile(pool, did).await {
-        return Some(profile);
+        // Check if the cached profile has meaningful data
+        let has_data = profile.display_name.is_some()
+            || profile.avatar_url.is_some()
+            || profile.handle.is_some();
+        
+        if has_data {
+            return Some(profile);
+        }
+        // If profile exists but is empty, fall through to fetch fresh data
+        warn!("Cached profile for {did} is empty, fetching fresh data");
     }
 
     // Try fetching up to 2 times if we get incomplete data
