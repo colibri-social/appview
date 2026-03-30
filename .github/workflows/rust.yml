@@ -10,12 +10,12 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: moonrepo/setup-rust@v1
-        with:
-          components: rustfmt
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable && rustup component add rustfmt
       - name: Check formatting
         run: cargo fmt --all --check
+
   lint:
     name: Lint
     runs-on: ${{ matrix.os }}
@@ -24,13 +24,14 @@ jobs:
         os: [ubuntu-latest, windows-latest]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v3
-      - uses: moonrepo/setup-rust@v1
-        with:
-          bins: cargo-make
-          components: clippy
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable && rustup component add clippy
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
       - name: Run linter
-        run: cargo make lint
+        run: cargo clippy -- -D warnings
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}
@@ -42,9 +43,12 @@ jobs:
           - windows-latest
       fail-fast: false
     steps:
-      - uses: actions/checkout@v3
-      - uses: moonrepo/setup-rust@v1
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update stable
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
         with:
-          bins: cargo-make, cargo-nextest
+          key: ${{ matrix.os }}
       - name: Run tests
-        run: cargo make test
+        run: cargo test --all-features
