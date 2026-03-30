@@ -11,7 +11,39 @@ services:
       - "5432:5432"
     volumes:
       - postgres:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-root} -d ${POSTGRES_DB:-colibri}",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    networks:
+      - internal
+
+  tap:
+    image: ghcr.io/bluesky-social/indigo/tap:latest
+    restart: unless-stopped
+    environment:
+      TAP_DATABASE_URL: postgres://root:colibri@postgres:5432/colibri
+      TAP_COLLECTION_FILTERS: social.colibri.*
+      TAP_NO_REPLAY: true
+    ports:
+      - "2480:2480"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    # volumes:
+    #   - tap:./data
 
 volumes:
   postgres:
     driver: local
+
+networks:
+  internal:
+    driver: bridge
