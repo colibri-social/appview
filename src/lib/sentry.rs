@@ -1,3 +1,4 @@
+use log::{info, warn};
 use sentry::{ClientInitGuard, ClientOptions};
 
 /// Attempts to parse the `SENTRY_DSN` environment variable
