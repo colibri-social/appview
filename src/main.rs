@@ -1,17 +1,13 @@
-use crate::lib::sentry::init_sentry;
-
-#[allow(special_module_name)]
-mod lib;
+#![allow(special_module_name)]
 
 extern crate pretty_env_logger;
 
-#[macro_use]
-extern crate rocket;
-extern crate log;
-
+use crate::lib::sentry::init_sentry;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::Header;
-use rocket::{Request, Response};
+use rocket::{Request, Response, get, launch, routes};
+
+mod lib;
 
 pub struct CORS;
 
