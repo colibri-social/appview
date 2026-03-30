@@ -27,7 +27,7 @@ fn get_sentry_config() -> (String, ClientOptions) {
 pub fn init_sentry() -> Result<ClientInitGuard, ()> {
     let (dsn, conf) = get_sentry_config();
 
-    if dsn.len() == 0 {
+    if dsn.is_empty() {
         warn!("SENTRY_DSN env var is not set. Skipping Sentry initialization.");
         return Err(());
     }
