@@ -14,6 +14,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tap:
+        condition: service_healthy
     networks:
       - internal
       - dokploy-network
@@ -33,9 +35,24 @@ services:
           "CMD-SHELL",
           "pg_isready -U ${POSTGRES_USER:-colibri} -d ${POSTGRES_DB:-colibri}",
         ]
-      interval: 5s
-      timeout: 5s
+      interval: 2s
+      timeout: 2s
       retries: 10
+    networks:
+      - internal
+
+  tap:
+    image: ghcr.io/bluesky-social/indigo/tap:latest
+    restart: unless-stopped
+    environment:
+      TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
+      TAP_DATABASE_URL: ${DATABASE_URL}
+      TAP_COLLECTION_FILTERS: social.colibri.*
+    ports:
+      - "2480:2480"
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - internal
 
