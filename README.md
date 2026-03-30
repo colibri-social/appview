@@ -7,3 +7,7 @@ The app view that sits behind [colibri.social](https://colibri.social).
 - ENVs (SENTRY_DSN)
 - Min rust version
 - Start command
+
+## Tap
+
+For configuring Tap, see the [Tap README](https://github.com/bluesky-social/indigo/blob/main/cmd/tap/README.md).
