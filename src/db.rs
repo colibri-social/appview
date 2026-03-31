@@ -1810,3 +1810,70 @@ pub async fn get_members_for_community(
     .await?;
     Ok(members)
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn setup() -> PgPool {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect("postgres://user:password@localhost:5432/test")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_reactions() {
+        let pool = setup().await;
+
+        let rkey = "test_rkey";
+        let author_did_1 = "did:plc:123";
+        let author_did_2 = "did:plc:456";
+        let emoji = "👍";
+        let target_rkey = "target_rkey";
+        let created_at = Utc::now();
+
+        // User 1 reacts
+        let reaction1 = save_reaction(
+            &pool,
+            rkey,
+            author_did_1,
+            emoji,
+            target_rkey,
+            created_at,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // User 2 reacts with the same emoji
+        let reaction2 = save_reaction(
+            &pool,
+            "another_rkey",
+            author_did_2,
+            emoji,
+            target_rkey,
+            created_at,
+        )
+        .await
+        .unwrap();
+
+        // This should not be None
+        assert!(reaction2.is_some());
+
+        // User 2 removes their reaction
+        delete_reaction(&pool, author_did_2, "another_rkey")
+            .await
+            .unwrap();
+
+        // The reaction from user 1 should still exist
+        let reactions = get_reactions_for_message(&pool, target_rkey).await.unwrap();
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].count, 1);
+        assert_eq!(reactions[0].authors[0], author_did_1);
+    }
+}
