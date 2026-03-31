@@ -590,6 +590,9 @@ Send JSON subscription requests; receive JSON events.
 // Signal user activity (e.g. after sending a message via REST) — resets away timer
 { "action": "activity" }
 
+// Notify other users that you are typing in a channel
+{ "action": "typing", "channel": "<channel-rkey>" }
+
 // Voice presence updates — send when the user joins or leaves a voice channel
 { "action": "voice_event", "community_uri": "<community-uri>", "voice_channel_rkey": "<record-key>", "voice_action": "join" }
 { "action": "voice_event", "community_uri": "<community-uri>", "voice_channel_rkey": "<record-key>", "voice_action": "leave" }
