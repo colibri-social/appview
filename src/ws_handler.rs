@@ -455,8 +455,8 @@ pub fn subscribe(
                                 match serde_json::from_str::<ClientRequest>(&text) {
                                     Ok(req) => {
                                         let param = req.community_uri.clone()
-                                            .or(req.channel)
-                                            .or(req.did);
+                                            .or(req.channel.clone())
+                                            .or(req.did.clone());
 
                                         let reply = match req.action.as_str() {
                                             "heartbeat" => {
