@@ -33,6 +33,12 @@ pub enum AppEvent {
         target_author_did: String,
         channel: String,
     },
+    UserTyping {
+        did: String,
+        channel: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+    },
     // ── Community events (filtered by community_uri) ──────────────────────
     ChannelCreated {
         community_uri: String,

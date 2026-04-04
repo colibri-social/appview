@@ -283,7 +283,8 @@ impl Subscriptions {
             },
             AppEvent::MessageDeleted { channel, .. }
             | AppEvent::ReactionAdded { channel, .. }
-            | AppEvent::ReactionRemoved { channel, .. } => match &self.messages {
+            | AppEvent::ReactionRemoved { channel, .. }
+            | AppEvent::UserTyping { channel, .. } => match &self.messages {
                 None => false,
                 Some(None) => true,
                 Some(Some(channels)) => channels.contains(channel),
@@ -520,6 +521,31 @@ pub fn subscribe(
                                                     // Generic activity ping — client sends this after
                                                     // any user action (e.g. sending a message via REST).
                                                     "activity" => ServerMessage::Ack { message: String::new() },
+                                                    "typing" => {
+                                                        if let Some(ref d) = did {
+                                                            if let Some(ref channel) = req.channel {
+                                                                // To avoid hitting the DB on every keystroke, we don't include the display name.
+                                                                // The client can look up the user profile from its own state if needed.
+                                                                // The sender's client should ignore UserTyping events from itself.
+                                                                let _ = bus.send(AppEvent::UserTyping {
+                                                                    did: d.clone(),
+                                                                    channel: channel.clone(),
+                                                                    display_name: None,
+                                                                });
+                                                                ServerMessage::Ack { message: String::new() }
+                                                            } else {
+                                                                ServerMessage::Error {
+                                                                    message: "A channel is required for the typing event"
+                                                                        .to_string(),
+                                                                }
+                                                            }
+                                                        } else {
+                                                            ServerMessage::Error {
+                                                                message: "DID required for typing event"
+                                                                    .to_string(),
+                                                            }
+                                                        }
+                                                    }
                                                     "voice_event" => {
                                                         if let Some(ref d) = did {
                                                             if let (Some(community_uri), Some(channel_rkey)) = (
