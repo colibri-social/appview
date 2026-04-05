@@ -1,0 +1,32 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct VerificationMethod {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub verification_type: String,
+    pub controller: String,
+    #[serde(rename = "publicKeyMultibase")]
+    pub public_key_multibase: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Service {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub service_type: String,
+    #[serde(rename = "serviceEndpoint")]
+    pub service_endpoint: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DidDocument {
+    #[serde(rename = "@context")]
+    pub context: Vec<String>,
+    pub id: String,
+    #[serde(rename = "alsoKnownAs")]
+    pub also_known_as: Vec<String>,
+    #[serde(rename = "verificationMethod")]
+    pub verification_method: Vec<VerificationMethod>,
+    pub service: Vec<Service>,
+}

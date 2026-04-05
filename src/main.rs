@@ -2,15 +2,16 @@
 
 extern crate pretty_env_logger;
 
-use crate::lib::sentry::init_sentry;
 use crate::lib::db::init_db;
+use crate::lib::sentry::init_sentry;
 use rocket::fairing::{AdHoc, Fairing, Info, Kind};
 use rocket::http::Header;
-use rocket::{Request, Response, get, launch, routes};
+use rocket::{Request, Response, launch, routes};
 
 mod lib;
 #[allow(dead_code)]
 mod models;
+mod xrpc;
 
 pub struct CORS;
 
@@ -34,11 +35,6 @@ impl Fairing for CORS {
     }
 }
 
-#[get("/")]
-fn index() -> &'static str {
-    "Hello, world!"
-}
-
 fn init_seaorm() -> AdHoc {
     AdHoc::try_on_ignite("Initialize SeaORM", |rocket| async {
         match init_db().await {
@@ -57,8 +53,17 @@ fn rocket() -> _ {
     let _ = dotenvy::dotenv();
     let _potential_guard = init_sentry().ok();
 
+    log::info!("Starting Rocket");
+
     rocket::build()
-        .mount("/", routes![index])
+        .mount(
+            "/",
+            routes![
+                xrpc::com::atproto::identity::resolve_did,
+                xrpc::com::atproto::identity::resolve_handle,
+                xrpc::com::atproto::identity::resolve_identity
+            ],
+        )
         .attach(CORS)
         .attach(init_seaorm())
 }
