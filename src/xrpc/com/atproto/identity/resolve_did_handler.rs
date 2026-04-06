@@ -25,14 +25,14 @@ pub async fn resolve_did(did: &str) -> Result<Json<DidDocument>, ErrorResponse> 
             .json::<DidDocument>()
             .await?;
 
-        return Ok(Json(resp));
+        Ok(Json(resp))
     } else {
         let resp = reqwest::get(format!("https://plc.directory/{did}"))
             .await?
             .json::<DidDocument>()
             .await?;
 
-        return Ok(Json(resp));
+        Ok(Json(resp))
     }
 }
 
