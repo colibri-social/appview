@@ -60,7 +60,8 @@ fn rocket() -> _ {
                 xrpc::com::atproto::identity::resolve_did,
                 xrpc::com::atproto::identity::resolve_handle,
                 xrpc::com::atproto::identity::resolve_identity,
-                xrpc::com::atproto::repo::get_record
+                xrpc::com::atproto::repo::get_record,
+                xrpc::social::colibri::sync::subscribe_events
             ],
         )
         .attach(CORS)
