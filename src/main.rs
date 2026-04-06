@@ -53,8 +53,6 @@ fn rocket() -> _ {
     let _ = dotenvy::dotenv();
     let _potential_guard = init_sentry().ok();
 
-    log::info!("Starting Rocket");
-
     rocket::build()
         .mount(
             "/",
