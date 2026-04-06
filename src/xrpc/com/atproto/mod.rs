@@ -7,3 +7,10 @@ pub mod identity {
     pub use resolve_handle_handler::resolve_handle;
     pub use resolve_identity_handler::resolve_identity;
 }
+
+pub mod repo {
+    pub mod get_record_handler;
+
+    pub use get_record_handler::get_record;
+}
+

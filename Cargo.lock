@@ -711,6 +711,7 @@ dependencies = [
  "sea-orm",
  "sentry",
  "serde",
+ "serde_json",
  "trust-dns-resolver",
 ]
 

@@ -59,7 +59,8 @@ fn rocket() -> _ {
             routes![
                 xrpc::com::atproto::identity::resolve_did,
                 xrpc::com::atproto::identity::resolve_handle,
-                xrpc::com::atproto::identity::resolve_identity
+                xrpc::com::atproto::identity::resolve_identity,
+                xrpc::com::atproto::repo::get_record
             ],
         )
         .attach(CORS)

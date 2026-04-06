@@ -1,5 +1,6 @@
 use rocket::Responder;
 use rocket::serde::{Serialize, json::Json};
+use sea_orm::DbErr;
 use trust_dns_resolver::error::ResolveError;
 
 #[derive(Serialize, Debug)]
@@ -28,6 +29,17 @@ impl From<reqwest::Error> for ErrorResponse {
 
 impl From<ResolveError> for ErrorResponse {
     fn from(err: ResolveError) -> Self {
+        ErrorResponse {
+            body: Json(ErrorBody {
+                error: "UpstreamError".into(),
+                message: err.to_string(),
+            }),
+        }
+    }
+}
+
+impl From<DbErr> for ErrorResponse {
+    fn from(err: DbErr) -> Self {
         ErrorResponse {
             body: Json(ErrorBody {
                 error: "UpstreamError".into(),
