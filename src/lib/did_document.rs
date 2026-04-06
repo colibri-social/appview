@@ -24,7 +24,7 @@ pub struct DidDocument {
     #[serde(rename = "@context")]
     pub context: Vec<String>,
     pub id: String,
-    #[serde(rename = "alsoKnownAs")]
+    #[serde(rename = "alsoKnownAs", default)]
     pub also_known_as: Vec<String>,
     #[serde(rename = "verificationMethod")]
     pub verification_method: Vec<VerificationMethod>,

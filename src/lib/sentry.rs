@@ -36,3 +36,22 @@ pub fn init_sentry() -> Result<ClientInitGuard, ()> {
     info!("Sentry initialized.");
     Ok(sentry::init((dsn, conf)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sentry_dsn_is_empty_without_env() {
+        let result = get_sentry_config();
+
+        assert!(result.0.is_empty())
+    }
+
+    #[test]
+    fn init_sentry_errors_with_empty_dsn() {
+        let result = init_sentry();
+
+        assert!(result.is_err())
+    }
+}

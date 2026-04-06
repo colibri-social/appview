@@ -1,13 +1,14 @@
 use rocket::Responder;
 use rocket::serde::{Serialize, json::Json};
+use trust_dns_resolver::error::ResolveError;
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ErrorBody {
     pub message: String,
     pub error: String,
 }
 
-#[derive(Responder)]
+#[derive(Responder, Debug)]
 #[response(status = 500, content_type = "json")]
 pub struct ErrorResponse {
     pub body: Json<ErrorBody>,
@@ -15,6 +16,7 @@ pub struct ErrorResponse {
 
 impl From<reqwest::Error> for ErrorResponse {
     fn from(err: reqwest::Error) -> Self {
+        println!("{err:?}");
         ErrorResponse {
             body: Json(ErrorBody {
                 error: "UpstreamError".into(),
@@ -24,11 +26,13 @@ impl From<reqwest::Error> for ErrorResponse {
     }
 }
 
-#[derive(Responder)]
-pub enum ResponseEnum<T> {
-    #[response(status = 200, content_type = "json")]
-    Success(Json<T>),
-
-    #[response(status = 500, content_type = "json")]
-    Error(ErrorResponse),
+impl From<ResolveError> for ErrorResponse {
+    fn from(err: ResolveError) -> Self {
+        ErrorResponse {
+            body: Json(ErrorBody {
+                error: "UpstreamError".into(),
+                message: err.to_string(),
+            }),
+        }
+    }
 }
