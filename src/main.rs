@@ -8,6 +8,7 @@ use rocket::fairing::{AdHoc, Fairing, Info, Kind};
 use rocket::http::Header;
 use rocket::{Request, Response, get, launch, routes};
 
+mod did;
 mod lib;
 #[allow(dead_code)]
 mod models;
@@ -80,6 +81,7 @@ fn rocket() -> _ {
             "/",
             routes![
                 landing_ascii,
+                did::did_document,
                 xrpc::com::atproto::identity::resolve_did,
                 xrpc::com::atproto::identity::resolve_handle,
                 xrpc::com::atproto::identity::resolve_identity,
