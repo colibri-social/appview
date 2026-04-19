@@ -61,7 +61,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          'curl -f http://0.0.0.0:2480/health | grep -q ''{"status": "ok"}'' || exit 1',
+          "curl -f http://localhost:2480/health | grep -q 'status.*ok' || exit 1",
         ]
       interval: 5s
       timeout: 5s
