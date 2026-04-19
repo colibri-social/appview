@@ -55,19 +55,22 @@ services:
         condition: service_healthy
     networks:
       - internal
+    volumes:
+      - tap:./data
     healthcheck:
       test:
         [
           "CMD-SHELL",
           'curl -f http://localhost:2480/health | grep -q ''{"status": "ok"}'' || exit 1',
         ]
-      interval: 2s
-      timeout: 2s
+      interval: 5s
+      timeout: 5s
       retries: 10
 
 volumes:
   postgres:
     driver: local
+  tap:
 
 networks:
   internal:
