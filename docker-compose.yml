@@ -13,7 +13,7 @@ services:
       postgres:
         condition: service_healthy
       tap:
-        condition: service_healthy
+        condition: service_started
     networks:
       - internal
       - dokploy-network
@@ -53,15 +53,6 @@ services:
       - internal
     volumes:
       - tap:/data
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget --quiet --tries=1 --spider http://localhost:2480/health || exit 1",
-        ]
-      interval: 5s
-      timeout: 5s
-      retries: 10
 
 volumes:
   postgres:
