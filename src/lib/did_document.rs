@@ -7,7 +7,9 @@ pub struct VerificationMethod {
     pub verification_type: String,
     pub controller: String,
     #[serde(rename = "publicKeyMultibase")]
-    pub public_key_multibase: String,
+    pub public_key_multibase: Option<String>,
+    #[serde(rename = "publicKeyJwk")]
+    pub public_key_jwk: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize)]
