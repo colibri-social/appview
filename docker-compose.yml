@@ -56,7 +56,7 @@ services:
     networks:
       - internal
     volumes:
-      - tap:./data
+      - tap:/data
     healthcheck:
       test:
         [
