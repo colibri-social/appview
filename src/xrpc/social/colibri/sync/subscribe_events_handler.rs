@@ -80,7 +80,9 @@ async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: S
         && tap_msg.record.is_some()
         && tap_msg.record.unwrap().live == false
     {
-        return true; // Event isn't live, skip but stay connected
+        // Event isn't live, acknowledge and skip, but stay connected
+        ack_tap_msg(tap_sink, text).await;
+        return true;
     }
 
     if ws_sink.send(WsMessage::Text(text.clone())).await.is_err() {

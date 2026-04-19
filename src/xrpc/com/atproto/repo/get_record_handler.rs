@@ -56,6 +56,7 @@ async fn get_record_with_db(
     let safe_record = record.unwrap().unwrap();
 
     // TODO: This returns the wrong data - it should return the actual record, not Tap's reference to it.
+    // Make a match statement to get the correct record types instead.
     Ok(Json(GetRecordResponse {
         uri: format!(
             "at://{}/{}/{}",
