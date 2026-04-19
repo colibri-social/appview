@@ -25,6 +25,7 @@ pub fn did_document() -> Json<DidDocument> {
             verification_type: String::from("Multikey"),
             controller: String::from("did:web:api.colibri.social"),
             public_key_multibase: Some(hex::encode(compressed_point)),
+            public_key_jwk: None,
         }],
         service: vec![Service {
             id: String::from("#colibri_appview"),

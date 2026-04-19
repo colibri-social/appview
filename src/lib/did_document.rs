@@ -6,9 +6,13 @@ pub struct VerificationMethod {
     #[serde(rename = "type")]
     pub verification_type: String,
     pub controller: String,
-    #[serde(rename = "publicKeyMultibase")]
+    #[serde(rename = "publicKeyMultibase", skip_serializing_if = "Option::is_none")]
     pub public_key_multibase: Option<String>,
-    #[serde(rename = "publicKeyJwk")]
+    #[serde(
+        rename = "publicKeyJwk",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub public_key_jwk: Option<serde_json::Value>,
 }
 

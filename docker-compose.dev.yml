@@ -27,10 +27,9 @@ services:
     image: ghcr.io/bluesky-social/indigo/tap:latest
     restart: unless-stopped
     environment:
+      TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
       TAP_DATABASE_URL: postgres://root:colibri@postgres:5432/colibri
       TAP_COLLECTION_FILTERS: social.colibri.*
-      TAP_NO_REPLAY: true # Dev only!
-      TAP_DISABLE_ACKS: true # Dev only!
     ports:
       - "2480:2480"
     depends_on:
