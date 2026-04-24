@@ -5,7 +5,7 @@ use k256::ecdsa::{SigningKey, VerifyingKey};
 use std::env;
 
 #[get("/.well-known/did.json")]
-pub fn did_document() -> Json<DidDocument> {
+pub fn did_json() -> Json<DidDocument> {
     let raw_key = env::var("K256_PRIVATE_KEY").expect("K256_PRIVATE_KEY not found in .env");
 
     let bytes = hex::decode(raw_key).unwrap();

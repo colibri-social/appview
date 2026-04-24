@@ -1,4 +1,5 @@
 use crate::lib::{
+    events::{ColibriClientEvent, ColibriServerEvent},
     responses::{ErrorBody, ErrorResponse},
     service_auth, tap,
 };
@@ -68,6 +69,8 @@ async fn register_did(did: &String) {
     }
 }
 
+// async fn map_tap_event(event_message: TapMessage) -> ColibriEvent {}
+
 /// Returns false if the client has disconnected.
 async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: String) -> bool {
     let Ok(_) = serde_json::from_str::<Value>(&text) else {
@@ -78,12 +81,14 @@ async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: S
 
     if tap_msg.message_type.eq("record")
         && tap_msg.record.is_some()
-        && tap_msg.record.unwrap().live == false
+        && tap_msg.record.as_ref().unwrap().live == false
     {
         // Event isn't live, acknowledge and skip, but stay connected
         ack_tap_msg(tap_sink, text).await;
         return true;
     }
+
+    // let mapped_tap_event = map_tap_event(tap_msg);
 
     if ws_sink.send(WsMessage::Text(text.clone())).await.is_err() {
         return false;
@@ -95,7 +100,6 @@ async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: S
 
 /// Acknowledges a message from Tap.
 async fn ack_tap_msg(tap_sink: &mut TapSink, text: String) {
-    dbg!(&text);
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
 
     let ack = TapAck {
@@ -139,18 +143,35 @@ async fn handle_tap_message(
 
 /// Returns false if the client has closed or errored.
 async fn handle_client_message(
-    tap_sink: &mut TapSink,
+    ws_sink: &mut WsSink,
     msg: Option<Result<WsMessage, rocket_ws::result::Error>>,
 ) -> bool {
     match msg {
+        Some(Ok(WsMessage::Close(_))) | None => false,
         Some(Ok(WsMessage::Text(text))) => {
-            if serde_json::from_str::<Value>(&text).is_ok() {
-                let _ = tap_sink.send(TungMessage::Text(text.into())).await;
+            let user_message = serde_json::from_str::<ColibriClientEvent>(&text);
+
+            if user_message.is_ok() {
+                match user_message.unwrap().event_type.as_str() {
+                    "heartbeat" => {
+                        let ack_res = ColibriServerEvent {
+                            event_type: String::from("ack"),
+                            data: None,
+                        };
+
+                        let serialized_ack_res = serde_json::to_string(&ack_res).unwrap();
+
+                        let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
+                    }
+                    _ => {}
+                }
             }
+
             true
         }
-        Some(Ok(WsMessage::Close(_))) | None => false,
-        _ => true, // Ignore binary, ping, pong
+        _ => {
+            return true;
+        }
     }
 }
 
@@ -170,7 +191,7 @@ async fn run_event_loop(
     loop {
         let connected = tokio::select! {
             msg = tap_source.next() => handle_tap_message(&mut ws_sink, &mut tap_sink, msg).await,
-            msg = ws_source.next() => handle_client_message(&mut tap_sink, msg).await,
+            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg).await,
         };
 
         if !connected {

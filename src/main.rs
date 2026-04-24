@@ -8,10 +8,10 @@ use rocket::fairing::{AdHoc, Fairing, Info, Kind};
 use rocket::http::Header;
 use rocket::{Request, Response, get, launch, routes};
 
-mod did_document;
 mod lib;
 #[allow(dead_code)]
 mod models;
+mod well_known;
 mod xrpc;
 
 pub struct CORS;
@@ -81,7 +81,7 @@ fn rocket() -> _ {
             "/",
             routes![
                 landing_ascii,
-                did_document::did_document,
+                well_known::did_json,
                 xrpc::com::atproto::identity::resolve_did,
                 xrpc::com::atproto::identity::resolve_handle,
                 xrpc::com::atproto::identity::resolve_identity,
