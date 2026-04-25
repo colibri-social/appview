@@ -1,12 +1,15 @@
 use crate::lib::{
     events::{ColibriClientEvent, ColibriServerEvent},
     responses::{ErrorBody, ErrorResponse},
-    service_auth, tap,
+    service_auth,
+    tap::{self, register_did},
 };
+use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use ::serde::Serialize;
 use futures_util::{SinkExt, StreamExt};
-use rocket::{get, serde::json::Json, tokio};
+use rocket::{State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
+use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
 use serde::Deserialize;
 use serde_json::{Number, Value};
 use tokio_tungstenite::tungstenite::Message as TungMessage;
@@ -20,16 +23,26 @@ type TapSink = futures_util::stream::SplitSink<
 type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
 #[derive(Serialize)]
-struct DidStruct {
-    dids: Vec<String>,
+pub struct DidStruct {
+    pub dids: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TapMessageRecord {
     live: bool,
+    did: String,
+    #[allow(dead_code)]
+    rev: String,
+    collection: String,
+    rkey: String,
+    #[allow(dead_code)]
+    action: String,
+    record: Value,
+    #[allow(dead_code)]
+    cid: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TapMessage {
     id: Number,
     #[serde(rename = "type")]
@@ -44,35 +57,15 @@ struct TapAck {
     id: Number,
 }
 
-/// Sends a DID to Tap to register for backfilling.
-async fn register_did(did: &String) {
-    let tap_hostname = std::env::var("TAP_HOSTNAME").expect("TAP_HOSTNAME not found in .env");
-    let tap_password =
-        std::env::var("TAP_ADMIN_PASSWORD").expect("TAP_ADMIN_PASSWORD not found in .env");
-    let client = reqwest::Client::new();
-
-    let did_struct = DidStruct {
-        dids: vec![did.clone()],
-    };
-
-    let res = client
-        .post(format!("http://{tap_hostname}/repos/add"))
-        .basic_auth(String::from("admin"), Some(tap_password))
-        .json(&did_struct)
-        .send()
-        .await;
-
-    if res.is_err() {
-        log::error!("Unable to add DID {did}: {}", res.unwrap_err().to_string())
-    } else {
-        log::info!("Now tracking DID {did}");
-    }
-}
-
 // async fn map_tap_event(event_message: TapMessage) -> ColibriEvent {}
 
 /// Returns false if the client has disconnected.
-async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: String) -> bool {
+async fn forward_to_client(
+    ws_sink: &mut WsSink,
+    tap_sink: &mut TapSink,
+    text: String,
+    db: &DatabaseConnection,
+) -> bool {
     let Ok(_) = serde_json::from_str::<Value>(&text) else {
         return true; // Not JSON, skip but stay connected
     };
@@ -84,7 +77,7 @@ async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: S
         && tap_msg.record.as_ref().unwrap().live == false
     {
         // Event isn't live, acknowledge and skip, but stay connected
-        ack_tap_msg(tap_sink, text).await;
+        ack_tap_msg(db, tap_sink, text).await;
         return true;
     }
 
@@ -94,13 +87,51 @@ async fn forward_to_client(ws_sink: &mut WsSink, tap_sink: &mut TapSink, text: S
         return false;
     }
 
-    ack_tap_msg(tap_sink, text).await;
+    ack_tap_msg(db, tap_sink, text).await;
     true
 }
 
-/// Acknowledges a message from Tap.
-async fn ack_tap_msg(tap_sink: &mut TapSink, text: String) {
+/// Acknowledges a message from Tap and saves the data in the database.
+async fn ack_tap_msg(db: &DatabaseConnection, tap_sink: &mut TapSink, text: String) {
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
+
+    if msg_data.record.is_some() {
+        let safe_record = msg_data.record.unwrap();
+        let json_data: String = serde_json::to_string(&safe_record.record).unwrap();
+
+        dbg!(format!(
+            "at://{}/{}/{}",
+            safe_record.did, safe_record.collection, safe_record.rkey
+        ));
+
+        let insert_result = RecordData::insert(RecordDataModel {
+            data: ActiveValue::Set(json_data),
+            did: ActiveValue::Set(safe_record.did),
+            nsid: ActiveValue::Set(safe_record.collection),
+            rkey: ActiveValue::Set(safe_record.rkey),
+            ..Default::default()
+        })
+        .on_conflict(
+            sea_query::OnConflict::columns([
+                record_data::Column::Did,
+                record_data::Column::Nsid,
+                record_data::Column::Rkey,
+            ])
+            .update_column(record_data::Column::Data)
+            .to_owned(),
+        )
+        .exec(db)
+        .await;
+
+        if insert_result.is_err() {
+            log::error!(
+                "Unable to save record in database: {}",
+                insert_result.unwrap_err().to_string()
+            );
+
+            return;
+        }
+    }
 
     let ack = TapAck {
         tap_type: String::from("ack"),
@@ -108,6 +139,8 @@ async fn ack_tap_msg(tap_sink: &mut TapSink, text: String) {
     };
 
     let serialized_ack = serde_json::to_string(&ack).unwrap();
+
+    dbg!(&serialized_ack);
 
     let ack_res = tap_sink
         .send(TungMessage::Text(serialized_ack.into()))
@@ -127,10 +160,11 @@ async fn handle_tap_message(
     ws_sink: &mut WsSink,
     tap_sink: &mut TapSink,
     msg: Option<Result<TungMessage, tokio_tungstenite::tungstenite::Error>>,
+    db: &DatabaseConnection,
 ) -> bool {
     match msg {
         Some(Ok(TungMessage::Text(text))) => {
-            forward_to_client(ws_sink, tap_sink, text.to_string()).await
+            forward_to_client(ws_sink, tap_sink, text.to_string(), db).await
         }
         Some(Ok(TungMessage::Close(_))) | None => false,
         Some(Err(e)) => {
@@ -182,6 +216,7 @@ async fn run_event_loop(
         tokio_tungstenite::MaybeTlsStream<rocket::tokio::net::TcpStream>,
     >,
     did: String,
+    db: DatabaseConnection,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
     let (mut tap_sink, mut tap_source) = tap_stream.split();
@@ -190,7 +225,7 @@ async fn run_event_loop(
 
     loop {
         let connected = tokio::select! {
-            msg = tap_source.next() => handle_tap_message(&mut ws_sink, &mut tap_sink, msg).await,
+            msg = tap_source.next() => handle_tap_message(&mut ws_sink, &mut tap_sink, msg, &db).await,
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg).await,
         };
 
@@ -204,6 +239,7 @@ async fn run_event_loop(
 pub async fn subscribe_events(
     auth: &str,
     ws: WebSocket,
+    db: &State<DatabaseConnection>,
 ) -> Result<rocket_ws::Channel<'static>, ErrorResponse> {
     let did = service_auth::verify_service_auth(auth)
         .await
@@ -220,9 +256,11 @@ pub async fn subscribe_events(
 
     log::info!("User connected to social.colibri.sync.subscribeEvents: {did}");
 
+    let cloned = db.inner().clone();
+
     Ok(ws.channel(move |io| {
         Box::pin(async move {
-            run_event_loop(io, tap_stream, did).await;
+            run_event_loop(io, tap_stream, did, cloned).await;
             Ok(())
         })
     }))

@@ -1,6 +1,9 @@
+pub mod bsky;
+pub mod colibri;
 pub mod db;
 pub mod did_document;
 pub mod events;
+pub mod get_atproto_record;
 pub mod responses;
 pub mod sentry;
 pub mod service_auth;

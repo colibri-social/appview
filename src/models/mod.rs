@@ -6,6 +6,7 @@ pub mod collection_cursors;
 pub mod firehose_cursors;
 pub mod list_repos_cursors;
 pub mod outbox_buffers;
+pub mod record_data;
 pub mod repo_records;
 pub mod repos;
 pub mod resync_buffers;

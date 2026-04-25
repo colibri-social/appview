@@ -1,6 +1,8 @@
 use log::info;
-use sea_orm::{ConnectOptions, Database, DatabaseConnection, DbErr};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, Schema};
 use std::time::Duration;
+
+use crate::models::record_data;
 
 /// Initializes a SeaORM PostgreSQL connection from `DATABASE_URL`
 pub async fn init_db() -> Result<DatabaseConnection, DbErr> {
@@ -17,8 +19,19 @@ pub async fn init_db() -> Result<DatabaseConnection, DbErr> {
         .sqlx_logging(false);
 
     let db = Database::connect(options).await?;
-    // synchronizes database schema with entity definitions
-    db.get_schema_registry(module_path!().split("::").next().unwrap());
+
+    let builder = db.get_database_backend();
+    let schema = Schema::new(builder);
+
+    let table_stmt = schema
+        .create_table_from_entity(record_data::Entity)
+        .if_not_exists()
+        .to_owned();
+    db.execute(&table_stmt).await?;
+
+    for mut stmt in schema.create_index_from_entity(record_data::Entity) {
+        db.execute(stmt.if_not_exists()).await?;
+    }
 
     info!("SeaORM initialized.");
     Ok(db)

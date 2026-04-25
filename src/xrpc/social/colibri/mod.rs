@@ -3,3 +3,9 @@ pub mod sync {
 
     pub use subscribe_events_handler::subscribe_events;
 }
+
+pub mod actor {
+    pub mod get_data_handler;
+
+    pub use get_data_handler::get_data;
+}
