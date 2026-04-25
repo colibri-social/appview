@@ -6,6 +6,8 @@ pub mod sync {
 
 pub mod actor {
     pub mod get_data_handler;
+    pub mod list_communities_handler;
 
     pub use get_data_handler::get_data;
+    pub use list_communities_handler::list_communities;
 }

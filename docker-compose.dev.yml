@@ -29,6 +29,7 @@ services:
     environment:
       TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
       TAP_DATABASE_URL: postgres://root:colibri@postgres:5432/colibri
+      TAP_SIGNAL_COLLECTION: social.colibri.actor.data
       TAP_COLLECTION_FILTERS: social.colibri.*,app.bsky.actor.profile
     ports:
       - "2480:2480"

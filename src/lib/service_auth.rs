@@ -31,10 +31,12 @@ pub enum ServiceAuthError {
 }
 
 const YOUR_APPVIEW_DID: &str = "did:web:api.colibri.social";
-const EXPECTED_LXM: &str = "social.colibri.sync.subscribeEvents";
 
 /// Verifies a service auth key issued by the user's PDS for the Colibri AppView. Returns the DID if successful.
-pub async fn verify_service_auth(token: &str) -> Result<String, ServiceAuthError> {
+pub async fn verify_service_auth(
+    token: &str,
+    expected_lxm: &str,
+) -> Result<String, ServiceAuthError> {
     // Split JWT
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
@@ -75,7 +77,7 @@ pub async fn verify_service_auth(token: &str) -> Result<String, ServiceAuthError
 
     // Validate lxm
     if let Some(lxm) = &claims.lxm {
-        if lxm != EXPECTED_LXM {
+        if lxm != expected_lxm {
             return Err(ServiceAuthError::InvalidLxm);
         }
     }

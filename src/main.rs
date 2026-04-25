@@ -65,6 +65,8 @@ fn rocket() -> _ {
         )
         .allow_credentials(true);
 
+    let safe_cors = cors.to_cors().unwrap();
+
     rocket::build()
         .mount(
             "/",
@@ -76,9 +78,12 @@ fn rocket() -> _ {
                 xrpc::com::atproto::identity::resolve_identity,
                 xrpc::com::atproto::sync::get_record,
                 xrpc::social::colibri::actor::get_data,
+                xrpc::social::colibri::actor::list_communities,
                 xrpc::social::colibri::sync::subscribe_events,
             ],
         )
-        .attach(cors.to_cors().unwrap())
+        .mount("/", rocket_cors::catch_all_options_routes())
+        .attach(safe_cors.clone())
         .attach(init_seaorm())
+        .manage(safe_cors)
 }

@@ -2,7 +2,7 @@ use crate::lib::{
     events::{ColibriClientEvent, ColibriServerEvent},
     responses::{ErrorBody, ErrorResponse},
     service_auth,
-    tap::{self, register_did},
+    tap::{self, register_dids},
 };
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use ::serde::Serialize;
@@ -65,6 +65,7 @@ async fn forward_to_client(
     tap_sink: &mut TapSink,
     text: String,
     db: &DatabaseConnection,
+    _did: &String,
 ) -> bool {
     let Ok(_) = serde_json::from_str::<Value>(&text) else {
         return true; // Not JSON, skip but stay connected
@@ -72,7 +73,7 @@ async fn forward_to_client(
 
     let tap_msg = serde_json::from_str::<TapMessage>(&text).unwrap();
 
-    if tap_msg.message_type.eq("record")
+    if tap_msg.message_type == "record"
         && tap_msg.record.is_some()
         && tap_msg.record.as_ref().unwrap().live == false
     {
@@ -82,6 +83,7 @@ async fn forward_to_client(
     }
 
     // let mapped_tap_event = map_tap_event(tap_msg);
+    // TODO: Check if DID (_did) matches, map event, forward properly
 
     if ws_sink.send(WsMessage::Text(text.clone())).await.is_err() {
         return false;
@@ -95,14 +97,26 @@ async fn forward_to_client(
 async fn ack_tap_msg(db: &DatabaseConnection, tap_sink: &mut TapSink, text: String) {
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
 
+    // let did_rx = Regex::new(r"(?mu)did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]").unwrap();
+    // let dids: Vec<String> = did_rx
+    //     .find_iter(text.as_str().as_bytes())
+    //     .filter_map(|m| str::from_utf8(m.as_bytes()).ok()?.parse().ok())
+    //     .filter_map(|m: String| {
+    //         if m.to_string() == connected_did.to_owned() {
+    //             return None;
+    //         } else {
+    //             return Some(m);
+    //         }
+    //     })
+    //     .collect();
+
+    // if dids.len() > 0 {
+    //     register_dids(dids).await;
+    // }
+
     if msg_data.record.is_some() {
         let safe_record = msg_data.record.unwrap();
-        let json_data: String = serde_json::to_string(&safe_record.record).unwrap();
-
-        dbg!(format!(
-            "at://{}/{}/{}",
-            safe_record.did, safe_record.collection, safe_record.rkey
-        ));
+        let json_data: Value = serde_json::to_value(&safe_record.record).unwrap();
 
         let insert_result = RecordData::insert(RecordDataModel {
             data: ActiveValue::Set(json_data),
@@ -140,8 +154,6 @@ async fn ack_tap_msg(db: &DatabaseConnection, tap_sink: &mut TapSink, text: Stri
 
     let serialized_ack = serde_json::to_string(&ack).unwrap();
 
-    dbg!(&serialized_ack);
-
     let ack_res = tap_sink
         .send(TungMessage::Text(serialized_ack.into()))
         .await;
@@ -161,10 +173,11 @@ async fn handle_tap_message(
     tap_sink: &mut TapSink,
     msg: Option<Result<TungMessage, tokio_tungstenite::tungstenite::Error>>,
     db: &DatabaseConnection,
+    did: &String,
 ) -> bool {
     match msg {
         Some(Ok(TungMessage::Text(text))) => {
-            forward_to_client(ws_sink, tap_sink, text.to_string(), db).await
+            forward_to_client(ws_sink, tap_sink, text.to_string(), db, did).await
         }
         Some(Ok(TungMessage::Close(_))) | None => false,
         Some(Err(e)) => {
@@ -221,11 +234,11 @@ async fn run_event_loop(
     let (mut ws_sink, mut ws_source) = io.split();
     let (mut tap_sink, mut tap_source) = tap_stream.split();
 
-    register_did(&did).await;
+    register_dids(vec![did.clone()]).await;
 
     loop {
         let connected = tokio::select! {
-            msg = tap_source.next() => handle_tap_message(&mut ws_sink, &mut tap_sink, msg, &db).await,
+            msg = tap_source.next() => handle_tap_message(&mut ws_sink, &mut tap_sink, msg, &db, &did).await,
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg).await,
         };
 
@@ -241,7 +254,7 @@ pub async fn subscribe_events(
     ws: WebSocket,
     db: &State<DatabaseConnection>,
 ) -> Result<rocket_ws::Channel<'static>, ErrorResponse> {
-    let did = service_auth::verify_service_auth(auth)
+    let did = service_auth::verify_service_auth(auth, "social.colibri.sync.subscribeEvents")
         .await
         .map_err(|e| ErrorResponse {
             body: Json(ErrorBody {

@@ -45,6 +45,7 @@ services:
     environment:
       TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
       TAP_DATABASE_URL: ${DATABASE_URL}
+      TAP_SIGNAL_COLLECTION: social.colibri.actor.data
       TAP_COLLECTION_FILTERS: social.colibri.*,app.bsky.actor.profile
     depends_on:
       postgres:

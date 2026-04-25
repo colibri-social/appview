@@ -1,4 +1,5 @@
 use sea_orm::entity::prelude::*;
+use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "record_data")]
@@ -11,8 +12,8 @@ pub struct Model {
     pub nsid: String,
     #[sea_orm(column_type = "Text", unique_key = "idx-record-did-nsid-rkey")]
     pub rkey: String,
-    #[sea_orm(column_type = "Text")]
-    pub data: String,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub data: Value,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -730,6 +730,7 @@ dependencies = [
  "log",
  "p256",
  "pretty_env_logger",
+ "regex",
  "reqwest",
  "rocket",
  "rocket_cors",

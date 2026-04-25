@@ -1,11 +1,12 @@
 use base64::Engine;
 use rocket::tokio::net::TcpStream;
+use sea_orm::DatabaseConnection;
 use std::io::Error;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::client::IntoClientRequest,
 };
 
-use crate::xrpc::social::colibri::sync::subscribe_events_handler::DidStruct;
+use crate::{models::repos, xrpc::social::colibri::sync::subscribe_events_handler::DidStruct};
 
 /// Opens a new connection to the tap instance.
 pub async fn connect_to_tap() -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, Error> {
@@ -28,16 +29,14 @@ pub async fn connect_to_tap() -> Result<WebSocketStream<MaybeTlsStream<TcpStream
     Ok(ws_stream)
 }
 
-/// Sends a DID to Tap to register for backfilling.
-pub async fn register_did(did: &String) {
+/// Sends DIDs to Tap to register for backfilling.
+pub async fn register_dids(dids: Vec<String>) {
     let tap_hostname = std::env::var("TAP_HOSTNAME").expect("TAP_HOSTNAME not found in .env");
     let tap_password =
         std::env::var("TAP_ADMIN_PASSWORD").expect("TAP_ADMIN_PASSWORD not found in .env");
     let client = reqwest::Client::new();
 
-    let did_struct = DidStruct {
-        dids: vec![did.clone()],
-    };
+    let did_struct = DidStruct { dids: dids };
 
     let res = client
         .post(format!("http://{tap_hostname}/repos/add"))
@@ -47,8 +46,8 @@ pub async fn register_did(did: &String) {
         .await;
 
     if res.is_err() {
-        log::error!("Unable to add DID {did}: {}", res.unwrap_err().to_string())
+        log::error!("Unable to add DIDs: {}", res.unwrap_err().to_string())
     } else {
-        log::info!("Now tracking DID {did}");
+        log::info!("Now tracking DIDs: {}", &did_struct.dids.join(", "));
     }
 }
