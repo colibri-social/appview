@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::ColibriActorData;
 use crate::lib::get_atproto_record::get_atproto_record;
+use crate::lib::get_state::get_state;
 use crate::lib::responses::ErrorResponse;
 use crate::xrpc::com::atproto::identity::resolve_identity;
 
@@ -68,6 +69,7 @@ pub async fn get_data(
         db.inner(),
     )
     .await?;
+    let actor_state = get_state(identity.id.clone(), db.inner()).await?;
 
     Ok(Json(Actor {
         did: identity.id.clone(),
@@ -77,7 +79,7 @@ pub async fn get_data(
             banner: bsky_profile.banner,
             description: bsky_profile.description,
             display_name: bsky_profile.display_name.unwrap_or(handle),
-            online_state: String::from("online"), // TODO: This needs to be made configurable
+            online_state: actor_state.to_string(),
             status: ActorStatus {
                 text: colibri_actor.status,
                 emoji: colibri_actor.emoji,

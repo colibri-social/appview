@@ -10,3 +10,4 @@ pub mod record_data;
 pub mod repo_records;
 pub mod repos;
 pub mod resync_buffers;
+pub mod user_states;

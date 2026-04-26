@@ -10,6 +10,8 @@ pub mod identity {
 
 pub mod sync {
     pub mod get_record_handler;
+    pub mod list_records_handler;
 
     pub use get_record_handler::get_record;
+    pub use list_records_handler::list_records;
 }

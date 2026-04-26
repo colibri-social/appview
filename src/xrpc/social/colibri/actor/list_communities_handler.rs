@@ -1,16 +1,16 @@
 use rocket::serde::json::Json;
 use rocket::{State, get};
 use sea_orm::prelude::Expr;
-use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{
+    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, QueryFilter,
+    QuerySelect,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth;
 use crate::models::record_data;
-
-#[derive(Deserialize)]
-pub struct CommunityRecord {}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Community {
@@ -24,6 +24,8 @@ pub struct Community {
     #[serde(rename = "requiresApprovalToJoin")]
     pub requires_approval_to_join: bool,
     pub uri: Option<String>,
+    #[serde(rename = "isLegacy")]
+    pub is_legacy: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -31,10 +33,17 @@ pub struct CommunityList {
     pub communities: Vec<Community>,
 }
 
+#[derive(FromQueryResult)]
+pub struct CommunityExtended {
+    #[sea_orm(nested)]
+    pub community: record_data::Model,
+    pub is_legacy: bool,
+}
+
 pub async fn get_authorized_communities(
     db: &DatabaseConnection,
     user_did: &str,
-) -> Result<Vec<record_data::Model>, DbErr> {
+) -> Result<Vec<CommunityExtended>, DbErr> {
     record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq("social.colibri.community"))
         .filter(
@@ -46,7 +55,6 @@ pub async fn get_authorized_communities(
                         SELECT 1 FROM record_data m
                         WHERE "m"."nsid" = 'social.colibri.membership'
                           AND "m"."did" = $1
-                          -- Verify if your column is "data" or "content"
                           AND "m"."data"->>'community' = 'at://' || "record_data"."did" || '/social.colibri.community/' || "record_data"."rkey"
                           AND (
                               ("record_data"."data"->>'requiresApprovalToJoin')::boolean IS NOT TRUE
@@ -63,6 +71,22 @@ pub async fn get_authorized_communities(
                     vec![sea_orm::Value::from(user_did)]
                 ))
         )
+        // Add the subquery for the legacy check
+        .column_as(
+            Expr::cust(
+                r#"
+                NOT EXISTS (
+                    SELECT 1 FROM record_data p
+                    WHERE "p"."nsid" = 'app.bsky.actor.profile'
+                      AND "p"."did" = "record_data"."did"
+                      AND "p"."data" @> '{"labels": {"values": [{"val": "bot"}]}}'::jsonb
+                )
+                "#
+            ),
+            "is_legacy",
+        )
+        // Map the result to the custom struct
+        .into_model::<CommunityExtended>()
         .all(db)
         .await
 }
@@ -87,16 +111,18 @@ pub async fn list_communities(
     let communities: Vec<Community> = community_models
         .iter()
         .map(|c| {
-            let mut c_data = serde_json::from_value::<Community>(c.data.clone()).unwrap();
-            let uri = format!("at://{}/{}/{}", c.did, c.nsid, c.rkey);
+            let mut c_data = serde_json::from_value::<Community>(c.community.data.clone()).unwrap();
+            let uri = format!(
+                "at://{}/{}/{}",
+                c.community.did, c.community.nsid, c.community.rkey
+            );
 
             c_data.uri = Some(uri);
+            c_data.is_legacy = Some(c.is_legacy);
 
             c_data
         })
         .collect();
-
-    dbg!(&communities);
 
     Ok(Json(CommunityList {
         communities: communities,

@@ -1,9 +1,13 @@
+[workspace]
+members = [".", "migration"]
+
 [package]
 name = "colibri-appview"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+migration = { path = "migration" }
 rocket = { version = "0.5.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 sentry = "0.47.0"

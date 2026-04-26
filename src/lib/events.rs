@@ -3,131 +3,131 @@ use serde_json::Value;
 
 // -- Server -> Client
 
-#[derive(Serialize, Deserialize)]
-struct CommunityEventData {
-    event: String,
-    uri: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CommunityEventData {
+    pub event: String,
+    pub uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    picture: Option<Value>,
+    pub picture: Option<Value>,
     #[serde(rename = "categoryOrder", skip_serializing_if = "Option::is_none")]
-    category_order: Option<Vec<String>>,
+    pub category_order: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct MemberEventData {
-    event: String,
-    community: String,
-    membership: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MemberEventData {
+    pub event: String,
+    pub community: String,
+    pub membership: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct CategoryEventData {
-    event: String,
-    uri: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CategoryEventData {
+    pub event: String,
+    pub uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    community: Option<String>,
+    pub community: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    pub name: Option<String>,
     #[serde(rename = "channelOrder", skip_serializing_if = "Option::is_none")]
-    channel_order: Option<Vec<String>>,
+    pub channel_order: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ChannelEventData {
-    event: String,
-    uri: String,
-    community: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ChannelEventData {
+    pub event: String,
+    pub uri: String,
+    pub community: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    pub description: Option<String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    channel_type: Option<String>,
+    pub channel_type: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct MessageEventData {
-    event: String,
-    uri: String,
-    channel: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MessageEventData {
+    pub event: String,
+    pub uri: String,
+    pub channel: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
+    pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    facets: Option<Vec<Value>>,
+    pub facets: Option<Vec<Value>>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
+    pub created_at: Option<String>,
     #[serde(rename = "indexedAt", skip_serializing_if = "Option::is_none")]
-    indexed_at: Option<String>,
+    pub indexed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    edited: Option<bool>,
+    pub edited: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    parent: Option<String>,
+    pub parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    attachments: Option<Vec<Value>>,
+    pub attachments: Option<Vec<Value>>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ReactionEventData {
-    event: String,
-    uri: String,
-    emoji: String,
-    target: String,
-    channel: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReactionEventData {
+    pub event: String,
+    pub uri: String,
+    pub emoji: String,
+    pub target: String,
+    pub channel: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct UserEventStatus {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UserEventStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
-    emoji: Option<String>,
-    text: String,
-    state: String,
+    pub emoji: Option<String>,
+    pub text: String,
+    pub state: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct UserEventProfile {
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UserEventProfile {
     #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
-    display_name: Option<String>,
+    pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    avatar: Option<Value>,
+    pub avatar: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    banner: Option<Value>,
+    pub banner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    handle: String,
+    pub description: Option<String>,
+    pub handle: String,
 }
 
-#[derive(Serialize, Deserialize)]
-struct UserEventData {
-    did: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UserEventData {
+    pub did: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<UserEventStatus>,
-    profile: UserEventProfile,
+    pub status: Option<UserEventStatus>,
+    pub profile: UserEventProfile,
 }
 
-#[derive(Serialize, Deserialize)]
-struct TypingEventData {
-    event: String,
-    channel: String,
-    did: String,
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TypingEventData {
+    pub event: String,
+    pub channel: String,
+    pub did: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub enum ColibriServerEventData {
-    CommunityEventData,
-    MemberEventData,
-    CategoryEventData,
-    ChannelEventData,
-    MessageEventData,
-    ReactionEventData,
-    UserEventData,
-    TypingEventData,
+    CommunityEventData(CommunityEventData),
+    MemberEventData(MemberEventData),
+    CategoryEventData(CategoryEventData),
+    ChannelEventData(ChannelEventData),
+    MessageEventData(MessageEventData),
+    ReactionEventData(ReactionEventData),
+    UserEventData(UserEventData),
+    TypingEventData(TypingEventData),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ColibriServerEvent {
     #[serde(rename = "type")]
     pub event_type: String,
