@@ -77,9 +77,10 @@ pub async fn verify_service_auth(
 
     // Validate lxm
     if let Some(lxm) = &claims.lxm
-        && lxm != expected_lxm {
-            return Err(ServiceAuthError::InvalidLxm);
-        }
+        && lxm != expected_lxm
+    {
+        return Err(ServiceAuthError::InvalidLxm);
+    }
 
     // Resolve signing key
     let key_bytes = resolve_did_key_bytes(&claims.iss).await?;

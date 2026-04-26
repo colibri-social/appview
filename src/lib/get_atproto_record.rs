@@ -24,8 +24,7 @@ pub async fn get_atproto_record<T: for<'de> serde::Deserialize<'de>>(
         )));
     }
 
-    serde_json::from_value::<T>(record.unwrap().data)
-        .map_err(|e| DbErr::Custom(e.to_string()))
+    serde_json::from_value::<T>(record.unwrap().data).map_err(|e| DbErr::Custom(e.to_string()))
 }
 
 #[cfg(test)]

@@ -100,9 +100,7 @@ async fn handle_client_message(
 
             true
         }
-        _ => {
-            true
-        }
+        _ => true,
     }
 }
 
