@@ -193,3 +193,86 @@ fn jwk_to_sec1(jwk: &serde_json::Value) -> Result<Vec<u8>, String> {
     sec1.extend_from_slice(&y);
     Ok(sec1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rocket::tokio;
+    use serde_json::json;
+
+    fn make_token(claims: serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256","typ":"JWT"}"#);
+        let claims = URL_SAFE_NO_PAD.encode(claims.to_string());
+        format!("{header}.{claims}.sig")
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_token_format() {
+        let err = verify_service_auth("invalid", "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidFormat));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_audience_before_network_lookup() {
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:not-colibri",
+            "exp": 4102444800u64
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidAudience));
+    }
+
+    #[tokio::test]
+    async fn rejects_expired_token_before_network_lookup() {
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social",
+            "exp": 1u64
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::Expired));
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_lxm_before_network_lookup() {
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social",
+            "exp": 4102444800u64,
+            "lxm":"social.colibri.actor.setState"
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidLxm));
+    }
+
+    #[test]
+    fn decodes_multibase_base58_payload() {
+        let raw = vec![0xe7, 0x01, 0x01, 0x02, 0x03];
+        let encoded = format!("z{}", bs58::encode(raw.clone()).into_string());
+        assert_eq!(multibase_decode(&encoded).unwrap(), raw);
+    }
+
+    #[test]
+    fn converts_jwk_to_uncompressed_sec1() {
+        let x = URL_SAFE_NO_PAD.encode([1u8; 32]);
+        let y = URL_SAFE_NO_PAD.encode([2u8; 32]);
+        let sec1 = jwk_to_sec1(&json!({ "x": x, "y": y })).unwrap();
+        assert_eq!(sec1.len(), 65);
+        assert_eq!(sec1[0], 0x04);
+        assert_eq!(sec1[1], 1);
+        assert_eq!(sec1[33], 2);
+    }
+}

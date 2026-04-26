@@ -60,10 +60,29 @@ mod tests {
     use super::*;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
+    use serde_json::json;
 
     #[tokio::test]
     async fn get_record_returns_record() {
-        // TODO: Rewrite
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![crate::models::record_data::Model {
+                id: 1,
+                did: String::from("did:plc:abc"),
+                nsid: String::from("social.colibri.message"),
+                rkey: String::from("r1"),
+                data: json!({"text":"hello"}),
+            }]])
+            .into_connection();
+
+        let result = get_record_with_db(&db, "did:plc:abc", "social.colibri.message", "r1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.uri,
+            "at://did:plc:abc/social.colibri.message/r1".to_string()
+        );
+        assert_eq!(result.value["text"], "hello");
     }
 
     #[tokio::test]

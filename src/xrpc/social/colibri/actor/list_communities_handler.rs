@@ -1,3 +1,4 @@
+use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, get};
 use sea_orm::prelude::Expr;
@@ -91,13 +92,21 @@ pub async fn get_authorized_communities(
         .await
 }
 
-#[get("/xrpc/social.colibri.actor.listCommunities?<auth>")]
-/// Returns the actor data for a specified identity.
-pub async fn list_communities(
-    auth: &str,
-    db: &State<DatabaseConnection>,
+type VerifyAuthFn =
+    fn(
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<String, crate::lib::service_auth::ServiceAuthError>>;
+type GetCommunitiesFn =
+    fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Vec<CommunityExtended>, DbErr>>;
+
+async fn list_communities_with(
+    auth: String,
+    db: DatabaseConnection,
+    verify_auth_fn: VerifyAuthFn,
+    get_communities_fn: GetCommunitiesFn,
 ) -> Result<Json<CommunityList>, ErrorResponse> {
-    let did = service_auth::verify_service_auth(auth, "social.colibri.actor.listCommunities")
+    let did = verify_auth_fn(auth, String::from("social.colibri.actor.listCommunities"))
         .await
         .map_err(|e| ErrorResponse {
             body: Json(ErrorBody {
@@ -106,7 +115,7 @@ pub async fn list_communities(
             }),
         })?;
 
-    let community_models = get_authorized_communities(db, did.as_str()).await?;
+    let community_models = get_communities_fn(db, did).await?;
 
     let communities: Vec<Community> = community_models
         .iter()
@@ -124,7 +133,99 @@ pub async fn list_communities(
         })
         .collect();
 
-    Ok(Json(CommunityList {
-        communities: communities,
-    }))
+    Ok(Json(CommunityList { communities }))
+}
+
+fn verify_auth_boxed(
+    auth: String,
+    lxm: String,
+) -> BoxFuture<'static, Result<String, crate::lib::service_auth::ServiceAuthError>> {
+    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
+}
+
+fn get_authorized_communities_boxed(
+    db: DatabaseConnection,
+    did: String,
+) -> BoxFuture<'static, Result<Vec<CommunityExtended>, DbErr>> {
+    Box::pin(async move { get_authorized_communities(&db, &did).await })
+}
+
+#[get("/xrpc/social.colibri.actor.listCommunities?<auth>")]
+/// Returns the actor data for a specified identity.
+pub async fn list_communities(
+    auth: &str,
+    db: &State<DatabaseConnection>,
+) -> Result<Json<CommunityList>, ErrorResponse> {
+    list_communities_with(
+        auth.to_string(),
+        db.inner().clone(),
+        verify_auth_boxed,
+        get_authorized_communities_boxed,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    #[tokio::test]
+    async fn maps_community_models_to_response() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+
+        let res = list_communities_with(
+            String::from("token"),
+            db,
+            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            |_, _| {
+                Box::pin(async {
+                    Ok(vec![CommunityExtended {
+                        community: record_data::Model {
+                            id: 1,
+                            did: String::from("did:plc:abc"),
+                            nsid: String::from("social.colibri.community"),
+                            rkey: String::from("community-1"),
+                            data: serde_json::json!({
+                                "name": "General",
+                                "requiresApprovalToJoin": false,
+                                "description": "desc",
+                                "categoryOrder": ["cat1"]
+                            }),
+                        },
+                        is_legacy: true,
+                    }])
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.communities.len(), 1);
+        assert_eq!(
+            res.communities[0].uri.as_deref(),
+            Some("at://did:plc:abc/social.colibri.community/community-1")
+        );
+        assert_eq!(res.communities[0].is_legacy, Some(true));
+    }
+
+    #[tokio::test]
+    async fn returns_auth_error_when_token_is_invalid() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let result = list_communities_with(
+            String::from("token"),
+            db,
+            |_, _| {
+                Box::pin(async {
+                    Err(crate::lib::service_auth::ServiceAuthError::InvalidSignature)
+                })
+            },
+            |_, _| Box::pin(async { panic!("should not fetch communities") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+    }
 }

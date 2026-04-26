@@ -204,3 +204,79 @@ pub fn map_tap_event(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(collection: &str, action: &str, value: serde_json::Value) -> TapMessageRecord {
+        TapMessageRecord {
+            live: true,
+            did: String::from("did:plc:abc"),
+            rev: String::from("1"),
+            collection: collection.to_string(),
+            rkey: String::from("r1"),
+            action: action.to_string(),
+            record: Some(value),
+            cid: Some(String::from("cid")),
+        }
+    }
+
+    #[test]
+    fn maps_community_upsert_event() {
+        let event = map_tap_event(&record(
+            "social.colibri.community",
+            "create",
+            serde_json::json!({
+                "$type": "social.colibri.community",
+                "name": "General",
+                "description": "desc",
+                "categoryOrder": ["cat1"],
+                "requiresApprovalToJoin": false
+            }),
+        ))
+        .unwrap();
+
+        assert_eq!(event.event_type, "community_event");
+    }
+
+    #[test]
+    fn maps_message_delete_event() {
+        let event = map_tap_event(&record(
+            "social.colibri.message",
+            "delete",
+            serde_json::json!({
+                "$type":"social.colibri.message",
+                "text":"ignored",
+                "createdAt":"2024-01-01T00:00:00Z",
+                "channel":"c1"
+            }),
+        ))
+        .unwrap();
+
+        if let Some(crate::lib::events::ColibriServerEventData::MessageEventData(data)) = event.data
+        {
+            assert_eq!(data.event, "delete");
+            assert_eq!(data.text, None);
+        } else {
+            panic!("expected message event data");
+        }
+    }
+
+    #[test]
+    fn returns_error_for_unknown_collection() {
+        let err = map_tap_event(&TapMessageRecord {
+            live: true,
+            did: String::from("did:plc:abc"),
+            rev: String::from("1"),
+            collection: String::from("unknown.collection"),
+            rkey: String::from("r1"),
+            action: String::from("create"),
+            record: Some(serde_json::json!({})),
+            cid: Some(String::from("cid")),
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "Unknown collection");
+    }
+}

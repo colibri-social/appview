@@ -34,3 +34,24 @@ pub fn did_json() -> Json<DidDocument> {
         }],
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returns_colibri_did_document() {
+        unsafe {
+            env::set_var(
+                "K256_PRIVATE_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            );
+        }
+
+        let did = did_json();
+        assert_eq!(did.id, "did:web:api.colibri.social");
+        assert_eq!(did.verification_method.len(), 1);
+        assert!(did.verification_method[0].public_key_multibase.is_some());
+        assert_eq!(did.service.len(), 1);
+    }
+}

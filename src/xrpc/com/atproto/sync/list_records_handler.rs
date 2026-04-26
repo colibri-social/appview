@@ -60,3 +60,62 @@ pub async fn list_records(
 ) -> Result<Json<ListRecordsResponse>, ErrorResponse> {
     list_records_with_db(db.inner(), repo, collection, limit, cursor, reverse).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn list_records_returns_records() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![crate::models::record_data::Model {
+                id: 1,
+                did: String::from("did:plc:abc"),
+                nsid: String::from("social.colibri.message"),
+                rkey: String::from("r1"),
+                data: json!({"text":"hello"}),
+            }]])
+            .into_connection();
+
+        let result = list_records_with_db(
+            &db,
+            "did:plc:abc",
+            "social.colibri.message",
+            Some(10),
+            Some("cursor"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor.as_deref(), Some("cursor"));
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0]["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn list_records_returns_internal_error() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([sea_orm::DbErr::Custom(String::from("boom"))])
+            .into_connection();
+
+        let result = list_records_with_db(
+            &db,
+            "did:plc:none",
+            "social.colibri.message",
+            Some(10),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "InternalServerError"
+        );
+    }
+}

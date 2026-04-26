@@ -9,3 +9,21 @@ pub fn validate_state_str(maybe_state: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_state_str;
+
+    #[test]
+    fn accepts_valid_states() {
+        assert_eq!(validate_state_str("online"), Some("online"));
+        assert_eq!(validate_state_str("away"), Some("away"));
+        assert_eq!(validate_state_str("dnd"), Some("dnd"));
+        assert_eq!(validate_state_str("offline"), Some("offline"));
+    }
+
+    #[test]
+    fn rejects_invalid_state() {
+        assert_eq!(validate_state_str("busy"), None);
+    }
+}

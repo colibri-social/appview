@@ -25,6 +25,22 @@ pub struct DidStruct {
     pub dids: Vec<String>,
 }
 
+fn parse_client_event_ack(text: &str) -> Option<String> {
+    let user_message = serde_json::from_str::<ColibriClientEvent>(text).ok()?;
+
+    match user_message.event_type.as_str() {
+        "heartbeat" => {
+            let ack_res = ColibriServerEvent {
+                event_type: String::from("ack"),
+                data: None,
+            };
+
+            Some(serde_json::to_string(&ack_res).unwrap())
+        }
+        _ => None,
+    }
+}
+
 /// Returns false if the client has disconnected.
 async fn forward_to_client(ws_sink: &mut WsSink, record: TapMessageRecord, did: String) -> bool {
     if record.did != did {
@@ -78,22 +94,8 @@ async fn handle_client_message(
     match msg {
         Some(Ok(WsMessage::Close(_))) | None => false,
         Some(Ok(WsMessage::Text(text))) => {
-            let user_message = serde_json::from_str::<ColibriClientEvent>(&text);
-
-            if user_message.is_ok() {
-                match user_message.unwrap().event_type.as_str() {
-                    "heartbeat" => {
-                        let ack_res = ColibriServerEvent {
-                            event_type: String::from("ack"),
-                            data: None,
-                        };
-
-                        let serialized_ack_res = serde_json::to_string(&ack_res).unwrap();
-
-                        let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
-                    }
-                    _ => {}
-                }
+            if let Some(serialized_ack_res) = parse_client_event_ack(&text) {
+                let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
             }
 
             true
@@ -158,4 +160,22 @@ pub async fn subscribe_events(
             Ok(())
         })
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_client_event_ack;
+
+    #[test]
+    fn creates_ack_for_heartbeat_event() {
+        let ack =
+            parse_client_event_ack(r#"{"type":"heartbeat","data":null}"#).expect("expected ack");
+        let json: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(json["type"], "ack");
+    }
+
+    #[test]
+    fn ignores_other_client_events() {
+        assert!(parse_client_event_ack(r#"{"type":"typing","data":null}"#).is_none());
+    }
 }

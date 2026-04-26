@@ -144,3 +144,29 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocket::tokio;
+    use rocket::tokio::sync::mpsc;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    #[tokio::test]
+    async fn sends_ack_for_non_record_messages() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let (mut tx, mut rx) = mpsc::channel::<String>(1);
+
+        ack_tap_msg(
+            &db,
+            &mut tx,
+            String::from(r#"{"id":1,"type":"heartbeat","record":null}"#),
+        )
+        .await;
+
+        let ack = rx.recv().await.unwrap();
+        let ack_json: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack_json["type"], "ack");
+        assert_eq!(ack_json["id"], 1);
+    }
+}
