@@ -57,7 +57,7 @@ async fn handle_tap_connection(
 
                     if tap_msg.message_type == "record"
                         && tap_msg.record.is_some()
-                        && tap_msg.record.as_ref().unwrap().live == false
+                        && !tap_msg.record.as_ref().unwrap().live
                     {
                         // Event isn't live, skip but stay connected
                         return;

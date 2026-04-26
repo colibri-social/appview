@@ -23,7 +23,7 @@ pub fn map_tap_event(
                     event_record.record.as_ref().unwrap().to_owned(),
                 )?;
 
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("community_event"),
                     data: Some(ColibriServerEventData::CommunityEventData(
                         CommunityEventData {
@@ -35,9 +35,9 @@ pub fn map_tap_event(
                             picture: record_data.picture,
                         },
                     )),
-                });
+                })
             } else {
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("community_event"),
                     data: Some(ColibriServerEventData::CommunityEventData(
                         CommunityEventData {
@@ -49,14 +49,14 @@ pub fn map_tap_event(
                             picture: None,
                         },
                     )),
-                });
+                })
             }
         }
         "social.colibri.membership" | "social.colibri.approval" => {
             // TODO: Membership tracking
-            return Err(serde_json::error::Error::custom(String::from(
+            Err(serde_json::error::Error::custom(String::from(
                 "Not implemented",
-            )));
+            )))
         }
         "social.colibri.category" => {
             if event_record.action != "delete" {
@@ -64,7 +64,7 @@ pub fn map_tap_event(
                     event_record.record.as_ref().unwrap().to_owned(),
                 )?;
 
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("category_event"),
                     data: Some(ColibriServerEventData::CategoryEventData(
                         CategoryEventData {
@@ -75,9 +75,9 @@ pub fn map_tap_event(
                             name: Some(record_data.name),
                         },
                     )),
-                });
+                })
             } else {
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("category_event"),
                     data: Some(ColibriServerEventData::CategoryEventData(
                         CategoryEventData {
@@ -88,7 +88,7 @@ pub fn map_tap_event(
                             name: None,
                         },
                     )),
-                });
+                })
             }
         }
         "social.colibri.channel" => {
@@ -97,7 +97,7 @@ pub fn map_tap_event(
                     event_record.record.as_ref().unwrap().to_owned(),
                 )?;
 
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("channel_event"),
                     data: Some(ColibriServerEventData::ChannelEventData(ChannelEventData {
                         event: String::from("upsert"),
@@ -107,9 +107,9 @@ pub fn map_tap_event(
                         description: record_data.description,
                         name: Some(record_data.name),
                     })),
-                });
+                })
             } else {
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("channel_event"),
                     data: Some(ColibriServerEventData::ChannelEventData(ChannelEventData {
                         event: String::from("upsert"),
@@ -119,7 +119,7 @@ pub fn map_tap_event(
                         description: None,
                         name: None,
                     })),
-                });
+                })
             }
         }
         "social.colibri.message" => {
@@ -128,7 +128,7 @@ pub fn map_tap_event(
                     event_record.record.as_ref().unwrap().to_owned(),
                 )?;
 
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("message_event"),
                     data: Some(ColibriServerEventData::MessageEventData(MessageEventData {
                         event: String::from("upsert"),
@@ -141,9 +141,9 @@ pub fn map_tap_event(
                         parent: record_data.parent,
                         text: Some(record_data.text),
                     })),
-                });
+                })
             } else {
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("message_event"),
                     data: Some(ColibriServerEventData::MessageEventData(MessageEventData {
                         event: String::from("delete"),
@@ -156,7 +156,7 @@ pub fn map_tap_event(
                         parent: None,
                         text: None,
                     })),
-                });
+                })
             }
         }
         "social.colibri.reaction" => {
@@ -165,7 +165,7 @@ pub fn map_tap_event(
                     event_record.record.as_ref().unwrap().to_owned(),
                 )?;
 
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("reaction_event"),
                     data: Some(ColibriServerEventData::ReactionEventData(
                         ReactionEventData {
@@ -175,9 +175,9 @@ pub fn map_tap_event(
                             target: Some(record_data.target_message),
                         },
                     )),
-                });
+                })
             } else {
-                return Ok(ColibriServerEvent {
+                Ok(ColibriServerEvent {
                     event_type: String::from("reaction_event"),
                     data: Some(ColibriServerEventData::ReactionEventData(
                         ReactionEventData {
@@ -187,17 +187,17 @@ pub fn map_tap_event(
                             target: None,
                         },
                     )),
-                });
+                })
             }
         }
         "social.colibri.actor.data" | "app.bsky.actor.profile" => {
             // TODO: Fetch other half of profile, send full event
-            return Err(serde_json::error::Error::custom(String::from(
+            Err(serde_json::error::Error::custom(String::from(
                 "Not implemented",
-            )));
+            )))
         }
         "social.colibri.richtext.facet" => {
-            return Err(serde_json::error::Error::custom(String::from("Facet")));
+            Err(serde_json::error::Error::custom(String::from("Facet")))
         }
         _ => Err(serde_json::error::Error::custom(String::from(
             "Unknown collection",

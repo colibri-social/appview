@@ -19,13 +19,13 @@ pub async fn get_atproto_record<T: for<'de> serde::Deserialize<'de>>(
         .await?;
 
     if record.is_none() {
-        return Err(DbErr::RecordNotFound(String::from(format!(
+        return Err(DbErr::RecordNotFound(format!(
             "No record found for at://{did}/{nsid}/{rkey}"
-        ))));
+        )));
     }
 
-    return serde_json::from_value::<T>(record.unwrap().data)
-        .map_err(|e| DbErr::Custom(e.to_string()));
+    serde_json::from_value::<T>(record.unwrap().data)
+        .map_err(|e| DbErr::Custom(e.to_string()))
 }
 
 #[cfg(test)]

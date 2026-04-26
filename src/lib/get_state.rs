@@ -14,7 +14,7 @@ pub async fn get_state(did: String, db: &DatabaseConnection) -> Result<UserState
         return Ok(UserState::Offline);
     }
 
-    return Ok(UserState::from_string(record.unwrap().state));
+    Ok(UserState::from_string(record.unwrap().state))
 }
 
 #[cfg(test)]

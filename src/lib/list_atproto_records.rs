@@ -21,24 +21,22 @@ pub async fn list_atproto_records<T: for<'de> serde::Deserialize<'de>>(
         )
         .limit(limit.unwrap_or(default_limit).to_owned());
 
-    let result: Vec<Model>;
-
-    if reverse.is_some_and(|v| v == true) {
-        result = records.order_by_id_asc().all(db).await?;
+    let result: Vec<Model> = if reverse.is_some_and(|v| v) {
+        records.order_by_id_asc().all(db).await?
     } else {
-        result = records.order_by_id_desc().all(db).await?;
-    }
+        records.order_by_id_desc().all(db).await?
+    };
 
     let mut json_records: Vec<T> = result
         .iter()
         .map(|r| serde_json::from_value::<T>(r.to_owned().data).unwrap())
         .collect();
 
-    if reverse.is_some_and(|v| v == true) {
+    if reverse.is_some_and(|v| v) {
         json_records.reverse();
     }
 
-    return Ok(json_records);
+    Ok(json_records)
 }
 
 #[cfg(test)]

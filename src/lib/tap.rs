@@ -74,7 +74,7 @@ pub async fn register_dids(dids: Vec<String>) {
         std::env::var("TAP_ADMIN_PASSWORD").expect("TAP_ADMIN_PASSWORD not found in .env");
     let client = reqwest::Client::new();
 
-    let did_struct = DidStruct { dids: dids };
+    let did_struct = DidStruct { dids };
 
     let res = client
         .post(format!("http://{tap_hostname}/repos/add"))
@@ -84,7 +84,7 @@ pub async fn register_dids(dids: Vec<String>) {
         .await;
 
     if res.is_err() {
-        log::error!("Unable to add DIDs: {}", res.unwrap_err().to_string())
+        log::error!("Unable to add DIDs: {}", res.unwrap_err())
     } else {
         log::info!("Now tracking DIDs: {}", &did_struct.dids.join(", "));
     }
@@ -120,7 +120,7 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
         if insert_result.is_err() {
             log::error!(
                 "Unable to save record in database: {}",
-                insert_result.unwrap_err().to_string()
+                insert_result.unwrap_err()
             );
 
             return;
@@ -140,7 +140,7 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
         log::error!(
             "Unable to acknowledge event with ID {}: {}",
             msg_data.id,
-            ack_res.unwrap_err().to_string()
+            ack_res.unwrap_err()
         )
     }
 }

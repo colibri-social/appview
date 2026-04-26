@@ -55,7 +55,6 @@ pub async fn save_state(db: &DatabaseConnection, did: String, state: String) {
     let _ = UserStates::insert(UserStatesModel {
         did: ActiveValue::Set(did),
         state: ActiveValue::Set(state),
-        ..Default::default()
     })
     .on_conflict(
         sea_query::OnConflict::columns([user_states::Column::Did])
