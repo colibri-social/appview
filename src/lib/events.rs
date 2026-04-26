@@ -40,7 +40,8 @@ pub struct CategoryEventData {
 pub struct ChannelEventData {
     pub event: String,
     pub uri: String,
-    pub community: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,15 +54,14 @@ pub struct ChannelEventData {
 pub struct MessageEventData {
     pub event: String,
     pub uri: String,
-    pub channel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub facets: Option<Vec<Value>>,
     #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    #[serde(rename = "indexedAt", skip_serializing_if = "Option::is_none")]
-    pub indexed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,9 +74,10 @@ pub struct MessageEventData {
 pub struct ReactionEventData {
     pub event: String,
     pub uri: String,
-    pub emoji: String,
-    pub target: String,
-    pub channel: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -133,6 +134,12 @@ pub struct ColibriServerEvent {
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<ColibriServerEventData>,
+}
+
+impl ColibriServerEvent {
+    pub fn serialize(&self) -> String {
+        serde_json::to_string(self).unwrap()
+    }
 }
 
 // -- Client -> Server

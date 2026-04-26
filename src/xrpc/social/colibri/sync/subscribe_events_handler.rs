@@ -1,6 +1,5 @@
 use crate::TapBridge;
-use crate::lib::colibri::ColibriCommunityRecord;
-use crate::lib::events::{ColibriServerEventData, CommunityEventData};
+use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::tap::TapMessageRecord;
 use crate::{
     lib::{
@@ -18,157 +17,12 @@ use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::{State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
-use serde::de::Error;
 
 type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
 #[derive(Serialize)]
 pub struct DidStruct {
     pub dids: Vec<String>,
-}
-
-fn map_tap_event(event_record: &TapMessageRecord) -> Result<ColibriServerEvent, serde_json::Error> {
-    match event_record.collection.as_str() {
-        "social.colibri.community" => {
-            let uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                let record_data = serde_json::from_value::<ColibriCommunityRecord>(
-                    event_record.record.as_ref().unwrap().to_owned(),
-                )?;
-
-                return Ok(ColibriServerEvent {
-                    event_type: String::from("community_event"),
-                    data: Some(ColibriServerEventData::CommunityEventData(
-                        CommunityEventData {
-                            event: String::from("upsert"),
-                            uri,
-                            category_order: Some(record_data.category_order),
-                            description: Some(record_data.description),
-                            name: Some(record_data.name),
-                            picture: record_data.picture,
-                        },
-                    )),
-                });
-            } else {
-                return Ok(ColibriServerEvent {
-                    event_type: String::from("community_event"),
-                    data: Some(ColibriServerEventData::CommunityEventData(
-                        CommunityEventData {
-                            event: String::from("delete"),
-                            uri,
-                            category_order: None,
-                            description: None,
-                            name: None,
-                            picture: None,
-                        },
-                    )),
-                });
-            }
-        }
-        "social.colibri.member" => {
-            let _uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            } else {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            }
-        }
-        "social.colibri.category" => {
-            let _uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            } else {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            }
-        }
-        "social.colibri.channel" => {
-            let _uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            } else {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            }
-        }
-        "social.colibri.message" => {
-            let _uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            } else {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            }
-        }
-        "social.colibri.reaction" => {
-            let _uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            } else {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            }
-        }
-        "social.colibri.actor.data" | "app.bsky.actor.profile" => {
-            let _uri = format!(
-                "at://{}/social.colibri.community/{}",
-                event_record.did, event_record.rkey
-            );
-
-            if event_record.action != "delete" {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            } else {
-                return Err(serde_json::error::Error::custom(String::from(
-                    "Not implemented",
-                )));
-            }
-        }
-        _ => Err(serde_json::error::Error::custom(String::from(
-            "Unknown collection",
-        ))),
-    }
 }
 
 /// Returns false if the client has disconnected.
@@ -180,16 +34,18 @@ async fn forward_to_client(ws_sink: &mut WsSink, record: TapMessageRecord, did: 
     let mapped_tap_event = map_tap_event(&record);
 
     if mapped_tap_event.is_err() {
-        log::error!(
-            "Unable to handle tap message {:?}: {}",
-            record,
-            mapped_tap_event.unwrap_err().to_string()
-        );
+        let err = mapped_tap_event.unwrap_err().to_string();
+
+        if err != "Facet" {
+            log::error!("Unable to handle tap message {:?}: {}", record, err);
+        }
         return true;
     }
 
+    let safe_event = mapped_tap_event.unwrap();
+
     if ws_sink
-        .send(WsMessage::Text(String::from("{}")))
+        .send(WsMessage::Text(safe_event.serialize()))
         .await
         .is_err()
     {

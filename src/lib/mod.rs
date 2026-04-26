@@ -6,6 +6,7 @@ pub mod events;
 pub mod get_atproto_record;
 pub mod get_state;
 pub mod list_atproto_records;
+pub mod map_tap_event;
 pub mod responses;
 pub mod sentry;
 pub mod service_auth;
