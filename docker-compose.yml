@@ -9,6 +9,8 @@ services:
       ROCKET_PORT: 8000
       RUST_LOG: ${RUST_LOG:-colibri_appview=info,rocket=info}
       JETSTREAM_URL: ${JETSTREAM_URL:-}
+      TAP_HOSTNAME: ${TAP_HOSTNAME}
+      TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy
