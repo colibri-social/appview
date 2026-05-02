@@ -1,4 +1,4 @@
-use crate::TapBridge;
+use crate::CommsBridge;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::tap::TapMessageRecord;
 use crate::{
@@ -33,6 +33,7 @@ fn parse_client_event_ack(text: &str) -> Option<String> {
             let ack_res = ColibriServerEvent {
                 event_type: String::from("ack"),
                 data: None,
+                is_relevant: true,
             };
 
             Some(serde_json::to_string(&ack_res).unwrap())
@@ -42,12 +43,17 @@ fn parse_client_event_ack(text: &str) -> Option<String> {
 }
 
 /// Returns false if the client has disconnected.
-async fn forward_to_client(ws_sink: &mut WsSink, record: TapMessageRecord, did: String) -> bool {
-    if record.did != did {
-        return true;
-    };
+async fn forward_to_client(
+    ws_sink: &mut WsSink,
+    record: TapMessageRecord,
+    did: String,
+    db: &DatabaseConnection,
+) -> bool {
+    // if record.did != did {
+    //     return true;
+    // };
 
-    let mapped_tap_event = map_tap_event(&record);
+    let mapped_tap_event = map_tap_event(&record, &did, &db).await;
 
     if mapped_tap_event.is_err() {
         let err = mapped_tap_event.unwrap_err().to_string();
@@ -59,6 +65,11 @@ async fn forward_to_client(ws_sink: &mut WsSink, record: TapMessageRecord, did: 
     }
 
     let safe_event = mapped_tap_event.unwrap();
+
+    if !safe_event.is_relevant {
+        // The mapper has determined that an event is not needed for this client
+        return true;
+    }
 
     if ws_sink
         .send(WsMessage::Text(safe_event.serialize()))
@@ -76,9 +87,10 @@ async fn handle_tap_message(
     ws_sink: &mut WsSink,
     record: Result<TapMessageRecord, RecvError>,
     did: String,
+    db: &DatabaseConnection,
 ) -> bool {
     match record {
-        Ok(msg) => forward_to_client(ws_sink, msg, did).await,
+        Ok(msg) => forward_to_client(ws_sink, msg, did, db).await,
         Err(e) => {
             eprintln!("Tap stream error: {e}");
             false
@@ -96,6 +108,7 @@ async fn handle_client_message(
         Some(Ok(WsMessage::Text(text))) => {
             if let Some(serialized_ack_res) = parse_client_event_ack(&text) {
                 let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
+                // TODO: If client sent a typing event, broadcast to all others here
             }
 
             true
@@ -118,7 +131,7 @@ async fn run_event_loop(
 
     loop {
         let connected = tokio::select! {
-            msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, did.clone()).await,
+            msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, did.clone(), &db).await,
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg).await,
         };
 
@@ -135,7 +148,7 @@ pub async fn subscribe_events(
     auth: &str,
     ws: WebSocket,
     db: &State<DatabaseConnection>,
-    bridge: &State<TapBridge>,
+    bridge: &State<CommsBridge>,
 ) -> Result<rocket_ws::Channel<'static>, ErrorResponse> {
     let did = service_auth::verify_service_auth(auth, "social.colibri.sync.subscribeEvents")
         .await
@@ -150,7 +163,7 @@ pub async fn subscribe_events(
 
     let cloned_db = db.inner().clone();
 
-    let mut from_tap = bridge.from_tap.subscribe();
+    let mut from_tap = bridge.broadcast.subscribe();
 
     Ok(ws.channel(move |io| {
         Box::pin(async move {

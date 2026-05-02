@@ -134,6 +134,8 @@ pub struct ColibriServerEvent {
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<ColibriServerEventData>,
+    #[serde(skip_serializing)]
+    pub is_relevant: bool,
 }
 
 impl ColibriServerEvent {

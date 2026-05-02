@@ -139,3 +139,48 @@ pub struct ColibriReaction {
     /// Format: record-key
     pub target_message: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriMembership {
+    #[serde(rename = "$type")]
+    pub r#type: String,
+
+    /// AT-URI of the social.colibri.community record being joined
+    pub community: String,
+
+    /// Format: datetime
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriApproval {
+    #[serde(rename = "$type")]
+    pub r#type: String,
+
+    /// AT-URI of the user's social.colibri.membership record
+    pub membership: String,
+
+    /// AT-URI of the social.colibri.community record being joined
+    pub community: String,
+
+    /// Format: datetime
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriApprovalOrMembership {
+    #[serde(rename = "$type")]
+    pub r#type: String,
+
+    /// AT-URI of the user's social.colibri.membership record
+    pub membership: Option<String>,
+
+    /// AT-URI of the social.colibri.community record being joined
+    pub community: String,
+
+    /// Format: datetime
+    pub created_at: String,
+}

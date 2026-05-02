@@ -26,10 +26,10 @@ fn init_seaorm(db: DatabaseConnection) -> AdHoc {
     AdHoc::try_on_ignite("Manage SeaORM", |rocket| async { Ok(rocket.manage(db)) })
 }
 
-struct TapBridge {
+struct CommsBridge {
     #[allow(dead_code)]
-    to_tap: mpsc::Sender<String>,
-    from_tap: broadcast::Sender<TapMessageRecord>,
+    channel: mpsc::Sender<String>,
+    broadcast: broadcast::Sender<TapMessageRecord>,
 }
 
 async fn handle_tap_connection(
@@ -114,9 +114,9 @@ async fn rocket() -> _ {
     let (to_tap, rx_outbound) = mpsc::channel::<String>(128);
     let (tx_inbound, _) = broadcast::channel::<TapMessageRecord>(128);
 
-    let bridge = TapBridge {
-        to_tap: to_tap.clone(),
-        from_tap: tx_inbound.clone(),
+    let bridge = CommsBridge {
+        channel: to_tap.clone(),
+        broadcast: tx_inbound.clone(),
     };
 
     let db = match init_db().await {
