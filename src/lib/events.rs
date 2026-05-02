@@ -146,8 +146,15 @@ impl ColibriServerEvent {
 
 // -- Client -> Server
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TypingMessageData {
+    pub channel: String,
+}
+
 #[derive(Serialize, Deserialize)]
-pub enum ColibriClientEventData {}
+pub enum ColibriClientEventData {
+    TypingMessageData(TypingMessageData),
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct ColibriClientEvent {

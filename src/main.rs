@@ -32,6 +32,12 @@ struct CommsBridge {
     broadcast: broadcast::Sender<TapMessageRecord>,
 }
 
+#[derive(Clone)]
+pub struct EventNotification {
+    pub event_type: String,
+    pub data: Vec<String>,
+}
+
 async fn handle_tap_connection(
     db: DatabaseConnection,
     mut socket: TapStream,
@@ -111,12 +117,14 @@ async fn rocket() -> _ {
 
     let safe_cors = cors.to_cors().unwrap();
 
-    let (to_tap, rx_outbound) = mpsc::channel::<String>(128);
-    let (tx_inbound, _) = broadcast::channel::<TapMessageRecord>(128);
+    let (to_tap, from_tap_channel) = mpsc::channel::<String>(128);
+    let (from_tap_broadcast, _) = broadcast::channel::<TapMessageRecord>(128);
 
-    let bridge = CommsBridge {
+    let c2c_broadcast_channel = broadcast::channel::<EventNotification>(128);
+
+    let tap_bridge = CommsBridge {
         channel: to_tap.clone(),
-        broadcast: tx_inbound.clone(),
+        broadcast: from_tap_broadcast.clone(),
     };
 
     let db = match init_db().await {
@@ -138,8 +146,8 @@ async fn rocket() -> _ {
     tokio::spawn(handle_tap_connection(
         db.clone(),
         tap_stream,
-        rx_outbound,
-        tx_inbound,
+        from_tap_channel,
+        from_tap_broadcast,
         to_tap,
     ));
 
@@ -163,6 +171,7 @@ async fn rocket() -> _ {
         .mount("/", rocket_cors::catch_all_options_routes())
         .attach(safe_cors.clone())
         .attach(init_seaorm(db))
-        .manage(bridge)
+        .manage(tap_bridge)
+        .manage(c2c_broadcast_channel)
         .manage(safe_cors)
 }
