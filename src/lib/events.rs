@@ -117,6 +117,7 @@ pub struct TypingEventData {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(untagged)]
 pub enum ColibriServerEventData {
     Community(CommunityEventData),
     Member(MemberEventData),
@@ -163,6 +164,7 @@ pub struct TypingMessageData {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ColibriClientEventData {
     TypingMessage(TypingMessageData),
     View(ViewData),

@@ -94,8 +94,7 @@ pub async fn register_dids(dids: Vec<String>) {
 pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, text: String) {
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
 
-    if msg_data.record.is_some() {
-        let safe_record = msg_data.record.unwrap();
+    if let Some(safe_record) = msg_data.record {
         let json_data: Value = serde_json::to_value(&safe_record.record).unwrap();
 
         let insert_result = RecordData::insert(RecordDataModel {

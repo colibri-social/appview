@@ -313,6 +313,7 @@ pub async fn subscribe_events(
 mod tests {
     use super::{parse_client_event, serialize_typing_broadcast};
     use crate::EventNotification;
+    use crate::models::user_states;
     use rocket::tokio;
     use rocket::tokio::sync::broadcast;
     use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
@@ -342,7 +343,7 @@ mod tests {
         let (tx, mut rx) = broadcast::channel(4);
         let db = mock_db();
         let res = parse_client_event(
-            r#"{"type":"typing","data":{"TypingMessageData":{"channel":"community-1"}}}"#,
+            r#"{"type":"typing","data":{"channel":"community-1"}}"#,
             String::from("did:plc:me"),
             &tx,
             &db,
@@ -387,7 +388,15 @@ mod tests {
 
     #[tokio::test]
     async fn serializes_typing_broadcast_for_other_users() {
-        let db = mock_db();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![user_states::Model {
+                did: String::from("did:plc:me"),
+                state: String::from("online"),
+                vc: None,
+                vc_community: None,
+                channel: String::from("community-1"),
+            }]])
+            .into_connection();
         let payload = serialize_typing_broadcast(
             EventNotification {
                 event_type: String::from("typing"),
@@ -401,8 +410,8 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(json["type"], "typing_event");
-        assert_eq!(json["data"]["TypingEventData"]["did"], "did:plc:other");
-        assert_eq!(json["data"]["TypingEventData"]["channel"], "community-1");
+        assert_eq!(json["data"]["did"], "did:plc:other");
+        assert_eq!(json["data"]["channel"], "community-1");
     }
 
     #[tokio::test]
