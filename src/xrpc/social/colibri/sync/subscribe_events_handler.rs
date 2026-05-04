@@ -1,5 +1,7 @@
 use crate::lib::events::{ColibriClientEventData, ColibriServerEventData, TypingEventData};
+use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
+use crate::lib::state::{join_vc, leave_vc, view_channel};
 use crate::lib::tap::TapMessageRecord;
 use crate::{CommsBridge, EventNotification};
 use crate::{
@@ -26,13 +28,15 @@ pub struct DidStruct {
     pub dids: Vec<String>,
 }
 
-fn parse_client_event(
+async fn parse_client_event(
     text: &str,
     did: String,
     to_c2c_broadcast: &Sender<EventNotification>,
+    db: &DatabaseConnection,
 ) -> Option<String> {
     let user_message = serde_json::from_str::<ColibriClientEvent>(text).ok()?;
 
+    // `view`, `voice_join`, `voice_leave`
     match user_message.event_type.as_str() {
         "heartbeat" => {
             let ack_res = ColibriServerEvent {
@@ -47,13 +51,11 @@ fn parse_client_event(
             let user_message_data: ColibriClientEventData = user_message.data?;
 
             let typing_msg_data = match user_message_data {
-                ColibriClientEventData::TypingMessageData(data) => Some(data),
+                ColibriClientEventData::TypingMessage(data) => Some(data),
+                _ => None,
             };
 
-            if typing_msg_data.is_none() {
-                // Event data is invalid
-                return None;
-            }
+            typing_msg_data.as_ref()?;
 
             let _ = to_c2c_broadcast.send(EventNotification {
                 event_type: String::from("typing"),
@@ -62,24 +64,74 @@ fn parse_client_event(
 
             None
         }
+        "view" => {
+            let user_message_data: ColibriClientEventData = user_message.data?;
+
+            let view_msg_data = match user_message_data {
+                ColibriClientEventData::View(data) => Some(data),
+                _ => None,
+            };
+
+            view_msg_data.as_ref()?;
+
+            view_channel(did, view_msg_data.unwrap().channel, db).await;
+
+            None
+        }
+        "voice_join" => {
+            let user_message_data: ColibriClientEventData = user_message.data?;
+
+            let vc_msg_data = match user_message_data {
+                ColibriClientEventData::VoiceChannel(data) => Some(data),
+                _ => None,
+            };
+
+            vc_msg_data.as_ref()?;
+
+            let safe_data = vc_msg_data.unwrap();
+
+            join_vc(did, safe_data.channel, safe_data.community, db).await;
+
+            None
+        }
+        "voice_leave" => {
+            // TODO: Get current VC before removing, notify others
+            leave_vc(did, db).await;
+            None
+        }
         _ => None,
     }
 }
 
-fn serialize_typing_broadcast(msg: EventNotification, did: String) -> Option<String> {
+async fn serialize_typing_broadcast(
+    msg: EventNotification,
+    did: String,
+    db: &DatabaseConnection,
+) -> Option<String> {
     if msg.event_type != "typing" || msg.data.len() < 2 {
         return None;
     }
 
+    let msg_channel = msg.data[1].clone();
     let msg_did = msg.data[0].clone();
     if msg_did == did {
         return None;
     }
 
+    let states = get_did_states(did, db).await;
+
+    if states.is_err() {
+        return None;
+    }
+
+    if states.unwrap().channel != msg_channel {
+        return None;
+    }
+
     let event = ColibriServerEvent {
         event_type: String::from("typing_event"),
-        data: Some(ColibriServerEventData::TypingEventData(TypingEventData {
-            channel: msg.data[1].clone(),
+        data: Some(ColibriServerEventData::Typing(TypingEventData {
+            channel: msg_channel,
             did: msg_did,
             event: String::from("start"),
         })),
@@ -96,14 +148,10 @@ async fn forward_to_client(
     did: String,
     db: &DatabaseConnection,
 ) -> bool {
-    // if record.did != did {
-    //     return true;
-    // };
+    let mapped_tap_event = map_tap_event(&record, &did, db).await;
 
-    let mapped_tap_event = map_tap_event(&record, &did, &db).await;
-
-    if mapped_tap_event.is_err() {
-        let err = mapped_tap_event.unwrap_err().to_string();
+    if let Err(mapped_event_error) = mapped_tap_event {
+        let err = mapped_event_error.to_string();
 
         if err != "Facet" {
             log::error!("Unable to handle tap message {:?}: {}", record, err);
@@ -151,14 +199,14 @@ async fn handle_client_message(
     msg: Option<Result<WsMessage, rocket_ws::result::Error>>,
     did: String,
     to_c2c_broadcast: &Sender<EventNotification>,
+    db: &DatabaseConnection,
 ) -> bool {
     match msg {
         Some(Ok(WsMessage::Close(_))) | None => false,
         Some(Ok(WsMessage::Text(text))) => {
-            // TODO: Handle messages (https://next.colibri.social/docs/specification/appview/#messages)
-            //       `heartbeat` and `typing` are already handled.
-            //       Left: `subscribe`, `unsubscribe`, `view`, `voice_join`,  `voice_leave`
-            if let Some(serialized_ack_res) = parse_client_event(&text, did, to_c2c_broadcast) {
+            if let Some(serialized_ack_res) =
+                parse_client_event(&text, did, to_c2c_broadcast, db).await
+            {
                 let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
             }
 
@@ -172,10 +220,11 @@ async fn handle_client_broadcast_msg(
     ws_sink: &mut WsSink,
     msg: Result<EventNotification, RecvError>,
     did: String,
+    db: &DatabaseConnection,
 ) -> bool {
     match msg {
         Ok(msg) => {
-            if let Some(payload) = serialize_typing_broadcast(msg, did) {
+            if let Some(payload) = serialize_typing_broadcast(msg, did, db).await {
                 let _ = ws_sink.send(WsMessage::Text(payload)).await;
             }
             true
@@ -206,8 +255,8 @@ async fn run_event_loop(
     loop {
         let connected = tokio::select! {
             msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, did.clone(), &db).await,
-            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast).await,
-            msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone()).await,
+            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &db).await,
+            msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
         };
 
         if !connected {
@@ -264,29 +313,41 @@ pub async fn subscribe_events(
 mod tests {
     use super::{parse_client_event, serialize_typing_broadcast};
     use crate::EventNotification;
+    use rocket::tokio;
     use rocket::tokio::sync::broadcast;
+    use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
 
-    #[test]
-    fn creates_ack_for_heartbeat_event() {
+    fn mock_db() -> DatabaseConnection {
+        MockDatabase::new(DatabaseBackend::Postgres).into_connection()
+    }
+
+    #[tokio::test]
+    async fn creates_ack_for_heartbeat_event() {
         let (tx, _) = broadcast::channel(4);
+        let db = mock_db();
         let ack = parse_client_event(
             r#"{"type":"heartbeat","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &db,
         )
+        .await
         .expect("expected ack");
         let json: serde_json::Value = serde_json::from_str(&ack).unwrap();
         assert_eq!(json["type"], "ack");
     }
 
-    #[test]
-    fn emits_typing_notification_for_typing_event() {
+    #[tokio::test]
+    async fn emits_typing_notification_for_typing_event() {
         let (tx, mut rx) = broadcast::channel(4);
+        let db = mock_db();
         let res = parse_client_event(
             r#"{"type":"typing","data":{"TypingMessageData":{"channel":"community-1"}}}"#,
             String::from("did:plc:me"),
             &tx,
-        );
+            &db,
+        )
+        .await;
 
         assert!(res.is_none());
         let notif = rx.try_recv().unwrap();
@@ -294,39 +355,48 @@ mod tests {
         assert_eq!(notif.data, vec!["did:plc:me", "community-1"]);
     }
 
-    #[test]
-    fn ignores_typing_event_without_data() {
+    #[tokio::test]
+    async fn ignores_typing_event_without_data() {
         let (tx, mut rx) = broadcast::channel(4);
+        let db = mock_db();
         let res = parse_client_event(
             r#"{"type":"typing","data":null}"#,
             String::from("did:plc:me"),
             &tx,
-        );
+            &db,
+        )
+        .await;
 
         assert!(res.is_none());
         assert!(rx.try_recv().is_err());
     }
 
-    #[test]
-    fn ignores_unknown_client_event() {
+    #[tokio::test]
+    async fn ignores_unknown_client_event() {
         let (tx, _) = broadcast::channel(4);
+        let db = mock_db();
         let res = parse_client_event(
             r#"{"type":"unknown","data":null}"#,
             String::from("did:plc:me"),
             &tx,
-        );
+            &db,
+        )
+        .await;
         assert!(res.is_none());
     }
 
-    #[test]
-    fn serializes_typing_broadcast_for_other_users() {
+    #[tokio::test]
+    async fn serializes_typing_broadcast_for_other_users() {
+        let db = mock_db();
         let payload = serialize_typing_broadcast(
             EventNotification {
                 event_type: String::from("typing"),
                 data: vec![String::from("did:plc:other"), String::from("community-1")],
             },
             String::from("did:plc:me"),
+            &db,
         )
+        .await
         .unwrap();
 
         let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -335,15 +405,18 @@ mod tests {
         assert_eq!(json["data"]["TypingEventData"]["channel"], "community-1");
     }
 
-    #[test]
-    fn ignores_typing_broadcast_from_same_user_or_invalid_payload() {
+    #[tokio::test]
+    async fn ignores_typing_broadcast_from_same_user_or_invalid_payload() {
+        let db = mock_db();
         let same_user = serialize_typing_broadcast(
             EventNotification {
                 event_type: String::from("typing"),
                 data: vec![String::from("did:plc:me"), String::from("community-1")],
             },
             String::from("did:plc:me"),
-        );
+            &db,
+        )
+        .await;
         assert!(same_user.is_none());
 
         let invalid = serialize_typing_broadcast(
@@ -352,7 +425,9 @@ mod tests {
                 data: vec![String::from("did:plc:other")],
             },
             String::from("did:plc:me"),
-        );
+            &db,
+        )
+        .await;
         assert!(invalid.is_none());
     }
 }

@@ -83,8 +83,8 @@ pub async fn register_dids(dids: Vec<String>) {
         .send()
         .await;
 
-    if res.is_err() {
-        log::error!("Unable to add DIDs: {}", res.unwrap_err())
+    if let Err(res_err) = res {
+        log::error!("Unable to add DIDs: {}", res_err);
     } else {
         log::info!("Now tracking DIDs: {}", &did_struct.dids.join(", "));
     }
@@ -117,11 +117,8 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
         .exec(db)
         .await;
 
-        if insert_result.is_err() {
-            log::error!(
-                "Unable to save record in database: {}",
-                insert_result.unwrap_err()
-            );
+        if let Err(res) = insert_result {
+            log::error!("Unable to save record in database: {}", res);
 
             return;
         }
@@ -136,12 +133,12 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
 
     let ack_res = to_tap.send(serialized_ack).await;
 
-    if ack_res.is_err() {
+    if let Err(res_err) = ack_res {
         log::error!(
             "Unable to acknowledge event with ID {}: {}",
             msg_data.id,
-            ack_res.unwrap_err()
-        )
+            res_err
+        );
     }
 }
 

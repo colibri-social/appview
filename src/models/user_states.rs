@@ -11,6 +11,12 @@ pub struct Model {
     pub did: String,
     #[sea_orm(column_type = "Text")]
     pub state: String,
+    #[sea_orm(column_type = "Text")]
+    pub vc: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    pub vc_community: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    pub channel: String,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth;
 use crate::lib::validate_state::validate_state_str;
@@ -21,6 +23,12 @@ pub enum UserState {
     Offline,
 }
 
+impl fmt::Display for UserState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 impl UserState {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -28,15 +36,6 @@ impl UserState {
             UserState::Away => "away",
             UserState::Dnd => "dnd",
             UserState::Offline => "offline",
-        }
-    }
-
-    pub fn to_string(&self) -> String {
-        match self {
-            UserState::Online => String::from("online"),
-            UserState::Away => String::from("away"),
-            UserState::Dnd => String::from("dnd"),
-            UserState::Offline => String::from("offline"),
         }
     }
 
@@ -55,6 +54,7 @@ pub async fn save_state(db: &DatabaseConnection, did: String, state: String) {
     let _ = UserStates::insert(UserStatesModel {
         did: ActiveValue::Set(did),
         state: ActiveValue::Set(state),
+        ..Default::default()
     })
     .on_conflict(
         sea_query::OnConflict::columns([user_states::Column::Did])

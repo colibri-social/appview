@@ -117,31 +117,27 @@ async fn map_tap_event_with(
                 let record_data = parse_payload::<ColibriCommunity>(event_record)?;
                 Ok(ColibriServerEvent {
                     event_type: String::from("community_event"),
-                    data: Some(ColibriServerEventData::CommunityEventData(
-                        CommunityEventData {
-                            event: String::from("upsert"),
-                            uri,
-                            category_order: Some(record_data.category_order),
-                            description: Some(record_data.description),
-                            name: Some(record_data.name),
-                            picture: record_data.picture,
-                        },
-                    )),
+                    data: Some(ColibriServerEventData::Community(CommunityEventData {
+                        event: String::from("upsert"),
+                        uri,
+                        category_order: Some(record_data.category_order),
+                        description: Some(record_data.description),
+                        name: Some(record_data.name),
+                        picture: record_data.picture,
+                    })),
                     is_relevant: true,
                 })
             } else {
                 Ok(ColibriServerEvent {
                     event_type: String::from("community_event"),
-                    data: Some(ColibriServerEventData::CommunityEventData(
-                        CommunityEventData {
-                            event: String::from("delete"),
-                            uri,
-                            category_order: None,
-                            description: None,
-                            name: None,
-                            picture: None,
-                        },
-                    )),
+                    data: Some(ColibriServerEventData::Community(CommunityEventData {
+                        event: String::from("delete"),
+                        uri,
+                        category_order: None,
+                        description: None,
+                        name: None,
+                        picture: None,
+                    })),
                     is_relevant: true,
                 })
             }
@@ -162,16 +158,14 @@ async fn map_tap_event_with(
 
                     return Ok(ColibriServerEvent {
                         event_type: String::from("community_event"),
-                        data: Some(ColibriServerEventData::CommunityEventData(
-                            CommunityEventData {
-                                event: String::from("delete"),
-                                uri: safe_record.community,
-                                category_order: None,
-                                description: None,
-                                name: None,
-                                picture: None,
-                            },
-                        )),
+                        data: Some(ColibriServerEventData::Community(CommunityEventData {
+                            event: String::from("delete"),
+                            uri: safe_record.community,
+                            category_order: None,
+                            description: None,
+                            name: None,
+                            picture: None,
+                        })),
                         is_relevant: true,
                     });
                 }
@@ -200,16 +194,14 @@ async fn map_tap_event_with(
                     if safe_community.requires_approval_to_join {
                         return Ok(ColibriServerEvent {
                             event_type: String::from("community_event"),
-                            data: Some(ColibriServerEventData::CommunityEventData(
-                                CommunityEventData {
-                                    event: String::from("delete"),
-                                    uri: safe_record.community,
-                                    category_order: None,
-                                    description: None,
-                                    name: None,
-                                    picture: None,
-                                },
-                            )),
+                            data: Some(ColibriServerEventData::Community(CommunityEventData {
+                                event: String::from("delete"),
+                                uri: safe_record.community,
+                                category_order: None,
+                                description: None,
+                                name: None,
+                                picture: None,
+                            })),
                             is_relevant: true,
                         });
                     }
@@ -238,32 +230,28 @@ async fn map_tap_event_with(
                 if target_did == user_did {
                     return Ok(ColibriServerEvent {
                         event_type: String::from("community_event"),
-                        data: Some(ColibriServerEventData::CommunityEventData(
-                            CommunityEventData {
-                                event: String::from("upsert"),
-                                uri: record_data.community,
-                                category_order: Some(safe_community.category_order),
-                                description: Some(safe_community.description),
-                                name: Some(safe_community.name),
-                                picture: safe_community.picture,
-                            },
-                        )),
-                        is_relevant: true,
-                    });
-                }
-            } else if !safe_community.requires_approval_to_join {
-                return Ok(ColibriServerEvent {
-                    event_type: String::from("community_event"),
-                    data: Some(ColibriServerEventData::CommunityEventData(
-                        CommunityEventData {
+                        data: Some(ColibriServerEventData::Community(CommunityEventData {
                             event: String::from("upsert"),
                             uri: record_data.community,
                             category_order: Some(safe_community.category_order),
                             description: Some(safe_community.description),
                             name: Some(safe_community.name),
                             picture: safe_community.picture,
-                        },
-                    )),
+                        })),
+                        is_relevant: true,
+                    });
+                }
+            } else if !safe_community.requires_approval_to_join {
+                return Ok(ColibriServerEvent {
+                    event_type: String::from("community_event"),
+                    data: Some(ColibriServerEventData::Community(CommunityEventData {
+                        event: String::from("upsert"),
+                        uri: record_data.community,
+                        category_order: Some(safe_community.category_order),
+                        description: Some(safe_community.description),
+                        name: Some(safe_community.name),
+                        picture: safe_community.picture,
+                    })),
                     is_relevant: true,
                 });
             }
@@ -275,29 +263,25 @@ async fn map_tap_event_with(
                 let record_data = parse_payload::<ColibriCategory>(event_record)?;
                 Ok(ColibriServerEvent {
                     event_type: String::from("category_event"),
-                    data: Some(ColibriServerEventData::CategoryEventData(
-                        CategoryEventData {
-                            event: String::from("upsert"),
-                            uri,
-                            channel_order: Some(record_data.channel_order),
-                            community: Some(record_data.community),
-                            name: Some(record_data.name),
-                        },
-                    )),
+                    data: Some(ColibriServerEventData::Category(CategoryEventData {
+                        event: String::from("upsert"),
+                        uri,
+                        channel_order: Some(record_data.channel_order),
+                        community: Some(record_data.community),
+                        name: Some(record_data.name),
+                    })),
                     is_relevant: true,
                 })
             } else {
                 Ok(ColibriServerEvent {
                     event_type: String::from("category_event"),
-                    data: Some(ColibriServerEventData::CategoryEventData(
-                        CategoryEventData {
-                            event: String::from("delete"),
-                            uri,
-                            channel_order: None,
-                            community: None,
-                            name: None,
-                        },
-                    )),
+                    data: Some(ColibriServerEventData::Category(CategoryEventData {
+                        event: String::from("delete"),
+                        uri,
+                        channel_order: None,
+                        community: None,
+                        name: None,
+                    })),
                     is_relevant: true,
                 })
             }
@@ -307,7 +291,7 @@ async fn map_tap_event_with(
                 let record_data = parse_payload::<ColibriChannel>(event_record)?;
                 Ok(ColibriServerEvent {
                     event_type: String::from("channel_event"),
-                    data: Some(ColibriServerEventData::ChannelEventData(ChannelEventData {
+                    data: Some(ColibriServerEventData::Channel(ChannelEventData {
                         event: String::from("upsert"),
                         uri,
                         channel_type: Some(record_data.channel_type),
@@ -320,7 +304,7 @@ async fn map_tap_event_with(
             } else {
                 Ok(ColibriServerEvent {
                     event_type: String::from("channel_event"),
-                    data: Some(ColibriServerEventData::ChannelEventData(ChannelEventData {
+                    data: Some(ColibriServerEventData::Channel(ChannelEventData {
                         event: String::from("delete"),
                         uri,
                         channel_type: None,
@@ -337,7 +321,7 @@ async fn map_tap_event_with(
                 let record_data = parse_payload::<ColibriMessage>(event_record)?;
                 Ok(ColibriServerEvent {
                     event_type: String::from("message_event"),
-                    data: Some(ColibriServerEventData::MessageEventData(MessageEventData {
+                    data: Some(ColibriServerEventData::Message(MessageEventData {
                         event: String::from("upsert"),
                         uri,
                         attachments: record_data.attachments,
@@ -353,7 +337,7 @@ async fn map_tap_event_with(
             } else {
                 Ok(ColibriServerEvent {
                     event_type: String::from("message_event"),
-                    data: Some(ColibriServerEventData::MessageEventData(MessageEventData {
+                    data: Some(ColibriServerEventData::Message(MessageEventData {
                         event: String::from("delete"),
                         uri,
                         attachments: None,
@@ -373,27 +357,23 @@ async fn map_tap_event_with(
                 let record_data = parse_payload::<ColibriReaction>(event_record)?;
                 Ok(ColibriServerEvent {
                     event_type: String::from("reaction_event"),
-                    data: Some(ColibriServerEventData::ReactionEventData(
-                        ReactionEventData {
-                            event: String::from("added"),
-                            uri,
-                            emoji: Some(record_data.emoji),
-                            target: Some(record_data.target_message),
-                        },
-                    )),
+                    data: Some(ColibriServerEventData::Reaction(ReactionEventData {
+                        event: String::from("added"),
+                        uri,
+                        emoji: Some(record_data.emoji),
+                        target: Some(record_data.target_message),
+                    })),
                     is_relevant: true,
                 })
             } else {
                 Ok(ColibriServerEvent {
                     event_type: String::from("reaction_event"),
-                    data: Some(ColibriServerEventData::ReactionEventData(
-                        ReactionEventData {
-                            event: String::from("removed"),
-                            uri,
-                            emoji: None,
-                            target: None,
-                        },
-                    )),
+                    data: Some(ColibriServerEventData::Reaction(ReactionEventData {
+                        event: String::from("removed"),
+                        uri,
+                        emoji: None,
+                        target: None,
+                    })),
                     is_relevant: true,
                 })
             }
@@ -414,7 +394,7 @@ async fn map_tap_event_with(
 
             Ok(ColibriServerEvent {
                 event_type: String::from("user_event"),
-                data: Some(ColibriServerEventData::UserEventData(UserEventData {
+                data: Some(ColibriServerEventData::User(UserEventData {
                     did: event_record.did.clone(),
                     profile: UserEventProfile {
                         avatar: safe_profile.avatar,
@@ -448,7 +428,7 @@ async fn map_tap_event_with(
 
             Ok(ColibriServerEvent {
                 event_type: String::from("user_event"),
-                data: Some(ColibriServerEventData::UserEventData(UserEventData {
+                data: Some(ColibriServerEventData::User(UserEventData {
                     did: event_record.did.clone(),
                     profile: UserEventProfile {
                         avatar: safe_profile.avatar,
@@ -584,7 +564,7 @@ mod tests {
         .await
         .unwrap();
 
-        if let Some(ColibriServerEventData::CommunityEventData(data)) = event.data {
+        if let Some(ColibriServerEventData::Community(data)) = event.data {
             assert_eq!(data.event, "delete");
             assert_eq!(
                 data.uri,
@@ -647,7 +627,7 @@ mod tests {
         .await
         .unwrap();
 
-        if let Some(ColibriServerEventData::ChannelEventData(data)) = event.data {
+        if let Some(ColibriServerEventData::Channel(data)) = event.data {
             assert_eq!(data.event, "delete");
             assert!(data.name.is_none());
         } else {
@@ -677,7 +657,7 @@ mod tests {
         .await
         .unwrap();
 
-        if let Some(ColibriServerEventData::MessageEventData(data)) = event.data {
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
             assert_eq!(data.event, "delete");
             assert_eq!(data.text, None);
         } else {
@@ -719,7 +699,7 @@ mod tests {
         .await
         .unwrap();
 
-        if let Some(ColibriServerEventData::UserEventData(data)) = event.data {
+        if let Some(ColibriServerEventData::User(data)) = event.data {
             assert_eq!(data.profile.handle, "alice.test");
             assert_eq!(data.status.unwrap().state, "away");
         } else {
@@ -761,7 +741,7 @@ mod tests {
         .await
         .unwrap();
 
-        if let Some(ColibriServerEventData::UserEventData(data)) = event.data {
+        if let Some(ColibriServerEventData::User(data)) = event.data {
             assert_eq!(data.profile.handle, "alice.test");
             assert_eq!(data.status.unwrap().text, "Busy");
         } else {

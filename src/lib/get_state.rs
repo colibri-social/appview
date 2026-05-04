@@ -1,6 +1,6 @@
 use sea_orm::{Condition, DatabaseConnection, DbErr};
 
-use crate::models::user_states::{self, Entity as UserStates};
+use crate::models::user_states::{self, Entity as UserStates, Model as UserStatesModel};
 use crate::xrpc::social::colibri::actor::set_state_handler::UserState;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
@@ -15,6 +15,24 @@ pub async fn get_state(did: String, db: &DatabaseConnection) -> Result<UserState
     }
 
     Ok(UserState::from_string(record.unwrap().state))
+}
+
+pub async fn get_did_states(
+    did: String,
+    db: &DatabaseConnection,
+) -> Result<UserStatesModel, DbErr> {
+    let record = UserStates::find()
+        .filter(Condition::all().add(user_states::Column::Did.eq(&did)))
+        .one(db)
+        .await?;
+
+    if record.is_none() {
+        return Err(DbErr::RecordNotFound(String::from(
+            "Unable to find record.",
+        )));
+    }
+
+    Ok(record.unwrap())
 }
 
 #[cfg(test)]
@@ -40,6 +58,9 @@ mod tests {
             .append_query_results([vec![user_states::Model {
                 did: String::from("did:plc:abc"),
                 state: String::from("dnd"),
+                channel: String::from(""),
+                vc: None,
+                vc_community: None,
             }]])
             .into_connection();
 

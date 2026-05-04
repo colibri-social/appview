@@ -10,5 +10,6 @@ pub mod map_tap_event;
 pub mod responses;
 pub mod sentry;
 pub mod service_auth;
+pub mod state;
 pub mod tap;
 pub mod validate_state;

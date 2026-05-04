@@ -118,14 +118,14 @@ pub struct TypingEventData {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ColibriServerEventData {
-    CommunityEventData(CommunityEventData),
-    MemberEventData(MemberEventData),
-    CategoryEventData(CategoryEventData),
-    ChannelEventData(ChannelEventData),
-    MessageEventData(MessageEventData),
-    ReactionEventData(ReactionEventData),
-    UserEventData(UserEventData),
-    TypingEventData(TypingEventData),
+    Community(CommunityEventData),
+    Member(MemberEventData),
+    Category(CategoryEventData),
+    Channel(ChannelEventData),
+    Message(MessageEventData),
+    Reaction(ReactionEventData),
+    User(UserEventData),
+    Typing(TypingEventData),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -147,13 +147,26 @@ impl ColibriServerEvent {
 // -- Client -> Server
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct VoiceChannelData {
+    pub channel: String,
+    pub community: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ViewData {
+    pub channel: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TypingMessageData {
     pub channel: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum ColibriClientEventData {
-    TypingMessageData(TypingMessageData),
+    TypingMessage(TypingMessageData),
+    View(ViewData),
+    VoiceChannel(VoiceChannelData),
 }
 
 #[derive(Serialize, Deserialize)]
