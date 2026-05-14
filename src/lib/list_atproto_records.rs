@@ -1,42 +1,75 @@
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect,
+    ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect,
 };
 
 use crate::models::record_data::{self, Entity as RecordData, Model};
 
+const DEFAULT_LIMIT: u64 = 100;
+
+pub struct PagedRecords<T> {
+    pub records: Vec<T>,
+    pub cursor: Option<String>,
+}
+
+/// Lists records for a given (did, nsid) with rkey-based cursor pagination.
+///
+/// The cursor is the rkey of the last record returned. Default order is
+/// descending by rkey (newest TID-encoded records first); when `reverse` is
+/// true, ascending order is used. The returned cursor is only set when the
+/// page is full, matching `com.atproto.repo.listRecords` semantics.
 pub async fn list_atproto_records<T: for<'de> serde::Deserialize<'de>>(
     did: String,
     nsid: String,
     limit: Option<u64>,
-    _cursor: Option<&str>, // TODO: Cursor support
+    cursor: Option<&str>,
     reverse: Option<bool>,
     db: &DatabaseConnection,
-) -> Result<Vec<T>, DbErr> {
-    let default_limit = 100;
-    let records = RecordData::find()
-        .filter(
-            Condition::all()
-                .add(record_data::Column::Did.eq(&did))
-                .add(record_data::Column::Nsid.eq(&nsid)),
-        )
-        .limit(limit.unwrap_or(default_limit).to_owned());
+) -> Result<PagedRecords<T>, DbErr> {
+    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+    let ascending = reverse.is_some_and(|v| v);
 
-    let result: Vec<Model> = if reverse.is_some_and(|v| v) {
-        records.order_by_id_asc().all(db).await?
-    } else {
-        records.order_by_id_desc().all(db).await?
-    };
+    let mut condition = Condition::all()
+        .add(record_data::Column::Did.eq(&did))
+        .add(record_data::Column::Nsid.eq(&nsid));
 
-    let mut json_records: Vec<T> = result
-        .iter()
-        .map(|r| serde_json::from_value::<T>(r.to_owned().data).unwrap())
-        .collect();
-
-    if reverse.is_some_and(|v| v) {
-        json_records.reverse();
+    if let Some(c) = cursor {
+        condition = if ascending {
+            condition.add(record_data::Column::Rkey.gt(c))
+        } else {
+            condition.add(record_data::Column::Rkey.lt(c))
+        };
     }
 
-    Ok(json_records)
+    let query = RecordData::find().filter(condition).limit(effective_limit);
+
+    let result: Vec<Model> = if ascending {
+        query
+            .order_by_asc(record_data::Column::Rkey)
+            .all(db)
+            .await?
+    } else {
+        query
+            .order_by_desc(record_data::Column::Rkey)
+            .all(db)
+            .await?
+    };
+
+    let next_cursor = if (result.len() as u64) == effective_limit {
+        result.last().map(|r| r.rkey.clone())
+    } else {
+        None
+    };
+
+    let records: Vec<T> = result
+        .into_iter()
+        .map(|r| serde_json::from_value::<T>(r.data).unwrap())
+        .collect();
+
+    Ok(PagedRecords {
+        records,
+        cursor: next_cursor,
+    })
 }
 
 #[cfg(test)]
@@ -51,28 +84,23 @@ mod tests {
         text: String,
     }
 
+    fn model(id: i64, rkey: &str, text: &str) -> crate::models::record_data::Model {
+        crate::models::record_data::Model {
+            id,
+            did: String::from("did:plc:abc"),
+            nsid: String::from("social.colibri.message"),
+            rkey: String::from(rkey),
+            data: serde_json::json!({ "text": text }),
+        }
+    }
+
     #[tokio::test]
-    async fn returns_records_in_default_order() {
+    async fn returns_records_in_descending_rkey_order_by_default() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![
-                crate::models::record_data::Model {
-                    id: 2,
-                    did: String::from("did:plc:abc"),
-                    nsid: String::from("social.colibri.message"),
-                    rkey: String::from("r2"),
-                    data: serde_json::json!({ "text": "second" }),
-                },
-                crate::models::record_data::Model {
-                    id: 1,
-                    did: String::from("did:plc:abc"),
-                    nsid: String::from("social.colibri.message"),
-                    rkey: String::from("r1"),
-                    data: serde_json::json!({ "text": "first" }),
-                },
-            ]])
+            .append_query_results([vec![model(2, "r2", "second"), model(1, "r1", "first")]])
             .into_connection();
 
-        let records = list_atproto_records::<SampleRecord>(
+        let result = list_atproto_records::<SampleRecord>(
             String::from("did:plc:abc"),
             String::from("social.colibri.message"),
             Some(10),
@@ -83,32 +111,17 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(records[0].text, "second");
-        assert_eq!(records[1].text, "first");
+        assert_eq!(result.records[0].text, "second");
+        assert_eq!(result.records[1].text, "first");
     }
 
     #[tokio::test]
-    async fn reverses_records_when_reverse_flag_is_true() {
+    async fn returns_records_in_ascending_rkey_order_when_reverse_is_true() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![
-                crate::models::record_data::Model {
-                    id: 1,
-                    did: String::from("did:plc:abc"),
-                    nsid: String::from("social.colibri.message"),
-                    rkey: String::from("r1"),
-                    data: serde_json::json!({ "text": "first" }),
-                },
-                crate::models::record_data::Model {
-                    id: 2,
-                    did: String::from("did:plc:abc"),
-                    nsid: String::from("social.colibri.message"),
-                    rkey: String::from("r2"),
-                    data: serde_json::json!({ "text": "second" }),
-                },
-            ]])
+            .append_query_results([vec![model(1, "r1", "first"), model(2, "r2", "second")]])
             .into_connection();
 
-        let records = list_atproto_records::<SampleRecord>(
+        let result = list_atproto_records::<SampleRecord>(
             String::from("did:plc:abc"),
             String::from("social.colibri.message"),
             Some(10),
@@ -119,7 +132,68 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(records[0].text, "second");
-        assert_eq!(records[1].text, "first");
+        assert_eq!(result.records[0].text, "first");
+        assert_eq!(result.records[1].text, "second");
+    }
+
+    #[tokio::test]
+    async fn returns_cursor_when_page_is_full() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![model(2, "r2", "second"), model(1, "r1", "first")]])
+            .into_connection();
+
+        let result = list_atproto_records::<SampleRecord>(
+            String::from("did:plc:abc"),
+            String::from("social.colibri.message"),
+            Some(2),
+            None,
+            None,
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.cursor.as_deref(), Some("r1"));
+    }
+
+    #[tokio::test]
+    async fn omits_cursor_when_page_is_not_full() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![model(1, "r1", "first")]])
+            .into_connection();
+
+        let result = list_atproto_records::<SampleRecord>(
+            String::from("did:plc:abc"),
+            String::from("social.colibri.message"),
+            Some(10),
+            None,
+            None,
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn returns_no_cursor_when_no_records_match() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<crate::models::record_data::Model>::new()])
+            .into_connection();
+
+        let result = list_atproto_records::<SampleRecord>(
+            String::from("did:plc:abc"),
+            String::from("social.colibri.message"),
+            Some(10),
+            Some("r9"),
+            None,
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.records.is_empty());
+        assert!(result.cursor.is_none());
     }
 }

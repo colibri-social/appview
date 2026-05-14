@@ -3,8 +3,11 @@
 pub mod prelude;
 
 pub mod collection_cursors;
+pub mod community_credentials;
+pub mod community_invitations;
 pub mod firehose_cursors;
 pub mod list_repos_cursors;
+pub mod notifications;
 pub mod outbox_buffers;
 pub mod record_data;
 pub mod repo_records;

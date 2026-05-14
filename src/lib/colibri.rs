@@ -184,3 +184,113 @@ pub struct ColibriApprovalOrMembership {
     /// Format: datetime
     pub created_at: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriRoleChannelOverride {
+    /// The channel rkey this override applies to.
+    pub channel: String,
+    /// Permissions explicitly granted in this channel.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Permissions explicitly denied in this channel.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriRole {
+    #[serde(rename = "$type", skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+
+    /// Display name of the role. 1-32 characters.
+    pub name: String,
+
+    /// Optional hex color (`#rrggbb`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+
+    /// Granted permissions. See `permissions::Permission` for the enumerated set.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+
+    /// Hierarchy position. Higher values sit higher in the hierarchy.
+    pub position: i64,
+
+    /// Whether members of this role are displayed separately in the member list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hoisted: Option<bool>,
+
+    /// Whether `@role` style mentions resolve to this role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mentionable: Option<bool>,
+
+    /// Whether this role is protected from modification or deletion. System
+    /// roles like the bootstrap "Owner" set this to true so role-management
+    /// endpoints can refuse mutating operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected: Option<bool>,
+
+    /// Per-channel permission overrides for this role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_overrides: Vec<ColibriRoleChannelOverride>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriMember {
+    #[serde(rename = "$type", skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+
+    /// The member's DID.
+    pub subject: String,
+
+    /// Role rkeys assigned to this member, stored on the same community repo.
+    #[serde(default)]
+    pub roles: Vec<String>,
+
+    /// Format: datetime
+    pub joined_at: String,
+
+    /// Optional per-community display-name override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+
+    /// Optional AT-URI of the user-side `social.colibri.membership` declaration
+    /// that this member record was admitted from. Audit trail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_membership: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriModerationSubject {
+    /// DID of the subject for user-targeted actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did: Option<String>,
+    /// AT-URI of the subject for content-targeted actions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriModeration {
+    #[serde(rename = "$type", skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+
+    /// `ban` | `unban` | `hideMessage` | `unhideMessage` | `kick`
+    pub action: String,
+
+    pub subject: ColibriModerationSubject,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// DID of the issuer.
+    pub created_by: String,
+
+    /// Format: datetime
+    pub created_at: String,
+}
