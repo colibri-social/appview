@@ -14,14 +14,14 @@ use crate::lib::responses::ErrorResponse;
 use crate::xrpc::com::atproto::identity::resolve_identity;
 use crate::xrpc::social::colibri::actor::set_state_handler::UserState;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ActorStatus {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ActorData {
     #[serde(rename = "displayName")]
     pub display_name: String,

@@ -1,6 +1,10 @@
-use crate::lib::events::{ColibriClientEventData, ColibriServerEventData, TypingEventData};
+use crate::lib::events::{
+    ColibriClientEventData, ColibriServerEventData, NotificationEventData, NotificationEventMessage,
+    TypingEventData,
+};
 use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
+use crate::lib::notifications::IndexedNotification;
 use crate::lib::state::{join_vc, leave_vc, view_channel};
 use crate::lib::tap::TapMessageRecord;
 use crate::{CommsBridge, EventNotification};
@@ -236,6 +240,55 @@ async fn handle_client_broadcast_msg(
     }
 }
 
+fn serialize_notification_for(
+    indexed: IndexedNotification,
+    did: &str,
+) -> Option<String> {
+    if indexed.row.recipient_did != did {
+        return None;
+    }
+    let event = ColibriServerEvent {
+        event_type: String::from("notification_event"),
+        data: Some(ColibriServerEventData::Notification(NotificationEventData {
+            id: indexed.row.id,
+            kind: indexed.row.kind,
+            message_uri: indexed.row.message_uri,
+            author_did: indexed.row.author_did,
+            channel_rkey: indexed.row.channel_rkey,
+            indexed_at: indexed.row.indexed_at,
+            message: NotificationEventMessage {
+                text: indexed.message.text,
+                facets: indexed.message.facets,
+                created_at: indexed.message.created_at,
+                parent: indexed.message.parent,
+                attachments: indexed.message.attachments,
+                edited: indexed.message.edited,
+            },
+        })),
+        is_relevant: true,
+    };
+    Some(event.serialize())
+}
+
+async fn handle_notification_msg(
+    ws_sink: &mut WsSink,
+    msg: Result<IndexedNotification, RecvError>,
+    did: &str,
+) -> bool {
+    match msg {
+        Ok(indexed) => {
+            if let Some(payload) = serialize_notification_for(indexed, did) {
+                let _ = ws_sink.send(WsMessage::Text(payload)).await;
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Notification broadcast error: {e}");
+            false
+        }
+    }
+}
+
 /// Handles the event loop and allows both messages from Tap and the Client to get processed.
 async fn run_event_loop(
     io: DuplexStream,
@@ -244,10 +297,12 @@ async fn run_event_loop(
     db: DatabaseConnection,
     to_c2c_broadcast: Sender<EventNotification>,
     from_c2c_broadcast: Receiver<EventNotification>,
+    from_notifications: Receiver<IndexedNotification>,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
     let mut from_tap = from_tap;
     let mut from_c2c_broadcast = from_c2c_broadcast;
+    let mut from_notifications = from_notifications;
 
     save_state(&db, did.clone(), String::from("online")).await;
     register_dids(vec![did.clone()]).await;
@@ -257,6 +312,7 @@ async fn run_event_loop(
             msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, did.clone(), &db).await,
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &db).await,
             msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
+            msg = from_notifications.recv() => handle_notification_msg(&mut ws_sink, msg, &did).await,
         };
 
         if !connected {
@@ -289,6 +345,7 @@ pub async fn subscribe_events(
     let cloned_db = db.inner().clone();
 
     let from_tap = bridge.broadcast.subscribe();
+    let from_notifications = bridge.notifications.subscribe();
 
     let to_c2c_broadcast = c2c_broadcast_channel.0.clone();
     let from_c2c_broadcast = to_c2c_broadcast.subscribe();
@@ -302,6 +359,7 @@ pub async fn subscribe_events(
                 cloned_db,
                 to_c2c_broadcast,
                 from_c2c_broadcast,
+                from_notifications,
             )
             .await;
             Ok(())

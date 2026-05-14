@@ -13,3 +13,7 @@ pub mod actor {
     pub use list_communities_handler::list_communities;
     pub use set_state_handler::set_state;
 }
+
+pub mod channel;
+pub mod community;
+pub mod notification;

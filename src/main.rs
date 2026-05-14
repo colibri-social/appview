@@ -2,7 +2,9 @@
 
 extern crate pretty_env_logger;
 
+use crate::lib::colibri::ColibriMessage;
 use crate::lib::db::init_db;
+use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::lib::sentry::init_sentry;
 use crate::lib::tap::{self, TapMessage, TapMessageRecord, TapStream, ack_tap_msg};
 use futures::{SinkExt, StreamExt};
@@ -30,6 +32,7 @@ struct CommsBridge {
     #[allow(dead_code)]
     channel: mpsc::Sender<String>,
     broadcast: broadcast::Sender<TapMessageRecord>,
+    notifications: broadcast::Sender<IndexedNotification>,
 }
 
 #[derive(Clone)]
@@ -44,6 +47,7 @@ async fn handle_tap_connection(
     mut rx_outbound: mpsc::Receiver<String>,
     tx_inbound: broadcast::Sender<TapMessageRecord>,
     mut to_tap: mpsc::Sender<String>,
+    notifications_tx: broadcast::Sender<IndexedNotification>,
 ) {
     loop {
         tokio::select! {
@@ -69,7 +73,36 @@ async fn handle_tap_connection(
                         return;
                     }
 
-                    let _ = tx_inbound.send(tap_msg.record.unwrap());
+                    let record = tap_msg.record.unwrap();
+
+                    // Centralized notification indexing for newly authored
+                    // Colibri messages. Persists rows + broadcasts to live WS
+                    // subscribers, so each notification is written exactly
+                    // once regardless of how many clients are connected.
+                    if record.collection == "social.colibri.message"
+                        && record.action != "delete"
+                        && let Some(payload) = record.record.clone()
+                        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
+                    {
+                        let message_uri = format!(
+                            "at://{}/{}/{}",
+                            record.did, record.collection, record.rkey
+                        );
+                        match index_message_notifications(&db, &record.did, &message_uri, &message)
+                            .await
+                        {
+                            Ok(rows) => {
+                                for row in rows {
+                                    let _ = notifications_tx.send(row);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("notification indexing failed for {message_uri}: {e}");
+                            }
+                        }
+                    }
+
+                    let _ = tx_inbound.send(record);
                     ack_tap_msg(&db, &mut to_tap, text.to_string()).await;
                 }
             }
@@ -122,9 +155,12 @@ async fn rocket() -> _ {
 
     let c2c_broadcast_channel = broadcast::channel::<EventNotification>(128);
 
+    let (notification_broadcast, _) = broadcast::channel::<IndexedNotification>(128);
+
     let tap_bridge = CommsBridge {
         channel: to_tap.clone(),
         broadcast: from_tap_broadcast.clone(),
+        notifications: notification_broadcast.clone(),
     };
 
     let db = match init_db().await {
@@ -149,6 +185,7 @@ async fn rocket() -> _ {
         from_tap_channel,
         from_tap_broadcast,
         to_tap,
+        notification_broadcast,
     ));
 
     rocket::build()
@@ -165,6 +202,23 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::actor::get_data,
                 xrpc::social::colibri::actor::list_communities,
                 xrpc::social::colibri::actor::set_state,
+                xrpc::social::colibri::channel::get_read_cursor,
+                xrpc::social::colibri::channel::list_messages,
+                xrpc::social::colibri::channel::list_reactions,
+                xrpc::social::colibri::community::block_message,
+                xrpc::social::colibri::community::block_user,
+                xrpc::social::colibri::community::create_invitation,
+                xrpc::social::colibri::community::delete_invitation,
+                xrpc::social::colibri::community::get_invitation,
+                xrpc::social::colibri::community::list_blocked_users,
+                xrpc::social::colibri::community::list_categories,
+                xrpc::social::colibri::community::list_channels,
+                xrpc::social::colibri::community::list_invitations,
+                xrpc::social::colibri::community::list_members,
+                xrpc::social::colibri::community::unblock_user,
+                xrpc::social::colibri::notification::get_unread_count,
+                xrpc::social::colibri::notification::list_notifications,
+                xrpc::social::colibri::notification::update_seen,
                 xrpc::social::colibri::sync::subscribe_events,
             ],
         )

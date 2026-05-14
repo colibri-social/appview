@@ -117,6 +117,36 @@ pub struct TypingEventData {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct NotificationEventMessage {
+    pub text: String,
+    #[serde(default)]
+    pub facets: Vec<Value>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NotificationEventData {
+    pub id: i64,
+    pub kind: String,
+    #[serde(rename = "messageUri")]
+    pub message_uri: String,
+    #[serde(rename = "authorDid")]
+    pub author_did: String,
+    #[serde(rename = "channelRkey")]
+    pub channel_rkey: String,
+    #[serde(rename = "indexedAt")]
+    pub indexed_at: String,
+    pub message: NotificationEventMessage,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(untagged)]
 pub enum ColibriServerEventData {
     Community(CommunityEventData),
@@ -127,6 +157,7 @@ pub enum ColibriServerEventData {
     Reaction(ReactionEventData),
     User(UserEventData),
     Typing(TypingEventData),
+    Notification(NotificationEventData),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
