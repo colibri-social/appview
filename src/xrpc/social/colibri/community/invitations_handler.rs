@@ -136,7 +136,12 @@ async fn create_invitation_with<V, W, I>(
 where
     V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
     W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-    I: Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<Invitation, DbErr>>,
+    I: Fn(
+        DatabaseConnection,
+        String,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<Invitation, DbErr>>,
 {
     if AtUri::parse(&community_uri).is_none() {
         return Err(invalid_community());
@@ -218,6 +223,7 @@ where
 
 // ---- deleteInvitation ----------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn delete_invitation_with<V, W, F, D>(
     community_uri: String,
     code: String,
@@ -466,7 +472,8 @@ mod tests {
             move |_, code, community, created_by| {
                 let captured = captured_clone.clone();
                 Box::pin(async move {
-                    *captured.lock().unwrap() = Some((code.clone(), community.clone(), created_by.clone()));
+                    *captured.lock().unwrap() =
+                        Some((code.clone(), community.clone(), created_by.clone()));
                     Ok(invite(&code, &community, &created_by, true))
                 })
             },
@@ -519,16 +526,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.code, "CODE");
-        assert_eq!(result.community, "at://did:plc:owner/social.colibri.community/c1");
+        assert_eq!(
+            result.community,
+            "at://did:plc:owner/social.colibri.community/c1"
+        );
         assert!(result.active);
     }
 
     #[tokio::test]
     async fn get_invitation_returns_not_found_when_missing() {
-        let result = get_invitation_with(String::from("NOPE"), |_| {
-            Box::pin(async { Ok(None) })
-        })
-        .await;
+        let result =
+            get_invitation_with(String::from("NOPE"), |_| Box::pin(async { Ok(None) })).await;
 
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().body.into_inner().error, "NotFound");
@@ -546,8 +554,18 @@ mod tests {
             |_, _| {
                 Box::pin(async {
                     Ok(vec![
-                        invite("A", "at://did:plc:owner/social.colibri.community/c1", "did:plc:owner", true),
-                        invite("B", "at://did:plc:owner/social.colibri.community/c1", "did:plc:owner", false),
+                        invite(
+                            "A",
+                            "at://did:plc:owner/social.colibri.community/c1",
+                            "did:plc:owner",
+                            true,
+                        ),
+                        invite(
+                            "B",
+                            "at://did:plc:owner/social.colibri.community/c1",
+                            "did:plc:owner",
+                            false,
+                        ),
                     ])
                 })
             },

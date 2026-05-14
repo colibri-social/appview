@@ -46,7 +46,12 @@ pub async fn list_blocked_users(
     community: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<BlockedUsersResponse>, ErrorResponse> {
-    list_blocked_users_with(community.to_string(), db.inner().clone(), fetch_banned_boxed).await
+    list_blocked_users_with(
+        community.to_string(),
+        db.inner().clone(),
+        fetch_banned_boxed,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -83,11 +88,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_blocked_users_with(
-            String::from("not-a-uri"),
-            db,
-            |_, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
-        )
+        let result = list_blocked_users_with(String::from("not-a-uri"), db, |_, _| {
+            Box::pin(async { panic!("should not fetch when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());

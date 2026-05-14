@@ -1,6 +1,6 @@
 use crate::lib::events::{
-    ColibriClientEventData, ColibriServerEventData, NotificationEventData, NotificationEventMessage,
-    TypingEventData,
+    ColibriClientEventData, ColibriServerEventData, NotificationEventData,
+    NotificationEventMessage, TypingEventData,
 };
 use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
@@ -240,31 +240,30 @@ async fn handle_client_broadcast_msg(
     }
 }
 
-fn serialize_notification_for(
-    indexed: IndexedNotification,
-    did: &str,
-) -> Option<String> {
+fn serialize_notification_for(indexed: IndexedNotification, did: &str) -> Option<String> {
     if indexed.row.recipient_did != did {
         return None;
     }
     let event = ColibriServerEvent {
         event_type: String::from("notification_event"),
-        data: Some(ColibriServerEventData::Notification(NotificationEventData {
-            id: indexed.row.id,
-            kind: indexed.row.kind,
-            message_uri: indexed.row.message_uri,
-            author_did: indexed.row.author_did,
-            channel_rkey: indexed.row.channel_rkey,
-            indexed_at: indexed.row.indexed_at,
-            message: NotificationEventMessage {
-                text: indexed.message.text,
-                facets: indexed.message.facets,
-                created_at: indexed.message.created_at,
-                parent: indexed.message.parent,
-                attachments: indexed.message.attachments,
-                edited: indexed.message.edited,
+        data: Some(ColibriServerEventData::Notification(
+            NotificationEventData {
+                id: indexed.row.id,
+                kind: indexed.row.kind,
+                message_uri: indexed.row.message_uri,
+                author_did: indexed.row.author_did,
+                channel_rkey: indexed.row.channel_rkey,
+                indexed_at: indexed.row.indexed_at,
+                message: NotificationEventMessage {
+                    text: indexed.message.text,
+                    facets: indexed.message.facets,
+                    created_at: indexed.message.created_at,
+                    parent: indexed.message.parent,
+                    attachments: indexed.message.attachments,
+                    edited: indexed.message.edited,
+                },
             },
-        })),
+        )),
         is_relevant: true,
     };
     Some(event.serialize())

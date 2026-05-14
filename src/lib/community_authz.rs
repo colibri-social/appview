@@ -12,6 +12,9 @@ const ROLE_NSID: &str = "social.colibri.role";
 #[derive(Debug, Clone)]
 pub struct ActorAuthz {
     pub is_owner: bool,
+    /// Loaded for completeness — endpoints that need nickname / fromMembership
+    /// will read it; currently unused outside tests.
+    #[allow(dead_code)]
     pub member: Option<ColibriMember>,
     pub roles: Vec<ColibriRole>,
 }
@@ -95,9 +98,8 @@ pub async fn load_actor_authz(
     community_uri: &str,
     actor_did: &str,
 ) -> Result<ActorAuthz, DbErr> {
-    let community = AtUri::parse(community_uri).ok_or_else(|| {
-        DbErr::Custom(format!("invalid community AT-URI: {community_uri}"))
-    })?;
+    let community = AtUri::parse(community_uri)
+        .ok_or_else(|| DbErr::Custom(format!("invalid community AT-URI: {community_uri}")))?;
 
     let is_owner = community.authority == actor_did;
 
@@ -111,8 +113,7 @@ pub async fn load_actor_authz(
         .one(db)
         .await?;
 
-    let member = member_record
-        .and_then(|m| serde_json::from_value::<ColibriMember>(m.data).ok());
+    let member = member_record.and_then(|m| serde_json::from_value::<ColibriMember>(m.data).ok());
 
     let role_rkeys: Vec<String> = member.as_ref().map(|m| m.roles.clone()).unwrap_or_default();
 
@@ -151,7 +152,10 @@ mod tests {
             record_type: None,
             name: name.to_string(),
             color: None,
-            permissions: permissions.into_iter().map(|p| p.as_str().to_string()).collect(),
+            permissions: permissions
+                .into_iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
             position,
             hoisted: None,
             mentionable: None,

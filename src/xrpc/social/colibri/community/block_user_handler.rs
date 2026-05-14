@@ -37,6 +37,11 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
 
 /// Common moderation handler entry point used by both blockUser and
 /// unblockUser. `block` toggles between writing a `ban` or `unban` record.
+///
+/// Each parameter is its own dependency injection seam (verify, resolve,
+/// load-authz, write); a future combinator (see refactor plan A) will
+/// collapse this surface.
+#[allow(clippy::too_many_arguments)]
 async fn moderate_user_with<R, W, V>(
     action: &'static str,
     community_uri: String,
@@ -77,8 +82,7 @@ where
 
     let (target_did, target_handle) = resolve_fn(identifier).await?;
 
-    let caller_authz =
-        load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
+    let caller_authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
     if !caller_authz.has(permission, None) {
         return Err(ErrorResponse {
             body: Json(ErrorBody {
@@ -232,7 +236,10 @@ mod tests {
             record_type: None,
             name: String::from("R"),
             color: None,
-            permissions: permissions.into_iter().map(|p| p.as_str().to_string()).collect(),
+            permissions: permissions
+                .into_iter()
+                .map(|p| p.as_str().to_string())
+                .collect(),
             position,
             hoisted: None,
             mentionable: None,
@@ -255,7 +262,11 @@ mod tests {
             "social.colibri.community.blockUser",
             Permission::MemberBan,
             |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_| Box::pin(async { Ok((String::from("did:plc:target"), String::from("target.test"))) }),
+            |_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
             |_, _, did| {
                 Box::pin(async move {
                     Ok(ActorAuthz {
@@ -302,7 +313,11 @@ mod tests {
             "social.colibri.community.blockUser",
             Permission::MemberBan,
             |_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
-            |_| Box::pin(async { Ok((String::from("did:plc:target"), String::from("target.test"))) }),
+            |_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
             |_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
@@ -332,7 +347,11 @@ mod tests {
             "social.colibri.community.blockUser",
             Permission::MemberBan,
             |_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
-            |_| Box::pin(async { Ok((String::from("did:plc:target"), String::from("target.test"))) }),
+            |_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
             |_, _, did| {
                 Box::pin(async move {
                     if did == "did:plc:mod" {
@@ -372,7 +391,11 @@ mod tests {
             "social.colibri.community.unblockUser",
             Permission::MemberUnban,
             |_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
-            |_| Box::pin(async { Ok((String::from("did:plc:target"), String::from("target.test"))) }),
+            |_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
             |_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {

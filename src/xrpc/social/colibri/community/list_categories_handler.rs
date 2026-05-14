@@ -162,11 +162,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_categories_with(
-            String::from("not-a-uri"),
-            db,
-            |_, _, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
-        )
+        let result = list_categories_with(String::from("not-a-uri"), db, |_, _, _| {
+            Box::pin(async { panic!("should not fetch when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());

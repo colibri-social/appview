@@ -45,7 +45,12 @@ pub async fn list_reactions(
     message: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ReactionList>, ErrorResponse> {
-    list_reactions_with(message.to_string(), db.inner().clone(), list_reactions_boxed).await
+    list_reactions_with(
+        message.to_string(),
+        db.inner().clone(),
+        list_reactions_boxed,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -85,11 +90,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_message_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_reactions_with(
-            String::from("invalid"),
-            db,
-            |_, _| Box::pin(async { panic!("should not call when uri is invalid") }),
-        )
+        let result = list_reactions_with(String::from("invalid"), db, |_, _| {
+            Box::pin(async { panic!("should not call when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());

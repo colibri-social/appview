@@ -93,9 +93,9 @@ fn fetch_boxed(
     limit: u64,
     cursor: Option<String>,
 ) -> BoxFuture<'static, Result<Vec<notifications_model::Model>, DbErr>> {
-    Box::pin(async move {
-        notifications::list_notifications(&db, &did, limit, cursor.as_deref()).await
-    })
+    Box::pin(
+        async move { notifications::list_notifications(&db, &did, limit, cursor.as_deref()).await },
+    )
 }
 
 fn hydrate_boxed(

@@ -147,7 +147,10 @@ mod tests {
             "at://did:plc:owner/social.colibri.channel/chan-a"
         );
         assert_eq!(result.channels[0].name, "general");
-        assert_eq!(result.channels[0].channel_type, "social.colibri.channel.text");
+        assert_eq!(
+            result.channels[0].channel_type,
+            "social.colibri.channel.text"
+        );
         assert_eq!(
             result.channels[0].category,
             "at://did:plc:owner/social.colibri.category/cat1"
@@ -157,11 +160,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_channels_with(
-            String::from("not-a-uri"),
-            db,
-            |_, _, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
-        )
+        let result = list_channels_with(String::from("not-a-uri"), db, |_, _, _| {
+            Box::pin(async { panic!("should not fetch when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());

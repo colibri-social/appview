@@ -25,17 +25,14 @@ where
     V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
     M: Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<u64, DbErr>>,
 {
-    let did = verify_auth_fn(
-        auth,
-        String::from("social.colibri.notification.updateSeen"),
-    )
-    .await
-    .map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: e.to_string(),
-        }),
-    })?;
+    let did = verify_auth_fn(auth, String::from("social.colibri.notification.updateSeen"))
+        .await
+        .map_err(|e| ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("AuthError"),
+                message: e.to_string(),
+            }),
+        })?;
 
     // The cutoff defaults to "now" — anything indexed at or before this point
     // counts as "seen". Lets clients catch up without a timestamp round-trip.

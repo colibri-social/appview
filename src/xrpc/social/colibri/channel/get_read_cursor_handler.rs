@@ -42,8 +42,7 @@ pub async fn fetch_latest_read_cursor(
         .await
 }
 
-type VerifyAuthFn =
-    fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>;
+type VerifyAuthFn = fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>;
 type FetchCursorFn = fn(
     DatabaseConnection,
     String,
@@ -84,14 +83,13 @@ async fn get_read_cursor_with(
         }),
     })?;
 
-    let stored: StoredCursor = serde_json::from_value(record.data.clone()).map_err(|e| {
-        ErrorResponse {
+    let stored: StoredCursor =
+        serde_json::from_value(record.data.clone()).map_err(|e| ErrorResponse {
             body: Json(ErrorBody {
                 error: String::from("InternalServerError"),
                 message: e.to_string(),
             }),
-        }
-    })?;
+        })?;
 
     Ok(Json(ReadCursor {
         uri: format!("at://{}/{}/{}", record.did, record.nsid, record.rkey),
@@ -171,7 +169,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.channel, "at://did:plc:owner/social.colibri.channel/chan-a");
+        assert_eq!(
+            result.channel,
+            "at://did:plc:owner/social.colibri.channel/chan-a"
+        );
         assert_eq!(
             result.uri,
             "at://did:plc:me/social.colibri.channel.read/rkey-latest"

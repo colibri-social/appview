@@ -46,10 +46,7 @@ fn verify_auth_boxed(
     Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
 }
 
-fn count_boxed(
-    db: DatabaseConnection,
-    did: String,
-) -> BoxFuture<'static, Result<u64, DbErr>> {
+fn count_boxed(db: DatabaseConnection, did: String) -> BoxFuture<'static, Result<u64, DbErr>> {
     Box::pin(async move { notifications::unseen_count(&db, &did).await })
 }
 

@@ -262,7 +262,10 @@ mod tests {
             |_, _| {
                 Box::pin(async {
                     Ok(MemberAggregate {
-                        member_dids: vec![String::from("did:plc:alice"), String::from("did:plc:bob")],
+                        member_dids: vec![
+                            String::from("did:plc:alice"),
+                            String::from("did:plc:bob"),
+                        ],
                         profiles: HashMap::from([
                             (String::from("did:plc:alice"), profile_for("Alice")),
                             (String::from("did:plc:bob"), profile_for("Bob")),
@@ -271,7 +274,10 @@ mod tests {
                             String::from("did:plc:alice"),
                             actor_data_for(Some("🦜"), "Working"),
                         )]),
-                        states: HashMap::from([(String::from("did:plc:alice"), String::from("online"))]),
+                        states: HashMap::from([(
+                            String::from("did:plc:alice"),
+                            String::from("online"),
+                        )]),
                         handles: HashMap::from([
                             (String::from("did:plc:alice"), String::from("alice.test")),
                             (String::from("did:plc:bob"), String::from("bob.test")),
@@ -317,11 +323,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_members_with(
-            String::from("not-a-uri"),
-            db,
-            |_, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
-        )
+        let result = list_members_with(String::from("not-a-uri"), db, |_, _| {
+            Box::pin(async { panic!("should not fetch when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());

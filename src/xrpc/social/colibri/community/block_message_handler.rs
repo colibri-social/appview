@@ -52,17 +52,14 @@ where
         });
     }
 
-    let caller_did = verify_auth_fn(
-        auth,
-        String::from("social.colibri.community.blockMessage"),
-    )
-    .await
-    .map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: e.to_string(),
-        }),
-    })?;
+    let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.blockMessage"))
+        .await
+        .map_err(|e| ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("AuthError"),
+                message: e.to_string(),
+            }),
+        })?;
 
     let caller_authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
     if !caller_authz.has(Permission::MessageDelete, None) {
@@ -180,7 +177,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.message, "at://did:plc:alice/social.colibri.message/msg-1");
+        assert_eq!(
+            result.message,
+            "at://did:plc:alice/social.colibri.message/msg-1"
+        );
         let written = captured.lock().unwrap().take().unwrap();
         assert_eq!(written.action, "hideMessage");
         assert_eq!(

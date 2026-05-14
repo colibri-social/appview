@@ -11,6 +11,8 @@ pub const MODERATION_NSID: &str = "social.colibri.moderation";
 pub const ACTION_BAN: &str = "ban";
 pub const ACTION_UNBAN: &str = "unban";
 pub const ACTION_HIDE_MESSAGE: &str = "hideMessage";
+/// Placeholder for an `unhideMessage` endpoint that isn't wired up yet.
+#[allow(dead_code)]
 pub const ACTION_UNHIDE_MESSAGE: &str = "unhideMessage";
 pub const ACTION_KICK: &str = "kick";
 
@@ -101,6 +103,10 @@ pub async fn currently_banned_dids(
 }
 
 /// Returns true if the given user is currently banned in the community.
+///
+/// Currently used only as a building block — future endpoints (e.g. message
+/// posting that must reject banned users) will consume this directly.
+#[allow(dead_code)]
 pub async fn is_user_banned(
     db: &DatabaseConnection,
     community: &AtUri,
@@ -134,13 +140,7 @@ pub fn moderation_record(
 pub fn latest_action_for_did(records: &[ColibriModeration], did: &str) -> Option<String> {
     records
         .iter()
-        .filter(|r| {
-            r.subject
-                .did
-                .as_ref()
-                .map(|d| d == did)
-                .unwrap_or(false)
-        })
+        .filter(|r| r.subject.did.as_ref().map(|d| d == did).unwrap_or(false))
         .map(|r| r.action.clone())
         .next_back()
 }
@@ -165,7 +165,10 @@ mod tests {
 
     #[test]
     fn ban_then_unban_results_in_not_banned() {
-        let log = vec![record("ban", "did:plc:alice"), record("unban", "did:plc:alice")];
+        let log = vec![
+            record("ban", "did:plc:alice"),
+            record("unban", "did:plc:alice"),
+        ];
         assert_eq!(
             latest_action_for_did(&log, "did:plc:alice"),
             Some(String::from("unban"))

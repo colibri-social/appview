@@ -2,7 +2,10 @@
 ///
 /// Permissions are stored as strings on `social.colibri.role` records, so this
 /// enum exists primarily to give the Rust code a single source of truth for
-/// the namespaced permission identifiers.
+/// the namespaced permission identifiers. Variants not yet consumed by an
+/// endpoint are intentional placeholders for forthcoming work; the catalog
+/// stays exhaustive so the role lexicon and Rust code never drift.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Permission {
     CommunityUpdate,

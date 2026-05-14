@@ -245,7 +245,13 @@ async fn list_messages_with(
                 .get(&record.rkey)
                 .cloned()
                 .unwrap_or_default();
-            build_message(record, &channel_uri, &page.community_uri, parent_uri, reactions)
+            build_message(
+                record,
+                &channel_uri,
+                &page.community_uri,
+                parent_uri,
+                reactions,
+            )
         })
         .collect();
 
@@ -293,7 +299,12 @@ mod tests {
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
-    fn message_record(rkey: &str, author: &str, text: &str, parent: Option<&str>) -> record_data::Model {
+    fn message_record(
+        rkey: &str,
+        author: &str,
+        text: &str,
+        parent: Option<&str>,
+    ) -> record_data::Model {
         let mut data = serde_json::json!({
             "text": text,
             "channel": "chan-a",
@@ -350,7 +361,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.messages.len(), 2);
-        assert_eq!(result.messages[0].uri, "at://did:plc:bob/social.colibri.message/msg-2");
+        assert_eq!(
+            result.messages[0].uri,
+            "at://did:plc:bob/social.colibri.message/msg-2"
+        );
         assert_eq!(
             result.messages[0].community,
             "at://did:plc:owner/social.colibri.community/c1"
@@ -400,13 +414,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_channel_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_messages_with(
-            String::from("not-a-uri"),
-            None,
-            None,
-            db,
-            |_, _, _, _| Box::pin(async { panic!("should not assemble when uri is invalid") }),
-        )
+        let result = list_messages_with(String::from("not-a-uri"), None, None, db, |_, _, _, _| {
+            Box::pin(async { panic!("should not assemble when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());
