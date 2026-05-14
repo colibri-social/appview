@@ -3,6 +3,7 @@
 extern crate pretty_env_logger;
 
 use crate::lib::colibri::ColibriMessage;
+use crate::lib::crypto;
 use crate::lib::db::init_db;
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::lib::sentry::init_sentry;
@@ -26,6 +27,16 @@ mod xrpc;
 
 fn init_seaorm(db: DatabaseConnection) -> AdHoc {
     AdHoc::try_on_ignite("Manage SeaORM", |rocket| async { Ok(rocket.manage(db)) })
+}
+
+/// Boot-time guard: panics with a descriptive message if `name` is unset or
+/// empty. Used to surface missing configuration at startup rather than on the
+/// first request that needs it.
+fn require_env_var(name: &str) {
+    match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => {}
+        _ => panic!("{name} must be set (cannot start without it)"),
+    }
 }
 
 struct CommsBridge {
@@ -138,6 +149,22 @@ async fn rocket() -> _ {
     let _ = dotenvy::dotenv();
     let _potential_guard = init_sentry().ok();
 
+    // Boot-time invariant checks. Anything the AppView cannot operate
+    // without should fail-fast here with a clear message rather than at
+    // first-call. Keep this list in sync with the env vars that
+    // `community.create` (and downstream PDS-write helpers) consume.
+    require_env_var("PDS_LOC");
+    require_env_var("PDS_ADMIN_USER");
+    require_env_var("PDS_ADMIN_PASS");
+    require_env_var("APPVIEW_HANDLE_DOMAIN");
+
+    // Load the at-rest credential encryption key before any handler that
+    // touches `community_credentials` can run. Fails fast at boot if the env
+    // var is missing or malformed.
+    let master_key = crypto::load_master_key_from_env()
+        .expect("CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key");
+    crypto::install_master_key(master_key).expect("master key already installed");
+
     let cors = CorsOptions::default()
         .allowed_origins(AllowedOrigins::all())
         .allowed_methods(
@@ -207,6 +234,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::channel::list_reactions,
                 xrpc::social::colibri::community::block_message,
                 xrpc::social::colibri::community::block_user,
+                xrpc::social::colibri::community::create,
                 xrpc::social::colibri::community::create_invitation,
                 xrpc::social::colibri::community::delete_invitation,
                 xrpc::social::colibri::community::get_invitation,
@@ -215,6 +243,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::community::list_channels,
                 xrpc::social::colibri::community::list_invitations,
                 xrpc::social::colibri::community::list_members,
+                xrpc::social::colibri::community::register_credentials,
                 xrpc::social::colibri::community::unblock_user,
                 xrpc::social::colibri::notification::get_unread_count,
                 xrpc::social::colibri::notification::list_notifications,

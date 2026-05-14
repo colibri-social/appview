@@ -4,6 +4,9 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, 
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
+use crate::lib::community_credentials::{self, CredentialsError};
+use crate::lib::crypto;
+use crate::lib::pds_client::{self, PdsError};
 use crate::models::record_data;
 
 pub const MODERATION_NSID: &str = "social.colibri.moderation";
@@ -37,33 +40,107 @@ pub fn generate_tid() -> String {
 }
 
 /// Writes a `social.colibri.moderation` record onto the community repo.
+///
+/// The call goes through the community's PDS using stored credentials (see
+/// `community_credentials`). After the PDS write, we optimistically insert
+/// into the local `record_data` cache so the issuer's own queries reflect the
+/// change immediately — the upstream firehose ingester will eventually
+/// re-deliver the same record, and the local cache has a unique
+/// `(did, nsid, rkey)` index that makes the duplicate a no-op.
+///
+/// On local-cache failure we log and return the synthesised row anyway: the
+/// firehose path will reconcile.
 pub async fn write_moderation_record(
     db: &DatabaseConnection,
     community: &AtUri,
     record: &ColibriModeration,
 ) -> Result<record_data::Model, DbErr> {
-    let rkey = generate_tid();
     let data = serde_json::to_value(record).map_err(|e| DbErr::Custom(e.to_string()))?;
 
+    let creds =
+        community_credentials::load_credentials(db, crypto::master_key(), &community.authority)
+            .await
+            .map_err(credentials_error_to_db_err)?
+            .ok_or_else(|| {
+                DbErr::Custom(format!(
+                    "no credentials registered for community {}",
+                    community.authority
+                ))
+            })?;
+
+    let session =
+        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
+            .await
+            .map_err(pds_error_to_db_err)?;
+
+    let record_ref = pds_client::create_record(
+        &creds.pds_endpoint,
+        &session.access_jwt,
+        &community.authority,
+        MODERATION_NSID,
+        None,
+        &data,
+    )
+    .await
+    .map_err(pds_error_to_db_err)?;
+
+    let parsed = AtUri::parse(&record_ref.uri).ok_or_else(|| {
+        DbErr::Custom(format!(
+            "pds returned malformed record URI: {}",
+            record_ref.uri
+        ))
+    })?;
+    let rkey = parsed.rkey;
+
+    // Best-effort optimistic local insert. Failures here are logged but not
+    // fatal; the firehose ingester re-delivers the record asynchronously.
     let active = record_data::ActiveModel {
         did: sea_orm::ActiveValue::Set(community.authority.clone()),
         nsid: sea_orm::ActiveValue::Set(MODERATION_NSID.to_string()),
         rkey: sea_orm::ActiveValue::Set(rkey.clone()),
-        data: sea_orm::ActiveValue::Set(data),
+        data: sea_orm::ActiveValue::Set(data.clone()),
         ..Default::default()
     };
+    if let Err(e) = record_data::Entity::insert(active).exec(db).await {
+        log::warn!(
+            "optimistic local insert failed for moderation {}/{}: {} (firehose will reconcile)",
+            community.authority,
+            rkey,
+            e
+        );
+    }
 
-    record_data::Entity::insert(active).exec(db).await?;
-
-    let written = record_data::Entity::find()
+    // If the optimistic insert just landed, re-read to return the authoritative
+    // row; otherwise synthesise a model with whatever metadata we have so the
+    // caller still gets a `Model` back.
+    if let Some(row) = record_data::Entity::find()
         .filter(record_data::Column::Did.eq(&community.authority))
         .filter(record_data::Column::Nsid.eq(MODERATION_NSID))
         .filter(record_data::Column::Rkey.eq(&rkey))
         .one(db)
         .await?
-        .ok_or_else(|| DbErr::Custom(format!("inserted moderation record missing: {rkey}")))?;
+    {
+        return Ok(row);
+    }
 
-    Ok(written)
+    Ok(record_data::Model {
+        id: 0,
+        did: community.authority.clone(),
+        nsid: MODERATION_NSID.to_string(),
+        rkey,
+        data,
+    })
+}
+
+fn credentials_error_to_db_err(e: CredentialsError) -> DbErr {
+    match e {
+        CredentialsError::Db(inner) => inner,
+        other => DbErr::Custom(format!("credentials error: {other}")),
+    }
+}
+
+fn pds_error_to_db_err(e: PdsError) -> DbErr {
+    DbErr::Custom(format!("pds write failed: {e}"))
 }
 
 /// Computes the set of DIDs currently banned in a community by replaying every

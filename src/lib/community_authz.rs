@@ -159,6 +159,7 @@ mod tests {
             position,
             hoisted: None,
             mentionable: None,
+            protected: None,
             channel_overrides: vec![],
         }
     }

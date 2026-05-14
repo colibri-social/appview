@@ -1,0 +1,262 @@
+//! Minimal `com.atproto.*` HTTP client for writing records on a PDS we hold
+//! credentials for. Only the endpoints we actually need are implemented;
+//! responses are decoded into structs the rest of the AppView can use directly.
+
+use rand::Rng;
+use rand::distributions::Alphanumeric;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum PdsError {
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("pds returned {status}: {body}")]
+    BadStatus { status: u16, body: String },
+    /// Reserved for richer response-shape validation in follow-up work.
+    #[allow(dead_code)]
+    #[error("pds response missing field `{0}`")]
+    MissingField(&'static str),
+}
+
+/// Opaque-from-our-perspective session bundle returned by `createSession`.
+/// We hold the access JWT for the duration of one logical operation and
+/// re-authenticate per call; this trades a session round-trip for not having
+/// to manage refresh tokens at moderation-event scale.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // `handle` is captured for completeness but unread today
+pub struct PdsSession {
+    #[serde(rename = "accessJwt")]
+    pub access_jwt: String,
+    pub did: String,
+    #[serde(default)]
+    pub handle: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // `cid` is captured for completeness but unread today
+pub struct RecordRef {
+    pub uri: String,
+    pub cid: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // `access_jwt` from createAccount unused; we re-login via createSession instead
+pub struct CreatedAccount {
+    pub did: String,
+    #[serde(rename = "accessJwt")]
+    pub access_jwt: String,
+    pub handle: String,
+}
+
+#[derive(Serialize)]
+struct CreateSessionBody<'a> {
+    identifier: &'a str,
+    password: &'a str,
+}
+
+#[derive(Serialize)]
+struct CreateRecordBody<'a> {
+    repo: &'a str,
+    collection: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rkey: Option<&'a str>,
+    record: &'a Value,
+}
+
+#[derive(Serialize)]
+#[allow(dead_code)] // Used by `delete_record`, which is reserved for the item-3 follow-up PR
+struct DeleteRecordBody<'a> {
+    repo: &'a str,
+    collection: &'a str,
+    rkey: &'a str,
+}
+
+#[derive(Serialize)]
+struct CreateAccountBody<'a> {
+    handle: &'a str,
+    email: &'a str,
+    password: &'a str,
+}
+
+/// Calls `com.atproto.server.createSession` and returns the resulting session.
+/// Used both as a credential-verification step and to obtain the access JWT
+/// needed for subsequent writes.
+pub async fn create_session(
+    pds_endpoint: &str,
+    identifier: &str,
+    password: &str,
+) -> Result<PdsSession, PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.server.createSession",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = CreateSessionBody {
+        identifier,
+        password,
+    };
+
+    let resp = reqwest::Client::new().post(url).json(&body).send().await?;
+    handle_response::<PdsSession>(resp).await
+}
+
+/// Calls `com.atproto.repo.createRecord` and returns the new record's
+/// URI + CID. Pass `Some(rkey)` to pin the record at a specific rkey
+/// (e.g. `"self"` for singleton records); pass `None` to let the PDS
+/// generate a TID.
+pub async fn create_record(
+    pds_endpoint: &str,
+    access_jwt: &str,
+    repo: &str,
+    collection: &str,
+    rkey: Option<&str>,
+    record: &Value,
+) -> Result<RecordRef, PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.repo.createRecord",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = CreateRecordBody {
+        repo,
+        collection,
+        rkey,
+        record,
+    };
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(access_jwt)
+        .json(&body)
+        .send()
+        .await?;
+    handle_response::<RecordRef>(resp).await
+}
+
+/// Calls `com.atproto.repo.deleteRecord`. Reserved for the item-3 follow-up
+/// PR (member-record removal on ban/kick/leave); unused today but kept here
+/// so the PDS-client surface is complete.
+#[allow(dead_code)]
+pub async fn delete_record(
+    pds_endpoint: &str,
+    access_jwt: &str,
+    repo: &str,
+    collection: &str,
+    rkey: &str,
+) -> Result<(), PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.repo.deleteRecord",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = DeleteRecordBody {
+        repo,
+        collection,
+        rkey,
+    };
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(access_jwt)
+        .json(&body)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    Err(error_from_response(resp).await)
+}
+
+/// Calls `com.atproto.server.createAccount`. Used when the AppView mints a new
+/// community DID on its own PDS.
+///
+/// `admin_credentials` is `Some((user, password))` to send an
+/// `Authorization: Basic …` header, which bypasses invite-code requirements
+/// and lets the AppView act as a PDS administrator. Variant A registration
+/// always passes them.
+pub async fn create_account(
+    pds_endpoint: &str,
+    admin_credentials: Option<(&str, &str)>,
+    handle: &str,
+    email: &str,
+    password: &str,
+) -> Result<CreatedAccount, PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.server.createAccount",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = CreateAccountBody {
+        handle,
+        email,
+        password,
+    };
+
+    let mut req = reqwest::Client::new().post(url).json(&body);
+    if let Some((user, pass)) = admin_credentials {
+        req = req.basic_auth(user, Some(pass));
+    }
+
+    let resp = req.send().await?;
+    handle_response::<CreatedAccount>(resp).await
+}
+
+/// Generates a long random password suitable for AppView-minted accounts.
+/// The AppView stores it encrypted; humans never need to type it.
+pub fn generate_strong_password() -> String {
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect()
+}
+
+async fn handle_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+) -> Result<T, PdsError> {
+    if resp.status().is_success() {
+        return resp.json::<T>().await.map_err(PdsError::Http);
+    }
+    Err(error_from_response(resp).await)
+}
+
+async fn error_from_response(resp: reqwest::Response) -> PdsError {
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    PdsError::BadStatus { status, body }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generate_strong_password_is_48_alphanumeric_chars() {
+        let pw = generate_strong_password();
+        assert_eq!(pw.len(), 48);
+        assert!(pw.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_ne!(pw, generate_strong_password(), "should differ each call");
+    }
+
+    #[test]
+    fn deserializes_session_response() {
+        let raw = r#"{"accessJwt":"jwt","did":"did:plc:abc","handle":"h.test"}"#;
+        let session: PdsSession = serde_json::from_str(raw).unwrap();
+        assert_eq!(session.access_jwt, "jwt");
+        assert_eq!(session.did, "did:plc:abc");
+        assert_eq!(session.handle.as_deref(), Some("h.test"));
+    }
+
+    #[test]
+    fn deserializes_session_response_without_handle() {
+        let raw = r#"{"accessJwt":"jwt","did":"did:plc:abc"}"#;
+        let session: PdsSession = serde_json::from_str(raw).unwrap();
+        assert!(session.handle.is_none());
+    }
+
+    #[test]
+    fn deserializes_record_ref() {
+        let raw = r#"{"uri":"at://did:plc:abc/social.colibri.community/c1","cid":"bafy..."}"#;
+        let r: RecordRef = serde_json::from_str(raw).unwrap();
+        assert_eq!(r.uri, "at://did:plc:abc/social.colibri.community/c1");
+    }
+}

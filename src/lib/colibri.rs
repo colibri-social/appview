@@ -226,6 +226,12 @@ pub struct ColibriRole {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mentionable: Option<bool>,
 
+    /// Whether this role is protected from modification or deletion. System
+    /// roles like the bootstrap "Owner" set this to true so role-management
+    /// endpoints can refuse mutating operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected: Option<bool>,
+
     /// Per-channel permission overrides for this role.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_overrides: Vec<ColibriRoleChannelOverride>,

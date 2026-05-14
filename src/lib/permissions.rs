@@ -49,6 +49,30 @@ impl Permission {
             Permission::ApprovalManage => "approval.manage",
         }
     }
+
+    /// Every permission, in declaration order. Useful for bootstrapping the
+    /// initial "owner" role on a freshly-created community.
+    pub fn all() -> &'static [Permission] {
+        &[
+            Permission::CommunityUpdate,
+            Permission::CommunityDelete,
+            Permission::CategoryCreate,
+            Permission::CategoryUpdate,
+            Permission::CategoryDelete,
+            Permission::ChannelCreate,
+            Permission::ChannelUpdate,
+            Permission::ChannelDelete,
+            Permission::MessageDelete,
+            Permission::MemberKick,
+            Permission::MemberBan,
+            Permission::MemberUnban,
+            Permission::RoleManage,
+            Permission::InvitationCreate,
+            Permission::InvitationDelete,
+            Permission::ModerationViewLog,
+            Permission::ApprovalManage,
+        ]
+    }
 }
 
 impl std::fmt::Display for Permission {
