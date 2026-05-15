@@ -1,3 +1,4 @@
+use crate::EventNotification;
 use crate::lib::events::{
     ColibriClientEventData, ColibriServerEventData, NotificationEventData,
     NotificationEventMessage, TypingEventData,
@@ -6,8 +7,8 @@ use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::state::{join_vc, leave_vc, view_channel};
+use crate::lib::tap::CommsBridge;
 use crate::lib::tap::TapMessageRecord;
-use crate::{CommsBridge, EventNotification};
 use crate::{
     lib::{
         events::{ColibriClientEvent, ColibriServerEvent},
