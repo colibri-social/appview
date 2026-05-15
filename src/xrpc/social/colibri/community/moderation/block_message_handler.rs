@@ -1,32 +1,21 @@
-use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
+use crate::lib::colibri::ColibriModerationSubject;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
-use crate::lib::moderation::{self, ACTION_HIDE_MESSAGE};
+use crate::lib::moderation::{self, ACTION_HIDE_MESSAGE, WriteRecordFn, write_moderation_boxed};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::time::current_iso8601_utc;
-use crate::models::record_data;
 
 #[derive(Serialize, Debug)]
 pub struct BlockMessageResponse {
     pub message: String,
 }
-
-type WriteRecordFn = dyn Fn(
-        DatabaseConnection,
-        AtUri,
-        ColibriModeration,
-    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>
-    + Send
-    + Sync;
 
 async fn block_message_with(
     community_uri: String,
@@ -55,31 +44,25 @@ async fn block_message_with(
         verify_auth_fn,
         load_authz_fn,
         |ctx, db| async move {
-            let record = moderation::moderation_record(
+            moderation::issue_action(
+                write_record_fn,
+                db,
+                ctx.community,
                 ACTION_HIDE_MESSAGE,
                 ColibriModerationSubject {
                     did: None,
                     uri: Some(message_uri.clone()),
                 },
                 ctx.caller_did,
-                current_iso8601_utc(),
                 None,
-            );
-            write_record_fn(db, ctx.community, record).await?;
+            )
+            .await?;
             Ok(Json(BlockMessageResponse {
                 message: message_uri,
             }))
         },
     )
     .await
-}
-
-fn write_moderation_boxed(
-    db: DatabaseConnection,
-    community: AtUri,
-    record: ColibriModeration,
-) -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
-    Box::pin(async move { moderation::write_moderation_record(&db, &community, &record).await })
 }
 
 #[post("/xrpc/social.colibri.community.blockMessage?<community>&<message>&<auth>")]
@@ -105,9 +88,13 @@ pub async fn block_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::colibri::ColibriModeration;
     use crate::lib::community_authz::ActorAuthz;
     use crate::lib::test_fixtures::mock_db;
+    use crate::models::record_data;
+    use futures::future::BoxFuture;
     use rocket::tokio;
+    use sea_orm::DbErr;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]

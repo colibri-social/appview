@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use futures::future::BoxFuture;
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::lib::at_uri::AtUri;
@@ -7,7 +8,30 @@ use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
 use crate::lib::community_credentials::{self, CredentialsError};
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError};
+use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
+
+/// Trait-object alias for the moderation write seam.
+///
+/// Handlers take `&WriteRecordFn` so production wires
+/// [`write_moderation_boxed`] (which talks to the community's PDS) while
+/// tests inject a closure that captures the would-be record for assertion.
+pub type WriteRecordFn = dyn Fn(
+        DatabaseConnection,
+        AtUri,
+        ColibriModeration,
+    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>
+    + Send
+    + Sync;
+
+/// Production [`WriteRecordFn`] — forwards to [`write_moderation_record`].
+pub fn write_moderation_boxed(
+    db: DatabaseConnection,
+    community: AtUri,
+    record: ColibriModeration,
+) -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
+    Box::pin(async move { write_moderation_record(&db, &community, &record).await })
+}
 
 pub const MODERATION_NSID: &str = "social.colibri.moderation";
 
@@ -191,6 +215,27 @@ pub async fn is_user_banned(
 ) -> Result<bool, DbErr> {
     let banned = currently_banned_dids(db, community).await?;
     Ok(banned.iter().any(|b| b == did))
+}
+
+/// One-call entry point for issuing a moderation action. Builds the
+/// `social.colibri.moderation` payload (filling in `createdAt` with the
+/// current UTC clock), then hands it to `write_record_fn` for persistence.
+///
+/// This is the only function moderation handlers should call. Centralizing
+/// the build+write pair here means the on-protocol write path (PDS call,
+/// optimistic local insert, error mapping) lives in one place — handlers
+/// just describe the action they want issued.
+pub async fn issue_action(
+    write_record_fn: &WriteRecordFn,
+    db: DatabaseConnection,
+    community: AtUri,
+    action: &str,
+    subject: ColibriModerationSubject,
+    created_by: String,
+    reason: Option<String>,
+) -> Result<record_data::Model, DbErr> {
+    let record = moderation_record(action, subject, created_by, current_iso8601_utc(), reason);
+    write_record_fn(db, community, record).await
 }
 
 /// Convenience constructor for building a moderation record payload.

@@ -1,20 +1,19 @@
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
-use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
+use crate::lib::colibri::ColibriModerationSubject;
 use crate::lib::did_document::DidDocument;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
-use crate::lib::moderation::{self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN};
+use crate::lib::moderation::{
+    self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN, WriteRecordFn, write_moderation_boxed,
+};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::time::current_iso8601_utc;
-use crate::models::record_data;
 use crate::xrpc::com::atproto::identity::resolve_identity;
 
 #[derive(Serialize, Debug)]
@@ -38,13 +37,6 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
 
 type ResolveFn =
     dyn Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> + Send + Sync;
-type WriteRecordFn = dyn Fn(
-        DatabaseConnection,
-        AtUri,
-        ColibriModeration,
-    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>
-    + Send
-    + Sync;
 
 /// Common moderation handler entry point used by both blockUser and
 /// unblockUser. `action` toggles between writing a `ban` or `unban` record.
@@ -101,17 +93,19 @@ async fn moderate_user_with(
                 }
             }
 
-            let record = moderation::moderation_record(
+            moderation::issue_action(
+                write_record_fn,
+                db,
+                ctx.community,
                 action,
                 ColibriModerationSubject {
                     did: Some(target_did_for_body.clone()),
                     uri: None,
                 },
                 ctx.caller_did,
-                current_iso8601_utc(),
                 None,
-            );
-            write_record_fn(db, ctx.community, record).await?;
+            )
+            .await?;
 
             Ok(Json(BlockUserResponse {
                 did: target_did,
@@ -126,14 +120,6 @@ fn resolve_boxed(
     identifier: String,
 ) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> {
     Box::pin(async move { resolve_did_and_handle(&identifier).await })
-}
-
-fn write_moderation_boxed(
-    db: DatabaseConnection,
-    community: AtUri,
-    record: ColibriModeration,
-) -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
-    Box::pin(async move { moderation::write_moderation_record(&db, &community, &record).await })
 }
 
 #[post("/xrpc/social.colibri.community.blockUser?<community>&<identifier>&<auth>")]
@@ -193,9 +179,13 @@ fn _force_did_document_import(d: DidDocument) -> DidDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::at_uri::AtUri;
+    use crate::lib::colibri::ColibriModeration;
     use crate::lib::community_authz::ActorAuthz;
     use crate::lib::test_fixtures::{member, mock_db, role};
+    use crate::models::record_data;
     use rocket::tokio;
+    use sea_orm::DbErr;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
