@@ -26,7 +26,6 @@ pub struct TapMessageRecord {
     pub rev: String,
     pub collection: String,
     pub rkey: String,
-    #[allow(dead_code)]
     pub action: String,
     pub record: Option<Value>,
     #[allow(dead_code)]

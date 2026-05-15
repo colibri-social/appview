@@ -5,7 +5,6 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
 use crate::lib::colibri::ColibriModerationSubject;
-use crate::lib::did_document::DidDocument;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -168,12 +167,6 @@ pub async fn unblock_user(
         &write_moderation_boxed,
     )
     .await
-}
-
-// Silence: import is used inside async closures via traits.
-#[allow(dead_code)]
-fn _force_did_document_import(d: DidDocument) -> DidDocument {
-    d
 }
 
 #[cfg(test)]
