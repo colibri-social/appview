@@ -193,43 +193,14 @@ fn _force_did_document_import(d: DidDocument) -> DidDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::colibri::{ColibriMember, ColibriRole};
     use crate::lib::community_authz::ActorAuthz;
+    use crate::lib::test_fixtures::{member, mock_db, role};
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};
-
-    fn member(subject: &str, roles: Vec<&str>) -> ColibriMember {
-        ColibriMember {
-            record_type: None,
-            subject: subject.to_string(),
-            roles: roles.into_iter().map(String::from).collect(),
-            joined_at: String::from("2026-05-13T00:00:00Z"),
-            nickname: None,
-            from_membership: None,
-        }
-    }
-
-    fn role(position: i64, permissions: Vec<Permission>) -> ColibriRole {
-        ColibriRole {
-            record_type: None,
-            name: String::from("R"),
-            color: None,
-            permissions: permissions
-                .into_iter()
-                .map(|p| p.as_str().to_string())
-                .collect(),
-            position,
-            hoisted: None,
-            mentionable: None,
-            protected: None,
-            channel_overrides: vec![],
-        }
-    }
 
     #[tokio::test]
     async fn block_user_writes_ban_record_when_owner() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
@@ -287,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_user_rejects_when_caller_lacks_permission() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -321,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_user_rejects_when_hierarchy_blocks() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -342,13 +313,13 @@ mod tests {
                         Ok(ActorAuthz {
                             is_owner: false,
                             member: Some(member("did:plc:mod", vec!["r1"])),
-                            roles: vec![role(10, vec![Permission::MemberBan])],
+                            roles: vec![role("Moderator", 10, vec![Permission::MemberBan])],
                         })
                     } else {
                         Ok(ActorAuthz {
                             is_owner: false,
                             member: Some(member("did:plc:target", vec!["r2"])),
-                            roles: vec![role(20, vec![])],
+                            roles: vec![role("Target", 20, vec![])],
                         })
                     }
                 })
@@ -365,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn unblock_user_skips_hierarchy_check() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = moderate_user_with(
             ACTION_UNBAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -385,7 +356,7 @@ mod tests {
                     Ok(ActorAuthz {
                         is_owner: false,
                         member: Some(member("did:plc:mod", vec!["r1"])),
-                        roles: vec![role(5, vec![Permission::MemberUnban])],
+                        roles: vec![role("Moderator", 5, vec![Permission::MemberUnban])],
                     })
                 })
             },

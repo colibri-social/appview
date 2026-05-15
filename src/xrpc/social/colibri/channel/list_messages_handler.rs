@@ -298,8 +298,8 @@ pub async fn list_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn message_record(
         rkey: &str,
@@ -326,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn builds_message_list_from_page() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
 
         let result = list_messages_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
@@ -388,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn omits_cursor_when_page_is_not_full() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_messages_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             Some(10),
@@ -415,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_channel_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result =
             list_messages_with(String::from("not-a-uri"), None, None, db, &|_, _, _, _| {
                 Box::pin(async { panic!("should not assemble when uri is invalid") })

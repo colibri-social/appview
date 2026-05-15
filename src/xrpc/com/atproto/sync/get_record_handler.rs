@@ -58,6 +58,7 @@ pub async fn get_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
@@ -87,7 +88,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_record_returns_not_found() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
 
         let result = get_record_with_db(&db, "did:plc:none", "col", "rkey").await;
 

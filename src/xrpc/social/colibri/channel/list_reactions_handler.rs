@@ -56,12 +56,12 @@ pub async fn list_reactions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn returns_reactions_from_summary_fn() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_reactions_with(
             String::from("at://did:plc:author/social.colibri.message/msg-1"),
             db,
@@ -89,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_message_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_reactions_with(String::from("invalid"), db, |_, _| {
             Box::pin(async { panic!("should not call when uri is invalid") })
         })
@@ -104,7 +104,7 @@ mod tests {
 
     #[tokio::test]
     async fn propagates_db_error_as_upstream_error() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_reactions_with(
             String::from("at://did:plc:author/social.colibri.message/msg-1"),
             db,

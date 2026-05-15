@@ -118,12 +118,12 @@ pub async fn list_categories(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn maps_records_to_category_response() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_categories_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
@@ -163,7 +163,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_categories_with(String::from("not-a-uri"), db, &|_, _, _| {
             Box::pin(async { panic!("should not fetch when uri is invalid") })
         })
@@ -178,7 +178,7 @@ mod tests {
 
     #[tokio::test]
     async fn skips_records_with_invalid_payload() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_categories_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,

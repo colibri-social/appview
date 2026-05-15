@@ -144,13 +144,13 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
     use rocket::tokio::sync::mpsc;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn sends_ack_for_non_record_messages() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let (mut tx, mut rx) = mpsc::channel::<String>(1);
 
         ack_tap_msg(

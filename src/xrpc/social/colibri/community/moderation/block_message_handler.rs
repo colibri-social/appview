@@ -106,13 +106,13 @@ pub async fn block_message(
 mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn block_message_writes_hide_record_when_authorized() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
@@ -166,7 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_message_rejects_invalid_message_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = block_message_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("not-a-uri"),
@@ -187,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_message_rejects_when_caller_lacks_permission() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = block_message_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),

@@ -75,13 +75,13 @@ pub async fn update_seen(
 mod tests {
     use super::*;
     use crate::lib::service_auth::ServiceAuthError;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn marks_seen_with_default_cutoff() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
@@ -116,7 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn uses_provided_seen_at_when_given() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
@@ -148,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_auth_error_when_token_is_invalid() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = update_seen_with(
             String::from("token"),
             None,

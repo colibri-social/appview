@@ -180,20 +180,8 @@ where
 mod tests {
     use super::*;
     use crate::lib::permissions::Permission;
+    use crate::lib::test_fixtures::{empty_authz, mock_db, owner_authz};
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
-
-    fn mock_db() -> DatabaseConnection {
-        MockDatabase::new(DatabaseBackend::Postgres).into_connection()
-    }
-
-    fn empty_authz(is_owner: bool) -> ActorAuthz {
-        ActorAuthz {
-            is_owner,
-            member: None,
-            roles: vec![],
-        }
-    }
 
     #[tokio::test]
     async fn with_community_authz_runs_body_when_owner_and_no_permission_required() {
@@ -205,7 +193,7 @@ mod tests {
             None,
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            &|_, _, _| Box::pin(async { Ok(empty_authz(true)) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             |ctx, _db| async move {
                 assert_eq!(ctx.caller_did, "did:plc:owner");
                 assert_eq!(ctx.community.authority, "did:plc:owner");
@@ -247,7 +235,7 @@ mod tests {
             Some(Permission::MemberBan),
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
-            &|_, _, _| Box::pin(async { Ok(empty_authz(false)) }),
+            &|_, _, _| Box::pin(async { Ok(empty_authz()) }),
             |_, _| async { panic!("should not run body when permission missing") },
         )
         .await;

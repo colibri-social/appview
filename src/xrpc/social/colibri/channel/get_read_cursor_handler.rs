@@ -136,8 +136,8 @@ pub async fn get_read_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn cursor_record(rkey: &str, cursor: &str) -> record_data::Model {
         record_data::Model {
@@ -154,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_cursor_from_stored_record() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_read_cursor_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             String::from("token"),
@@ -185,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_channel_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_read_cursor_with(
             String::from("not-a-uri"),
             String::from("token"),
@@ -204,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_auth_error_when_token_is_invalid() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_read_cursor_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             String::from("token"),
@@ -220,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_not_found_when_no_cursor_exists() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_read_cursor_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             String::from("token"),

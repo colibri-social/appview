@@ -121,8 +121,8 @@ pub async fn list_notifications(
 mod tests {
     use super::*;
     use crate::lib::service_auth::ServiceAuthError;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn row(id: i64, kind: &str) -> notifications_model::Model {
         notifications_model::Model {
@@ -150,7 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_rows_with_hydrated_messages_and_cursor_when_page_is_full() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_notifications_with(
             String::from("token"),
             Some(2),
@@ -184,7 +184,7 @@ mod tests {
 
     #[tokio::test]
     async fn omits_message_when_hydration_returns_no_match() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_notifications_with(
             String::from("token"),
             Some(10),
@@ -203,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_auth_error_when_token_is_invalid() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_notifications_with(
             String::from("token"),
             None,

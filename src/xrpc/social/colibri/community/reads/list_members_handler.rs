@@ -226,8 +226,8 @@ pub async fn list_members(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn profile_for(name: &str) -> ActorProfile {
         ActorProfile {
@@ -255,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn assembles_members_from_aggregate() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_members_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
@@ -322,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_members_with(String::from("not-a-uri"), db, |_, _| {
             Box::pin(async { panic!("should not fetch when uri is invalid") })
         })

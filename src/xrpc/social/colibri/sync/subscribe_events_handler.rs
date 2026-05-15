@@ -370,14 +370,11 @@ pub async fn subscribe_events(
 mod tests {
     use super::{parse_client_event, serialize_typing_broadcast};
     use crate::EventNotification;
+    use crate::lib::test_fixtures::mock_db;
     use crate::models::user_states;
     use rocket::tokio;
     use rocket::tokio::sync::broadcast;
-    use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
-
-    fn mock_db() -> DatabaseConnection {
-        MockDatabase::new(DatabaseBackend::Postgres).into_connection()
-    }
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn creates_ack_for_heartbeat_event() {

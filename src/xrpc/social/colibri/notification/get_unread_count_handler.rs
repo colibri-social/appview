@@ -58,12 +58,12 @@ pub async fn get_unread_count(
 mod tests {
     use super::*;
     use crate::lib::service_auth::ServiceAuthError;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn returns_count_from_helper() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_unread_count_with(
             String::from("token"),
             db,
@@ -81,7 +81,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_auth_error_when_token_is_invalid() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_unread_count_with(
             String::from("token"),
             db,

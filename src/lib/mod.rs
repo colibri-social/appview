@@ -22,5 +22,7 @@ pub mod sentry;
 pub mod service_auth;
 pub mod state;
 pub mod tap;
+#[cfg(test)]
+pub mod test_fixtures;
 pub mod time;
 pub mod validate_state;

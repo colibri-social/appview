@@ -374,9 +374,8 @@ pub async fn delete_invitation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::community_authz::ActorAuthz;
+    use crate::lib::test_fixtures::{empty_authz, mock_db, owner_authz};
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};
 
     fn invite(code: &str, community: &str, by: &str, active: bool) -> Invitation {
@@ -389,25 +388,9 @@ mod tests {
         }
     }
 
-    fn owner_authz() -> ActorAuthz {
-        ActorAuthz {
-            is_owner: true,
-            member: None,
-            roles: vec![],
-        }
-    }
-
-    fn empty_authz() -> ActorAuthz {
-        ActorAuthz {
-            is_owner: false,
-            member: None,
-            roles: vec![],
-        }
-    }
-
     #[tokio::test]
     async fn create_invitation_returns_inserted_view() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
@@ -447,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_invitation_rejects_without_permission() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = create_invitation_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
@@ -497,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_invitations_returns_all_for_community() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_invitations_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
@@ -534,7 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_invitation_deactivates_when_authorized() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let calls_clone = calls.clone();
 
@@ -574,7 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_invitation_rejects_when_community_mismatches() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = delete_invitation_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("CODE"),

@@ -157,8 +157,8 @@ pub async fn get_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn identity_json() -> Json<DidDocument> {
         Json(DidDocument {
@@ -172,7 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn builds_actor_data_from_resolved_identity_and_records() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_data_with(
             String::from("alice.test"),
             db,
