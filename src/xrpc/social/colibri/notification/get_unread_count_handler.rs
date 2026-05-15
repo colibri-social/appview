@@ -4,46 +4,35 @@ use rocket::{State, get};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
+use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::notifications;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
+use crate::lib::responses::ErrorResponse;
 
 #[derive(Serialize, Debug)]
 pub struct UnreadCountResponse {
     pub count: u64,
 }
 
-async fn get_unread_count_with<V, C>(
+type CountFn =
+    dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>> + Send + Sync;
+
+async fn get_unread_count_with(
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    count_fn: C,
-) -> Result<Json<UnreadCountResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    C: Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>>,
-{
-    let did = verify_auth_fn(
+    verify_auth_fn: &VerifyAuthFn,
+    count_fn: &CountFn,
+) -> Result<Json<UnreadCountResponse>, ErrorResponse> {
+    with_authenticated(
         auth,
-        String::from("social.colibri.notification.getUnreadCount"),
+        "social.colibri.notification.getUnreadCount",
+        db,
+        verify_auth_fn,
+        |caller_did, db| async move {
+            let count = count_fn(db, caller_did).await?;
+            Ok(Json(UnreadCountResponse { count }))
+        },
     )
     .await
-    .map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: e.to_string(),
-        }),
-    })?;
-
-    let count = count_fn(db, did).await?;
-    Ok(Json(UnreadCountResponse { count }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
 }
 
 fn count_boxed(db: DatabaseConnection, did: String) -> BoxFuture<'static, Result<u64, DbErr>> {
@@ -59,8 +48,8 @@ pub async fn get_unread_count(
     get_unread_count_with(
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        count_boxed,
+        &verify_auth_boxed,
+        &count_boxed,
     )
     .await
 }
@@ -68,17 +57,18 @@ pub async fn get_unread_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::service_auth::ServiceAuthError;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn returns_count_from_helper() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_unread_count_with(
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            |_, did| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, did| {
                 assert_eq!(did, "did:plc:me");
                 Box::pin(async { Ok(7) })
             },
@@ -91,12 +81,12 @@ mod tests {
 
     #[tokio::test]
     async fn returns_auth_error_when_token_is_invalid() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_unread_count_with(
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _| Box::pin(async { panic!("should not count when auth fails") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _| Box::pin(async { panic!("should not count when auth fails") }),
         )
         .await;
 

@@ -1,3 +1,4 @@
+use crate::EventNotification;
 use crate::lib::events::{
     ColibriClientEventData, ColibriServerEventData, NotificationEventData,
     NotificationEventMessage, TypingEventData,
@@ -6,8 +7,8 @@ use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::state::{join_vc, leave_vc, view_channel};
+use crate::lib::tap::CommsBridge;
 use crate::lib::tap::TapMessageRecord;
-use crate::{CommsBridge, EventNotification};
 use crate::{
     lib::{
         events::{ColibriClientEvent, ColibriServerEvent},
@@ -370,14 +371,11 @@ pub async fn subscribe_events(
 mod tests {
     use super::{parse_client_event, serialize_typing_broadcast};
     use crate::EventNotification;
+    use crate::lib::test_fixtures::mock_db;
     use crate::models::user_states;
     use rocket::tokio;
     use rocket::tokio::sync::broadcast;
-    use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
-
-    fn mock_db() -> DatabaseConnection {
-        MockDatabase::new(DatabaseBackend::Postgres).into_connection()
-    }
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn creates_ack_for_heartbeat_event() {

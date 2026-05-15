@@ -43,22 +43,26 @@ pub struct Actor {
     pub data: ActorData,
 }
 
-type ResolveIdentityFn = fn(String) -> BoxFuture<'static, Result<Json<DidDocument>, ErrorResponse>>;
-type GetRecordFn = fn(
-    String,
-    String,
-    String,
-    DatabaseConnection,
-) -> BoxFuture<'static, Result<Value, ErrorResponse>>;
-type GetStateFn =
-    fn(String, DatabaseConnection) -> BoxFuture<'static, Result<UserState, ErrorResponse>>;
+type ResolveIdentityFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<Json<DidDocument>, ErrorResponse>> + Send + Sync;
+type GetRecordFn = dyn Fn(
+        String,
+        String,
+        String,
+        DatabaseConnection,
+    ) -> BoxFuture<'static, Result<Value, ErrorResponse>>
+    + Send
+    + Sync;
+type GetStateFn = dyn Fn(String, DatabaseConnection) -> BoxFuture<'static, Result<UserState, ErrorResponse>>
+    + Send
+    + Sync;
 
 async fn get_data_with(
     identifier: String,
     db: DatabaseConnection,
-    resolve_identity_fn: ResolveIdentityFn,
-    get_record_fn: GetRecordFn,
-    get_state_fn: GetStateFn,
+    resolve_identity_fn: &ResolveIdentityFn,
+    get_record_fn: &GetRecordFn,
+    get_state_fn: &GetStateFn,
 ) -> Result<Json<Actor>, ErrorResponse> {
     let identity = resolve_identity_fn(identifier).await?;
     let handle = identity
@@ -143,9 +147,9 @@ pub async fn get_data(
     get_data_with(
         identifier.to_string(),
         db.inner().clone(),
-        resolve_identity_boxed,
-        get_record_boxed,
-        get_state_boxed,
+        &resolve_identity_boxed,
+        &get_record_boxed,
+        &get_state_boxed,
     )
     .await
 }
@@ -153,8 +157,8 @@ pub async fn get_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn identity_json() -> Json<DidDocument> {
         Json(DidDocument {
@@ -168,12 +172,12 @@ mod tests {
 
     #[tokio::test]
     async fn builds_actor_data_from_resolved_identity_and_records() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = get_data_with(
             String::from("alice.test"),
             db,
-            |_| Box::pin(async { Ok(identity_json()) }),
-            |_did, nsid, _rkey, _| {
+            &|_| Box::pin(async { Ok(identity_json()) }),
+            &|_did, nsid, _rkey, _| {
                 Box::pin(async move {
                     if nsid == "app.bsky.actor.profile" {
                         Ok(serde_json::json!({
@@ -190,7 +194,7 @@ mod tests {
                     }
                 })
             },
-            |_did, _| Box::pin(async { Ok(UserState::Away) }),
+            &|_did, _| Box::pin(async { Ok(UserState::Away) }),
         )
         .await
         .unwrap();

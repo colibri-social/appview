@@ -168,12 +168,12 @@ pub async fn list_communities(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn maps_community_models_to_response() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
 
         let res = list_communities_with(
             String::from("token"),
@@ -212,7 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_auth_error_when_token_is_invalid() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_communities_with(
             String::from("token"),
             db,

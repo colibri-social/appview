@@ -1,19 +1,18 @@
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
-use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
-use crate::lib::community_authz::{self, ActorAuthz};
-use crate::lib::did_document::DidDocument;
-use crate::lib::moderation::{self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN};
+use crate::lib::colibri::ColibriModerationSubject;
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+};
+use crate::lib::moderation::{
+    self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN, WriteRecordFn, write_moderation_boxed,
+};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
-use crate::lib::time::current_iso8601_utc;
-use crate::models::record_data;
 use crate::xrpc::com::atproto::identity::resolve_identity;
 
 #[derive(Serialize, Debug)]
@@ -35,14 +34,18 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
     Ok((document.id.clone(), handle))
 }
 
+type ResolveFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> + Send + Sync;
+
 /// Common moderation handler entry point used by both blockUser and
-/// unblockUser. `block` toggles between writing a `ban` or `unban` record.
+/// unblockUser. `action` toggles between writing a `ban` or `unban` record.
 ///
-/// Each parameter is its own dependency injection seam (verify, resolve,
-/// load-authz, write); a future combinator (see refactor plan A) will
-/// collapse this surface.
+/// The shared authz prelude (parse URI → verify auth → load authz → check
+/// permission) goes through [`with_community_authz`]. The hierarchy guard
+/// for `ban`/`kick` then runs inside the body once the caller's own authz
+/// is in hand.
 #[allow(clippy::too_many_arguments)]
-async fn moderate_user_with<R, W, V>(
+async fn moderate_user_with(
     action: &'static str,
     community_uri: String,
     identifier: String,
@@ -50,112 +53,72 @@ async fn moderate_user_with<R, W, V>(
     db: DatabaseConnection,
     lxm: &'static str,
     permission: Permission,
-    verify_auth_fn: V,
-    resolve_fn: R,
-    load_authz_fn: W,
-    write_record_fn: impl FnOnce(
-        DatabaseConnection,
-        AtUri,
-        ColibriModeration,
-    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>,
-) -> Result<Json<BlockUserResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    R: Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>>,
-    W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-{
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
-
-    let caller_did = verify_auth_fn(auth, lxm.to_string())
-        .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
-
+    verify_auth_fn: &VerifyAuthFn,
+    resolve_fn: &ResolveFn,
+    load_authz_fn: &LoadAuthzFn,
+    write_record_fn: &WriteRecordFn,
+) -> Result<Json<BlockUserResponse>, ErrorResponse> {
     let (target_did, target_handle) = resolve_fn(identifier).await?;
+    let target_did_for_body = target_did.clone();
 
-    let caller_authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
-    if !caller_authz.has(permission, None) {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("Forbidden"),
-                message: format!("Missing permission: {permission}"),
-            }),
-        });
-    }
+    with_community_authz(
+        auth,
+        lxm,
+        community_uri,
+        Some(permission),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        move |ctx, db| async move {
+            // Hierarchy check for any action that targets a present member
+            // (ban, kick). Unban is exempt because the target is, by
+            // definition, not currently in the community.
+            if action == ACTION_BAN || action == ACTION_KICK {
+                let target_authz = load_authz_fn(
+                    db.clone(),
+                    ctx.community_uri.clone(),
+                    target_did_for_body.clone(),
+                )
+                .await?;
+                if !ctx.authz.outranks(&target_authz) {
+                    return Err(ErrorResponse {
+                        body: Json(ErrorBody {
+                            error: String::from("Forbidden"),
+                            message: String::from(
+                                "Cannot act on a member with an equal or higher role position.",
+                            ),
+                        }),
+                    });
+                }
+            }
 
-    // Hierarchy check for any action that targets a present member (ban,
-    // kick). Unban is exempt because the target is, by definition, not
-    // currently in the community.
-    if action == ACTION_BAN || action == ACTION_KICK {
-        let target_authz =
-            load_authz_fn(db.clone(), community_uri.clone(), target_did.clone()).await?;
-        if !caller_authz.outranks(&target_authz) {
-            return Err(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("Forbidden"),
-                    message: String::from(
-                        "Cannot act on a member with an equal or higher role position.",
-                    ),
-                }),
-            });
-        }
-    }
+            moderation::issue_action(
+                write_record_fn,
+                db,
+                ctx.community,
+                action,
+                ColibriModerationSubject {
+                    did: Some(target_did_for_body.clone()),
+                    uri: None,
+                },
+                ctx.caller_did,
+                None,
+            )
+            .await?;
 
-    let record = moderation::moderation_record(
-        action,
-        ColibriModerationSubject {
-            did: Some(target_did.clone()),
-            uri: None,
+            Ok(Json(BlockUserResponse {
+                did: target_did,
+                handle: target_handle,
+            }))
         },
-        caller_did,
-        current_iso8601_utc(),
-        None,
-    );
-
-    write_record_fn(db, community, record).await?;
-
-    Ok(Json(BlockUserResponse {
-        did: target_did,
-        handle: target_handle,
-    }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
+    )
+    .await
 }
 
 fn resolve_boxed(
     identifier: String,
 ) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> {
     Box::pin(async move { resolve_did_and_handle(&identifier).await })
-}
-
-fn load_authz_boxed(
-    db: DatabaseConnection,
-    community_uri: String,
-    did: String,
-) -> BoxFuture<'static, Result<ActorAuthz, DbErr>> {
-    Box::pin(async move { community_authz::load_actor_authz(&db, &community_uri, &did).await })
-}
-
-fn write_moderation_boxed(
-    db: DatabaseConnection,
-    community: AtUri,
-    record: ColibriModeration,
-) -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
-    Box::pin(async move { moderation::write_moderation_record(&db, &community, &record).await })
 }
 
 #[post("/xrpc/social.colibri.community.blockUser?<community>&<identifier>&<auth>")]
@@ -174,10 +137,10 @@ pub async fn block_user(
         db.inner().clone(),
         "social.colibri.community.blockUser",
         Permission::MemberBan,
-        verify_auth_boxed,
-        resolve_boxed,
-        load_authz_boxed,
-        write_moderation_boxed,
+        &verify_auth_boxed,
+        &resolve_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
     )
     .await
 }
@@ -198,62 +161,48 @@ pub async fn unblock_user(
         db.inner().clone(),
         "social.colibri.community.unblockUser",
         Permission::MemberUnban,
-        verify_auth_boxed,
-        resolve_boxed,
-        load_authz_boxed,
-        write_moderation_boxed,
+        &verify_auth_boxed,
+        &resolve_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
     )
     .await
-}
-
-// Silence: import is used inside async closures via traits.
-#[allow(dead_code)]
-fn _force_did_document_import(d: DidDocument) -> DidDocument {
-    d
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::colibri::{ColibriMember, ColibriRole};
+    use crate::lib::at_uri::AtUri;
+    use crate::lib::colibri::ColibriModeration;
+    use crate::lib::community_authz::ActorAuthz;
+    use crate::lib::test_fixtures::{member, mock_db, role};
+    use crate::models::record_data;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::DbErr;
     use std::sync::{Arc, Mutex};
-
-    fn member(subject: &str, roles: Vec<&str>) -> ColibriMember {
-        ColibriMember {
-            record_type: None,
-            subject: subject.to_string(),
-            roles: roles.into_iter().map(String::from).collect(),
-            joined_at: String::from("2026-05-13T00:00:00Z"),
-            nickname: None,
-            from_membership: None,
-        }
-    }
-
-    fn role(position: i64, permissions: Vec<Permission>) -> ColibriRole {
-        ColibriRole {
-            record_type: None,
-            name: String::from("R"),
-            color: None,
-            permissions: permissions
-                .into_iter()
-                .map(|p| p.as_str().to_string())
-                .collect(),
-            position,
-            hoisted: None,
-            mentionable: None,
-            protected: None,
-            channel_overrides: vec![],
-        }
-    }
 
     #[tokio::test]
     async fn block_user_writes_ban_record_when_owner() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
+        let write_record = move |_: DatabaseConnection,
+                                 _: AtUri,
+                                 record: ColibriModeration|
+              -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(record);
+                Ok(record_data::Model {
+                    id: 1,
+                    did: String::from("did:plc:owner"),
+                    nsid: String::from("social.colibri.moderation"),
+                    rkey: String::from("mod-1"),
+                    data: serde_json::json!({}),
+                })
+            })
+        };
         let result = moderate_user_with(
             ACTION_BAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -262,13 +211,13 @@ mod tests {
             db,
             "social.colibri.community.blockUser",
             Permission::MemberBan,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, did| {
+            &|_, _, did| {
                 Box::pin(async move {
                     Ok(ActorAuthz {
                         is_owner: did == "did:plc:owner",
@@ -277,19 +226,7 @@ mod tests {
                     })
                 })
             },
-            move |_, _, record| {
-                let captured = captured_clone.clone();
-                Box::pin(async move {
-                    *captured.lock().unwrap() = Some(record);
-                    Ok(record_data::Model {
-                        id: 1,
-                        did: String::from("did:plc:owner"),
-                        nsid: String::from("social.colibri.moderation"),
-                        rkey: String::from("mod-1"),
-                        data: serde_json::json!({}),
-                    })
-                })
-            },
+            &write_record,
         )
         .await
         .unwrap();
@@ -304,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_user_rejects_when_caller_lacks_permission() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -313,13 +250,13 @@ mod tests {
             db,
             "social.colibri.community.blockUser",
             Permission::MemberBan,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
                         is_owner: false,
@@ -328,7 +265,7 @@ mod tests {
                     })
                 })
             },
-            |_, _, _| Box::pin(async { panic!("should not write when permission missing") }),
+            &|_, _, _| Box::pin(async { panic!("should not write when permission missing") }),
         )
         .await;
 
@@ -338,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn block_user_rejects_when_hierarchy_blocks() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -347,30 +284,30 @@ mod tests {
             db,
             "social.colibri.community.blockUser",
             Permission::MemberBan,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, did| {
+            &|_, _, did| {
                 Box::pin(async move {
                     if did == "did:plc:mod" {
                         Ok(ActorAuthz {
                             is_owner: false,
                             member: Some(member("did:plc:mod", vec!["r1"])),
-                            roles: vec![role(10, vec![Permission::MemberBan])],
+                            roles: vec![role("Moderator", 10, vec![Permission::MemberBan])],
                         })
                     } else {
                         Ok(ActorAuthz {
                             is_owner: false,
                             member: Some(member("did:plc:target", vec!["r2"])),
-                            roles: vec![role(20, vec![])],
+                            roles: vec![role("Target", 20, vec![])],
                         })
                     }
                 })
             },
-            |_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
+            &|_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
         )
         .await;
 
@@ -382,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn unblock_user_skips_hierarchy_check() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = moderate_user_with(
             ACTION_UNBAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -391,22 +328,22 @@ mod tests {
             db,
             "social.colibri.community.unblockUser",
             Permission::MemberUnban,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
                         is_owner: false,
                         member: Some(member("did:plc:mod", vec!["r1"])),
-                        roles: vec![role(5, vec![Permission::MemberUnban])],
+                        roles: vec![role("Moderator", 5, vec![Permission::MemberUnban])],
                     })
                 })
             },
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(record_data::Model {
                         id: 1,

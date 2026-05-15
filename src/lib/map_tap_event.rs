@@ -469,15 +469,11 @@ pub async fn map_tap_event(
 
 #[cfg(test)]
 mod tests {
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
 
     use super::*;
-
-    fn mock_db() -> DatabaseConnection {
-        MockDatabase::new(DatabaseBackend::Postgres).into_connection()
-    }
 
     fn record(collection: &str, action: &str, value: serde_json::Value) -> TapMessageRecord {
         TapMessageRecord {

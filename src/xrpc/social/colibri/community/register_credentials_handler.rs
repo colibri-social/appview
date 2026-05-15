@@ -28,22 +28,25 @@ pub struct RegisterCredentialsResponse {
     pub source: String,
 }
 
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type CreateSessionFn = dyn Fn(String, String, String) -> BoxFuture<'static, Result<PdsSession, PdsError>>
+    + Send
+    + Sync;
+type UpsertFn =
+    dyn Fn(String, String, String, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync;
+
 #[allow(clippy::too_many_arguments)]
-async fn register_with<V, S, U>(
+async fn register_with(
     auth: String,
     community_did: String,
     pds_endpoint: String,
     identifier: String,
     password: String,
-    verify_auth_fn: V,
-    create_session_fn: S,
-    upsert_fn: U,
-) -> Result<Json<RegisterCredentialsResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    S: Fn(String, String, String) -> BoxFuture<'static, Result<PdsSession, PdsError>>,
-    U: Fn(String, String, String, String) -> BoxFuture<'static, Result<(), String>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    create_session_fn: &CreateSessionFn,
+    upsert_fn: &UpsertFn,
+) -> Result<Json<RegisterCredentialsResponse>, ErrorResponse> {
     // Service auth proves who is *submitting* the credentials. We don't
     // require the caller's DID to match the community DID — the AppView, not
     // the caller, will be using the stored credentials going forward.
@@ -166,9 +169,9 @@ pub async fn register_credentials(
         pds.to_string(),
         identifier.to_string(),
         password.to_string(),
-        verify_auth_boxed,
-        create_session_boxed,
-        upsert,
+        &verify_auth_boxed,
+        &create_session_boxed,
+        &upsert,
     )
     .await
 }
@@ -193,21 +196,26 @@ mod tests {
             Arc::new(Mutex::new(None));
         let cap = captured.clone();
 
+        let upsert = move |did: String,
+                           pds: String,
+                           identifier: String,
+                           password: String|
+              -> BoxFuture<'static, Result<(), String>> {
+            let cap = cap.clone();
+            Box::pin(async move {
+                *cap.lock().unwrap() = Some((did, pds, identifier, password));
+                Ok(())
+            })
+        };
         let result = register_with(
             String::from("token"),
             String::from("did:plc:community"),
             String::from("https://pds.example"),
             String::from("community.example"),
             String::from("app-password"),
-            |_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
-            |_, _, _| Box::pin(async { Ok(session_for("did:plc:community")) }),
-            move |did, pds, identifier, password| {
-                let cap = cap.clone();
-                Box::pin(async move {
-                    *cap.lock().unwrap() = Some((did, pds, identifier, password));
-                    Ok(())
-                })
-            },
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, _| Box::pin(async { Ok(session_for("did:plc:community")) }),
+            &upsert,
         )
         .await
         .unwrap();
@@ -227,9 +235,9 @@ mod tests {
             String::from("https://pds.example"),
             String::from("community.example"),
             String::from("app-password"),
-            |_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
-            |_, _, _| Box::pin(async { Ok(session_for("did:plc:imposter")) }),
-            |_, _, _, _| Box::pin(async { panic!("should not persist on did mismatch") }),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, _| Box::pin(async { Ok(session_for("did:plc:imposter")) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not persist on did mismatch") }),
         )
         .await;
 
@@ -247,8 +255,8 @@ mod tests {
             String::from("https://pds.example"),
             String::from("community.example"),
             String::from("app-password"),
-            |_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
-            |_, _, _| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, _| {
                 Box::pin(async {
                     Err(PdsError::BadStatus {
                         status: 401,
@@ -256,7 +264,7 @@ mod tests {
                     })
                 })
             },
-            |_, _, _, _| Box::pin(async { panic!("should not persist on session failure") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not persist on session failure") }),
         )
         .await;
 
@@ -274,9 +282,9 @@ mod tests {
             String::from("https://pds.example"),
             String::from("community.example"),
             String::from("app-password"),
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _, _| Box::pin(async { panic!("should not call") }),
-            |_, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not call") }),
         )
         .await;
 

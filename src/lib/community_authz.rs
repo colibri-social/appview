@@ -145,52 +145,7 @@ pub async fn load_actor_authz(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::colibri::{ColibriMember, ColibriRole, ColibriRoleChannelOverride};
-
-    fn role(name: &str, position: i64, permissions: Vec<Permission>) -> ColibriRole {
-        ColibriRole {
-            record_type: None,
-            name: name.to_string(),
-            color: None,
-            permissions: permissions
-                .into_iter()
-                .map(|p| p.as_str().to_string())
-                .collect(),
-            position,
-            hoisted: None,
-            mentionable: None,
-            protected: None,
-            channel_overrides: vec![],
-        }
-    }
-
-    fn role_with_override(
-        name: &str,
-        position: i64,
-        permissions: Vec<Permission>,
-        channel: &str,
-        allow: Vec<Permission>,
-        deny: Vec<Permission>,
-    ) -> ColibriRole {
-        let mut r = role(name, position, permissions);
-        r.channel_overrides.push(ColibriRoleChannelOverride {
-            channel: channel.to_string(),
-            allow: allow.into_iter().map(|p| p.as_str().to_string()).collect(),
-            deny: deny.into_iter().map(|p| p.as_str().to_string()).collect(),
-        });
-        r
-    }
-
-    fn member(subject: &str, roles: Vec<&str>) -> ColibriMember {
-        ColibriMember {
-            record_type: None,
-            subject: subject.to_string(),
-            roles: roles.into_iter().map(String::from).collect(),
-            joined_at: String::from("2026-05-13T00:00:00Z"),
-            nickname: None,
-            from_membership: None,
-        }
-    }
+    use crate::lib::test_fixtures::{member, role, role_with_override};
 
     #[test]
     fn owner_has_every_permission() {

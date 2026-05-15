@@ -7,13 +7,15 @@ use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::xrpc::com::atproto::identity::resolve_handle_handler::DidResponse;
 use crate::xrpc::com::atproto::identity::{resolve_did, resolve_handle};
 
-type ResolveDidFn = fn(String) -> BoxFuture<'static, Result<Json<DidDocument>, ErrorResponse>>;
-type ResolveHandleFn = fn(String) -> BoxFuture<'static, Result<Json<DidResponse>, ErrorResponse>>;
+type ResolveDidFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<Json<DidDocument>, ErrorResponse>> + Send + Sync;
+type ResolveHandleFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<Json<DidResponse>, ErrorResponse>> + Send + Sync;
 
 async fn resolve_identity_with(
     identity: String,
-    resolve_did_fn: ResolveDidFn,
-    resolve_handle_fn: ResolveHandleFn,
+    resolve_did_fn: &ResolveDidFn,
+    resolve_handle_fn: &ResolveHandleFn,
 ) -> Result<Json<DidDocument>, ErrorResponse> {
     if identity.starts_with("did:") {
         return resolve_did_fn(identity).await;
@@ -50,8 +52,8 @@ fn resolve_handle_boxed(
 pub async fn resolve_identity(identity: &str) -> Result<Json<DidDocument>, ErrorResponse> {
     resolve_identity_with(
         identity.to_string(),
-        resolve_did_boxed,
-        resolve_handle_boxed,
+        &resolve_did_boxed,
+        &resolve_handle_boxed,
     )
     .await
 }
@@ -75,8 +77,8 @@ mod tests {
     async fn resolves_direct_did() {
         let result = resolve_identity_with(
             String::from("did:plc:abc"),
-            |_| Box::pin(async { Ok(Json(sample_did_doc("did:plc:abc"))) }),
-            |_| Box::pin(async { panic!("should not resolve handle") }),
+            &|_| Box::pin(async { Ok(Json(sample_did_doc("did:plc:abc"))) }),
+            &|_| Box::pin(async { panic!("should not resolve handle") }),
         )
         .await
         .unwrap();
@@ -88,8 +90,8 @@ mod tests {
     async fn resolves_handle_then_did() {
         let result = resolve_identity_with(
             String::from("alice.test"),
-            |did| Box::pin(async move { Ok(Json(sample_did_doc(&did))) }),
-            |_| {
+            &|did| Box::pin(async move { Ok(Json(sample_did_doc(&did))) }),
+            &|_| {
                 Box::pin(async {
                     Ok(Json(DidResponse {
                         did: String::from("did:plc:from-handle"),
@@ -107,8 +109,8 @@ mod tests {
     async fn returns_upstream_error_when_handle_resolution_fails() {
         let result = resolve_identity_with(
             String::from("alice.test"),
-            |_| Box::pin(async { panic!("should not resolve did") }),
-            |_| {
+            &|_| Box::pin(async { panic!("should not resolve did") }),
+            &|_| {
                 Box::pin(async {
                     Err(ErrorResponse {
                         body: Json(ErrorBody {

@@ -2,13 +2,11 @@
 
 extern crate pretty_env_logger;
 
-use crate::lib::colibri::ColibriMessage;
 use crate::lib::crypto;
 use crate::lib::db::init_db;
-use crate::lib::notifications::{IndexedNotification, index_message_notifications};
+use crate::lib::notifications::IndexedNotification;
 use crate::lib::sentry::init_sentry;
-use crate::lib::tap::{self, TapMessage, TapMessageRecord, TapStream, ack_tap_msg};
-use futures::{SinkExt, StreamExt};
+use crate::lib::tap::{self, CommsBridge, TapMessageRecord, TapStream, run_connection};
 use migration::{Migrator, MigratorTrait};
 use rocket::fairing::AdHoc;
 use rocket::http::Method;
@@ -16,8 +14,6 @@ use rocket::tokio::sync::{broadcast, mpsc};
 use rocket::{get, launch, routes, tokio};
 use rocket_cors::{AllowedOrigins, CorsOptions};
 use sea_orm::DatabaseConnection;
-use serde_json::Value;
-use tokio_tungstenite::tungstenite::Message as TungMessage;
 
 mod lib;
 #[allow(dead_code)]
@@ -39,86 +35,13 @@ fn require_env_var(name: &str) {
     }
 }
 
-struct CommsBridge {
-    #[allow(dead_code)]
-    channel: mpsc::Sender<String>,
-    broadcast: broadcast::Sender<TapMessageRecord>,
-    notifications: broadcast::Sender<IndexedNotification>,
-}
-
+/// Client-to-client broadcast payload — used by the WS subscriber pipeline
+/// for events the AppView generates internally (e.g. typing presence) and
+/// distributes between connected clients.
 #[derive(Clone)]
 pub struct EventNotification {
     pub event_type: String,
     pub data: Vec<String>,
-}
-
-async fn handle_tap_connection(
-    db: DatabaseConnection,
-    mut socket: TapStream,
-    mut rx_outbound: mpsc::Receiver<String>,
-    tx_inbound: broadcast::Sender<TapMessageRecord>,
-    mut to_tap: mpsc::Sender<String>,
-    notifications_tx: broadcast::Sender<IndexedNotification>,
-) {
-    loop {
-        tokio::select! {
-            // Message from an S2C client -> send to Remote Server
-            Some(msg) = rx_outbound.recv() => {
-                let _ = socket.send(TungMessage::Text(msg.clone().into())).await;
-            }
-            // Message from Remote Server -> broadcast to all S2C clients
-            msg = socket.next() => {
-                if let Some(Ok(TungMessage::Text(text))) = msg {
-                    let Ok(_) = serde_json::from_str::<Value>(&text) else {
-                        // Invalid json, ignore
-                        return;
-                    };
-
-                    let tap_msg = serde_json::from_str::<TapMessage>(&text).unwrap();
-
-                    if tap_msg.message_type == "record"
-                        && tap_msg.record.is_some()
-                        && !tap_msg.record.as_ref().unwrap().live
-                    {
-                        // Event isn't live, skip but stay connected
-                        return;
-                    }
-
-                    let record = tap_msg.record.unwrap();
-
-                    // Centralized notification indexing for newly authored
-                    // Colibri messages. Persists rows + broadcasts to live WS
-                    // subscribers, so each notification is written exactly
-                    // once regardless of how many clients are connected.
-                    if record.collection == "social.colibri.message"
-                        && record.action != "delete"
-                        && let Some(payload) = record.record.clone()
-                        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
-                    {
-                        let message_uri = format!(
-                            "at://{}/{}/{}",
-                            record.did, record.collection, record.rkey
-                        );
-                        match index_message_notifications(&db, &record.did, &message_uri, &message)
-                            .await
-                        {
-                            Ok(rows) => {
-                                for row in rows {
-                                    let _ = notifications_tx.send(row);
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("notification indexing failed for {message_uri}: {e}");
-                            }
-                        }
-                    }
-
-                    let _ = tx_inbound.send(record);
-                    ack_tap_msg(&db, &mut to_tap, text.to_string()).await;
-                }
-            }
-        }
-    }
 }
 
 #[get("/")]
@@ -206,7 +129,7 @@ async fn rocket() -> _ {
         .await
         .expect("Failed to connect to tap");
 
-    tokio::spawn(handle_tap_connection(
+    tokio::spawn(run_connection(
         db.clone(),
         tap_stream,
         from_tap_channel,

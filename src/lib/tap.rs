@@ -1,10 +1,15 @@
+use crate::lib::colibri::ColibriMessage;
+use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use base64::Engine;
+use futures::{SinkExt, StreamExt};
+use rocket::tokio::sync::{broadcast, mpsc};
 use rocket::tokio::{net::TcpStream, sync::mpsc::Sender};
 use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::io::Error;
+use tokio_tungstenite::tungstenite::Message as TungMessage;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::client::IntoClientRequest,
 };
@@ -21,7 +26,6 @@ pub struct TapMessageRecord {
     pub rev: String,
     pub collection: String,
     pub rkey: String,
-    #[allow(dead_code)]
     pub action: String,
     pub record: Option<Value>,
     #[allow(dead_code)]
@@ -141,16 +145,113 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
     }
 }
 
+/// Bundles the cross-task channels the AppView uses for tap-derived events.
+/// Stored in Rocket state so handlers can subscribe to the broadcasts.
+pub struct CommsBridge {
+    /// Outbound channel for sending messages back upstream to tap (e.g. acks).
+    /// Kept around for symmetry; not all handlers consume it.
+    #[allow(dead_code)]
+    pub channel: mpsc::Sender<String>,
+    /// Fan-out of every record received from tap. Each WS subscriber holds
+    /// its own `Receiver` and decides what to do per-record.
+    pub broadcast: broadcast::Sender<TapMessageRecord>,
+    /// Fan-out of notifications indexed inside the tap pipeline. Each WS
+    /// subscriber filters by recipient DID.
+    pub notifications: broadcast::Sender<IndexedNotification>,
+}
+
+/// Runs the tap-connection event loop:
+///
+/// 1. Forwards outbound text from `rx_outbound` upstream over the WS socket.
+/// 2. Reads inbound records from the WS socket; for `social.colibri.message`
+///    records that aren't deletes, indexes notifications centrally (so each
+///    record produces notification rows exactly once regardless of how many
+///    subscribers are connected).
+/// 3. Broadcasts every inbound record on `tx_inbound` for the
+///    `subscribeEvents` WS handler to consume.
+/// 4. Acknowledges the message back to tap.
+///
+/// This is the only place the AppView consumes tap data; subscriber WS
+/// connections read from `tx_inbound` and `notifications_tx` exclusively.
+pub async fn run_connection(
+    db: DatabaseConnection,
+    mut socket: TapStream,
+    mut rx_outbound: mpsc::Receiver<String>,
+    tx_inbound: broadcast::Sender<TapMessageRecord>,
+    mut to_tap: mpsc::Sender<String>,
+    notifications_tx: broadcast::Sender<IndexedNotification>,
+) {
+    loop {
+        rocket::tokio::select! {
+            // Message from an S2C client -> send to Remote Server
+            Some(msg) = rx_outbound.recv() => {
+                let _ = socket.send(TungMessage::Text(msg.clone().into())).await;
+            }
+            // Message from Remote Server -> broadcast to all S2C clients
+            msg = socket.next() => {
+                if let Some(Ok(TungMessage::Text(text))) = msg {
+                    let Ok(_) = serde_json::from_str::<Value>(&text) else {
+                        // Invalid json, ignore
+                        return;
+                    };
+
+                    let tap_msg = serde_json::from_str::<TapMessage>(&text).unwrap();
+
+                    if tap_msg.message_type == "record"
+                        && tap_msg.record.is_some()
+                        && !tap_msg.record.as_ref().unwrap().live
+                    {
+                        // Event isn't live, skip but stay connected
+                        return;
+                    }
+
+                    let record = tap_msg.record.unwrap();
+
+                    // Centralized notification indexing for newly authored
+                    // Colibri messages. Persists rows + broadcasts to live
+                    // WS subscribers, so each notification is written
+                    // exactly once regardless of subscriber count.
+                    if record.collection == "social.colibri.message"
+                        && record.action != "delete"
+                        && let Some(payload) = record.record.clone()
+                        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
+                    {
+                        let message_uri = format!(
+                            "at://{}/{}/{}",
+                            record.did, record.collection, record.rkey
+                        );
+                        match index_message_notifications(&db, &record.did, &message_uri, &message)
+                            .await
+                        {
+                            Ok(rows) => {
+                                for row in rows {
+                                    let _ = notifications_tx.send(row);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("notification indexing failed for {message_uri}: {e}");
+                            }
+                        }
+                    }
+
+                    let _ = tx_inbound.send(record);
+                    ack_tap_msg(&db, &mut to_tap, text.to_string()).await;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
     use rocket::tokio::sync::mpsc;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn sends_ack_for_non_record_messages() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let (mut tx, mut rx) = mpsc::channel::<String>(1);
 
         ack_tap_msg(

@@ -45,16 +45,18 @@ pub async fn fetch_category_records(
         .await
 }
 
-type FetchCategoriesFn = fn(
-    DatabaseConnection,
-    String,
-    String,
-) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>;
+type FetchCategoriesFn = dyn Fn(
+        DatabaseConnection,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>
+    + Send
+    + Sync;
 
 async fn list_categories_with(
     community_uri: String,
     db: DatabaseConnection,
-    fetch_categories_fn: FetchCategoriesFn,
+    fetch_categories_fn: &FetchCategoriesFn,
 ) -> Result<Json<CategoryList>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
@@ -108,7 +110,7 @@ pub async fn list_categories(
     list_categories_with(
         community.to_string(),
         db.inner().clone(),
-        fetch_categories_boxed,
+        &fetch_categories_boxed,
     )
     .await
 }
@@ -116,16 +118,16 @@ pub async fn list_categories(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn maps_records_to_category_response() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_categories_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(vec![record_data::Model {
                         id: 1,
@@ -161,8 +163,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_categories_with(String::from("not-a-uri"), db, |_, _, _| {
+        let db = mock_db();
+        let result = list_categories_with(String::from("not-a-uri"), db, &|_, _, _| {
             Box::pin(async { panic!("should not fetch when uri is invalid") })
         })
         .await;
@@ -176,11 +178,11 @@ mod tests {
 
     #[tokio::test]
     async fn skips_records_with_invalid_payload() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_categories_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(vec![
                         record_data::Model {

@@ -138,8 +138,8 @@ pub async fn set_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -158,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_state_with_saves_valid_state() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let captured = Arc::new(Mutex::new(None::<(String, String)>));
         let captured_clone = captured.clone();
 
@@ -186,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_state_with_rejects_invalid_state() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = set_state_with(
             String::from("invalid"),
             String::from("token"),

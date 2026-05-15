@@ -201,19 +201,21 @@ pub async fn assemble_message_page(
     })
 }
 
-type AssemblePageFn = fn(
-    DatabaseConnection,
-    AtUri,
-    u64,
-    Option<String>,
-) -> BoxFuture<'static, Result<MessagePage, DbErr>>;
+type AssemblePageFn = dyn Fn(
+        DatabaseConnection,
+        AtUri,
+        u64,
+        Option<String>,
+    ) -> BoxFuture<'static, Result<MessagePage, DbErr>>
+    + Send
+    + Sync;
 
 async fn list_messages_with(
     channel_uri: String,
     limit: Option<u64>,
     cursor: Option<String>,
     db: DatabaseConnection,
-    assemble_fn: AssemblePageFn,
+    assemble_fn: &AssemblePageFn,
 ) -> Result<Json<MessageList>, ErrorResponse> {
     let channel = AtUri::parse(&channel_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
@@ -288,7 +290,7 @@ pub async fn list_messages(
         limit,
         cursor.map(|c| c.to_string()),
         db.inner().clone(),
-        assemble_message_page_boxed,
+        &assemble_message_page_boxed,
     )
     .await
 }
@@ -296,8 +298,8 @@ pub async fn list_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn message_record(
         rkey: &str,
@@ -324,14 +326,14 @@ mod tests {
 
     #[tokio::test]
     async fn builds_message_list_from_page() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
 
         let result = list_messages_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             Some(2),
             None,
             db,
-            |_, _, _, _| {
+            &|_, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
                         records: vec![
@@ -386,13 +388,13 @@ mod tests {
 
     #[tokio::test]
     async fn omits_cursor_when_page_is_not_full() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_messages_with(
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             Some(10),
             None,
             db,
-            |_, _, _, _| {
+            &|_, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
                         records: vec![message_record("msg-1", "did:plc:alice", "hello", None)],
@@ -413,11 +415,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_channel_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_messages_with(String::from("not-a-uri"), None, None, db, |_, _, _, _| {
-            Box::pin(async { panic!("should not assemble when uri is invalid") })
-        })
-        .await;
+        let db = mock_db();
+        let result =
+            list_messages_with(String::from("not-a-uri"), None, None, db, &|_, _, _, _| {
+                Box::pin(async { panic!("should not assemble when uri is invalid") })
+            })
+            .await;
 
         assert!(result.is_err());
         assert_eq!(

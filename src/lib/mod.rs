@@ -9,6 +9,7 @@ pub mod did_document;
 pub mod events;
 pub mod get_atproto_record;
 pub mod get_state;
+pub mod handler;
 pub mod list_atproto_records;
 pub mod map_tap_event;
 pub mod moderation;
@@ -21,5 +22,7 @@ pub mod sentry;
 pub mod service_auth;
 pub mod state;
 pub mod tap;
+#[cfg(test)]
+pub mod test_fixtures;
 pub mod time;
 pub mod validate_state;

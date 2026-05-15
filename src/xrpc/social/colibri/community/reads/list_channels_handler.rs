@@ -47,16 +47,18 @@ pub async fn fetch_channel_records(
         .await
 }
 
-type FetchChannelsFn = fn(
-    DatabaseConnection,
-    String,
-    String,
-) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>;
+type FetchChannelsFn = dyn Fn(
+        DatabaseConnection,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>
+    + Send
+    + Sync;
 
 async fn list_channels_with(
     community_uri: String,
     db: DatabaseConnection,
-    fetch_channels_fn: FetchChannelsFn,
+    fetch_channels_fn: &FetchChannelsFn,
 ) -> Result<Json<ChannelList>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
@@ -104,7 +106,7 @@ pub async fn list_channels(
     list_channels_with(
         community.to_string(),
         db.inner().clone(),
-        fetch_channels_boxed,
+        &fetch_channels_boxed,
     )
     .await
 }
@@ -112,16 +114,16 @@ pub async fn list_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use sea_orm::{DatabaseBackend, MockDatabase};
 
     #[tokio::test]
     async fn maps_records_to_channel_response() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let db = mock_db();
         let result = list_channels_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(vec![record_data::Model {
                         id: 1,
@@ -159,8 +161,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_channels_with(String::from("not-a-uri"), db, |_, _, _| {
+        let db = mock_db();
+        let result = list_channels_with(String::from("not-a-uri"), db, &|_, _, _| {
             Box::pin(async { panic!("should not fetch when uri is invalid") })
         })
         .await;
