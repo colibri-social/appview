@@ -8,11 +8,11 @@ use sea_orm::{
 };
 use serde::Serialize;
 
-use crate::lib::at_uri::AtUri;
-use crate::lib::community_authz::{self, ActorAuthz};
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::community_invitations::{
     self, ActiveModel as InvitationModel, Entity as Invitations, Model as Invitation,
@@ -58,13 +58,9 @@ fn generate_invitation_code() -> String {
         .collect()
 }
 
-// ---- Shared dependency types --------------------------------------------
+// ---- Module-local dependency types --------------------------------------
+// (`VerifyAuthFn` and `LoadAuthzFn` come from `crate::lib::handler`.)
 
-type VerifyAuthFn =
-    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
-type LoadAuthzFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>
-    + Send
-    + Sync;
 type InsertFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<Invitation, DbErr>>
     + Send
     + Sync;
@@ -152,29 +148,26 @@ async fn create_invitation_with(
     insert_fn: &InsertFn,
     code_generator: fn() -> String,
 ) -> Result<Json<CreateInvitationResponse>, ErrorResponse> {
-    if AtUri::parse(&community_uri).is_none() {
-        return Err(invalid_community());
-    }
-
-    let caller_did = verify_auth_fn(
+    with_community_authz(
         auth,
-        String::from("social.colibri.community.createInvitation"),
+        "social.colibri.community.createInvitation",
+        community_uri,
+        Some(Permission::InvitationCreate),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        |ctx, db| async move {
+            let code = code_generator();
+            let inv = insert_fn(db, code, ctx.community_uri, ctx.caller_did).await?;
+            Ok(Json(CreateInvitationResponse {
+                code: inv.code,
+                community: inv.community_uri,
+                created_by: inv.created_by,
+                active: inv.active,
+            }))
+        },
     )
     .await
-    .map_err(auth_error)?;
-
-    let authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
-    require_permission(&authz, Permission::InvitationCreate)?;
-
-    let code = code_generator();
-    let inv = insert_fn(db, code, community_uri, caller_did).await?;
-
-    Ok(Json(CreateInvitationResponse {
-        code: inv.code,
-        community: inv.community_uri,
-        created_by: inv.created_by,
-        active: inv.active,
-    }))
 }
 
 // ---- getInvitation -------------------------------------------------------
@@ -208,24 +201,22 @@ async fn list_invitations_with(
     load_authz_fn: &LoadAuthzFn,
     fetch_fn: &FetchManyFn,
 ) -> Result<Json<InvitationListResponse>, ErrorResponse> {
-    if AtUri::parse(&community_uri).is_none() {
-        return Err(invalid_community());
-    }
-
-    let caller_did = verify_auth_fn(
+    with_community_authz(
         auth,
-        String::from("social.colibri.community.listInvitations"),
+        "social.colibri.community.listInvitations",
+        community_uri,
+        Some(Permission::InvitationCreate),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        |ctx, db| async move {
+            let rows = fetch_fn(db, ctx.community_uri).await?;
+            Ok(Json(InvitationListResponse {
+                codes: rows.into_iter().map(Into::into).collect(),
+            }))
+        },
     )
     .await
-    .map_err(auth_error)?;
-
-    let authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did).await?;
-    require_permission(&authz, Permission::InvitationCreate)?;
-
-    let rows = fetch_fn(db, community_uri).await?;
-    Ok(Json(InvitationListResponse {
-        codes: rows.into_iter().map(Into::into).collect(),
-    }))
 }
 
 // ---- deleteInvitation ----------------------------------------------------
@@ -241,90 +232,44 @@ async fn delete_invitation_with(
     fetch_fn: &FetchOneFn,
     deactivate_fn: &DeactivateFn,
 ) -> Result<Json<DeleteInvitationResponse>, ErrorResponse> {
-    if AtUri::parse(&community_uri).is_none() {
-        return Err(invalid_community());
-    }
-
-    let caller_did = verify_auth_fn(
+    with_community_authz(
         auth,
-        String::from("social.colibri.community.deleteInvitation"),
+        "social.colibri.community.deleteInvitation",
+        community_uri,
+        Some(Permission::InvitationDelete),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        |ctx, db| async move {
+            let invitation =
+                fetch_fn(db.clone(), code.clone())
+                    .await?
+                    .ok_or_else(|| ErrorResponse {
+                        body: Json(ErrorBody {
+                            error: String::from("NotFound"),
+                            message: format!("Invitation '{code}' not found."),
+                        }),
+                    })?;
+
+            if invitation.community_uri != ctx.community_uri {
+                return Err(ErrorResponse {
+                    body: Json(ErrorBody {
+                        error: String::from("InvalidRequest"),
+                        message: String::from(
+                            "Invitation does not belong to the specified community.",
+                        ),
+                    }),
+                });
+            }
+
+            deactivate_fn(db, code.clone()).await?;
+            Ok(Json(DeleteInvitationResponse { code }))
+        },
     )
     .await
-    .map_err(auth_error)?;
-
-    let authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did).await?;
-    require_permission(&authz, Permission::InvitationDelete)?;
-
-    let invitation = fetch_fn(db.clone(), code.clone())
-        .await?
-        .ok_or_else(|| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("NotFound"),
-                message: format!("Invitation '{code}' not found."),
-            }),
-        })?;
-
-    if invitation.community_uri != community_uri {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Invitation does not belong to the specified community."),
-            }),
-        });
-    }
-
-    deactivate_fn(db, code.clone()).await?;
-    Ok(Json(DeleteInvitationResponse { code }))
-}
-
-// ---- shared error helpers ------------------------------------------------
-
-fn auth_error(err: ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
-}
-
-fn invalid_community() -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    }
-}
-
-fn require_permission(authz: &ActorAuthz, permission: Permission) -> Result<(), ErrorResponse> {
-    if !authz.has(permission, None) {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("Forbidden"),
-                message: format!("Missing permission: {permission}"),
-            }),
-        });
-    }
-    Ok(())
 }
 
 // ---- Boxed dependencies --------------------------------------------------
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
-}
-
-fn load_authz_boxed(
-    db: DatabaseConnection,
-    community_uri: String,
-    did: String,
-) -> BoxFuture<'static, Result<ActorAuthz, DbErr>> {
-    Box::pin(async move { community_authz::load_actor_authz(&db, &community_uri, &did).await })
-}
 
 fn insert_boxed(
     db: DatabaseConnection,
@@ -429,6 +374,7 @@ pub async fn delete_invitation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::community_authz::ActorAuthz;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};

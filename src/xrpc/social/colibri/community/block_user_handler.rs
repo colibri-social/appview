@@ -6,12 +6,13 @@ use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
-use crate::lib::community_authz::{self, ActorAuthz};
 use crate::lib::did_document::DidDocument;
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+};
 use crate::lib::moderation::{self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
 use crate::xrpc::com::atproto::identity::resolve_identity;
@@ -35,13 +36,8 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
     Ok((document.id.clone(), handle))
 }
 
-type VerifyAuthFn =
-    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
 type ResolveFn =
     dyn Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> + Send + Sync;
-type LoadAuthzFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>
-    + Send
-    + Sync;
 type WriteRecordFn = dyn Fn(
         DatabaseConnection,
         AtUri,
@@ -51,11 +47,12 @@ type WriteRecordFn = dyn Fn(
     + Sync;
 
 /// Common moderation handler entry point used by both blockUser and
-/// unblockUser. `block` toggles between writing a `ban` or `unban` record.
+/// unblockUser. `action` toggles between writing a `ban` or `unban` record.
 ///
-/// Each parameter is its own dependency injection seam (verify, resolve,
-/// load-authz, write); a future combinator (see refactor plan A) will
-/// collapse this surface.
+/// The shared authz prelude (parse URI → verify auth → load authz → check
+/// permission) goes through [`with_community_authz`]. The hierarchy guard
+/// for `ban`/`kick` then runs inside the body once the caller's own authz
+/// is in hand.
 #[allow(clippy::too_many_arguments)]
 async fn moderate_user_with(
     action: &'static str,
@@ -70,90 +67,65 @@ async fn moderate_user_with(
     load_authz_fn: &LoadAuthzFn,
     write_record_fn: &WriteRecordFn,
 ) -> Result<Json<BlockUserResponse>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
-
-    let caller_did = verify_auth_fn(auth, lxm.to_string())
-        .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
-
     let (target_did, target_handle) = resolve_fn(identifier).await?;
+    let target_did_for_body = target_did.clone();
 
-    let caller_authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
-    if !caller_authz.has(permission, None) {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("Forbidden"),
-                message: format!("Missing permission: {permission}"),
-            }),
-        });
-    }
+    with_community_authz(
+        auth,
+        lxm,
+        community_uri,
+        Some(permission),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        move |ctx, db| async move {
+            // Hierarchy check for any action that targets a present member
+            // (ban, kick). Unban is exempt because the target is, by
+            // definition, not currently in the community.
+            if action == ACTION_BAN || action == ACTION_KICK {
+                let target_authz = load_authz_fn(
+                    db.clone(),
+                    ctx.community_uri.clone(),
+                    target_did_for_body.clone(),
+                )
+                .await?;
+                if !ctx.authz.outranks(&target_authz) {
+                    return Err(ErrorResponse {
+                        body: Json(ErrorBody {
+                            error: String::from("Forbidden"),
+                            message: String::from(
+                                "Cannot act on a member with an equal or higher role position.",
+                            ),
+                        }),
+                    });
+                }
+            }
 
-    // Hierarchy check for any action that targets a present member (ban,
-    // kick). Unban is exempt because the target is, by definition, not
-    // currently in the community.
-    if action == ACTION_BAN || action == ACTION_KICK {
-        let target_authz =
-            load_authz_fn(db.clone(), community_uri.clone(), target_did.clone()).await?;
-        if !caller_authz.outranks(&target_authz) {
-            return Err(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("Forbidden"),
-                    message: String::from(
-                        "Cannot act on a member with an equal or higher role position.",
-                    ),
-                }),
-            });
-        }
-    }
+            let record = moderation::moderation_record(
+                action,
+                ColibriModerationSubject {
+                    did: Some(target_did_for_body.clone()),
+                    uri: None,
+                },
+                ctx.caller_did,
+                current_iso8601_utc(),
+                None,
+            );
+            write_record_fn(db, ctx.community, record).await?;
 
-    let record = moderation::moderation_record(
-        action,
-        ColibriModerationSubject {
-            did: Some(target_did.clone()),
-            uri: None,
+            Ok(Json(BlockUserResponse {
+                did: target_did,
+                handle: target_handle,
+            }))
         },
-        caller_did,
-        current_iso8601_utc(),
-        None,
-    );
-
-    write_record_fn(db, community, record).await?;
-
-    Ok(Json(BlockUserResponse {
-        did: target_did,
-        handle: target_handle,
-    }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
+    )
+    .await
 }
 
 fn resolve_boxed(
     identifier: String,
 ) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> {
     Box::pin(async move { resolve_did_and_handle(&identifier).await })
-}
-
-fn load_authz_boxed(
-    db: DatabaseConnection,
-    community_uri: String,
-    did: String,
-) -> BoxFuture<'static, Result<ActorAuthz, DbErr>> {
-    Box::pin(async move { community_authz::load_actor_authz(&db, &community_uri, &did).await })
 }
 
 fn write_moderation_boxed(
@@ -222,6 +194,7 @@ fn _force_did_document_import(d: DidDocument) -> DidDocument {
 mod tests {
     use super::*;
     use crate::lib::colibri::{ColibriMember, ColibriRole};
+    use crate::lib::community_authz::ActorAuthz;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};

@@ -6,11 +6,12 @@ use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
-use crate::lib::community_authz::{self, ActorAuthz};
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+};
 use crate::lib::moderation::{self, ACTION_HIDE_MESSAGE};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
 
@@ -19,11 +20,6 @@ pub struct BlockMessageResponse {
     pub message: String,
 }
 
-type VerifyAuthFn =
-    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
-type LoadAuthzFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>
-    + Send
-    + Sync;
 type WriteRecordFn = dyn Fn(
         DatabaseConnection,
         AtUri,
@@ -41,13 +37,6 @@ async fn block_message_with(
     load_authz_fn: &LoadAuthzFn,
     write_record_fn: &WriteRecordFn,
 ) -> Result<Json<BlockMessageResponse>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
-
     if AtUri::parse(&message_uri).is_none() {
         return Err(ErrorResponse {
             body: Json(ErrorBody {
@@ -57,56 +46,32 @@ async fn block_message_with(
         });
     }
 
-    let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.blockMessage"))
-        .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
-
-    let caller_authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
-    if !caller_authz.has(Permission::MessageDelete, None) {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("Forbidden"),
-                message: format!("Missing permission: {}", Permission::MessageDelete),
-            }),
-        });
-    }
-
-    let record = moderation::moderation_record(
-        ACTION_HIDE_MESSAGE,
-        ColibriModerationSubject {
-            did: None,
-            uri: Some(message_uri.clone()),
+    with_community_authz(
+        auth,
+        "social.colibri.community.blockMessage",
+        community_uri,
+        Some(Permission::MessageDelete),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        |ctx, db| async move {
+            let record = moderation::moderation_record(
+                ACTION_HIDE_MESSAGE,
+                ColibriModerationSubject {
+                    did: None,
+                    uri: Some(message_uri.clone()),
+                },
+                ctx.caller_did,
+                current_iso8601_utc(),
+                None,
+            );
+            write_record_fn(db, ctx.community, record).await?;
+            Ok(Json(BlockMessageResponse {
+                message: message_uri,
+            }))
         },
-        caller_did,
-        current_iso8601_utc(),
-        None,
-    );
-
-    write_record_fn(db, community, record).await?;
-
-    Ok(Json(BlockMessageResponse {
-        message: message_uri,
-    }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
-}
-
-fn load_authz_boxed(
-    db: DatabaseConnection,
-    community_uri: String,
-    did: String,
-) -> BoxFuture<'static, Result<ActorAuthz, DbErr>> {
-    Box::pin(async move { community_authz::load_actor_authz(&db, &community_uri, &did).await })
+    )
+    .await
 }
 
 fn write_moderation_boxed(
@@ -140,6 +105,7 @@ pub async fn block_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::community_authz::ActorAuthz;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};

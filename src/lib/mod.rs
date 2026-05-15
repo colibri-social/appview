@@ -9,6 +9,7 @@ pub mod did_document;
 pub mod events;
 pub mod get_atproto_record;
 pub mod get_state;
+pub mod handler;
 pub mod list_atproto_records;
 pub mod map_tap_event;
 pub mod moderation;

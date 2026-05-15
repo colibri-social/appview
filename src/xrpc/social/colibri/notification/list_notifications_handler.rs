@@ -6,9 +6,9 @@ use rocket::{State, get};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
+use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::notifications::{self, NotificationMessage, NotificationView};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
+use crate::lib::responses::ErrorResponse;
 use crate::models::notifications as notifications_model;
 
 const DEFAULT_LIMIT: u64 = 50;
@@ -20,8 +20,6 @@ pub struct ListNotificationsResponse {
     pub notifications: Vec<NotificationView>,
 }
 
-type VerifyAuthFn =
-    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
 type FetchFn = dyn Fn(
         DatabaseConnection,
         String,
@@ -46,49 +44,39 @@ async fn list_notifications_with(
     fetch_fn: &FetchFn,
     hydrate_fn: &HydrateFn,
 ) -> Result<Json<ListNotificationsResponse>, ErrorResponse> {
-    let did = verify_auth_fn(
+    with_authenticated(
         auth,
-        String::from("social.colibri.notification.listNotifications"),
+        "social.colibri.notification.listNotifications",
+        db,
+        verify_auth_fn,
+        |caller_did, db| async move {
+            let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+            let rows = fetch_fn(db.clone(), caller_did, effective_limit, cursor).await?;
+
+            let next_cursor = if (rows.len() as u64) == effective_limit {
+                rows.last().map(|r| r.id.to_string())
+            } else {
+                None
+            };
+
+            let message_uris: Vec<String> = rows.iter().map(|r| r.message_uri.clone()).collect();
+            let mut hydrated = hydrate_fn(db, message_uris).await?;
+
+            let notifications = rows
+                .into_iter()
+                .map(|row| {
+                    let message = hydrated.remove(&row.message_uri);
+                    NotificationView::from_row(row, message)
+                })
+                .collect();
+
+            Ok(Json(ListNotificationsResponse {
+                cursor: next_cursor,
+                notifications,
+            }))
+        },
     )
     .await
-    .map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: e.to_string(),
-        }),
-    })?;
-
-    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
-    let rows = fetch_fn(db.clone(), did, effective_limit, cursor).await?;
-
-    let next_cursor = if (rows.len() as u64) == effective_limit {
-        rows.last().map(|r| r.id.to_string())
-    } else {
-        None
-    };
-
-    let message_uris: Vec<String> = rows.iter().map(|r| r.message_uri.clone()).collect();
-    let mut hydrated = hydrate_fn(db, message_uris).await?;
-
-    let notifications = rows
-        .into_iter()
-        .map(|row| {
-            let message = hydrated.remove(&row.message_uri);
-            NotificationView::from_row(row, message)
-        })
-        .collect();
-
-    Ok(Json(ListNotificationsResponse {
-        cursor: next_cursor,
-        notifications,
-    }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
 }
 
 fn fetch_boxed(
@@ -132,6 +120,7 @@ pub async fn list_notifications(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::service_auth::ServiceAuthError;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
 

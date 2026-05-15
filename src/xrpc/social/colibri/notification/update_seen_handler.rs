@@ -4,9 +4,9 @@ use rocket::{State, post};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
+use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::notifications;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
+use crate::lib::responses::ErrorResponse;
 use crate::lib::time::current_iso8601_utc;
 
 #[derive(Serialize, Debug)]
@@ -14,8 +14,6 @@ pub struct UpdateSeenResponse {
     pub updated: u64,
 }
 
-type VerifyAuthFn =
-    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
 type MarkSeenFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<u64, DbErr>>
     + Send
     + Sync;
@@ -27,29 +25,23 @@ async fn update_seen_with(
     verify_auth_fn: &VerifyAuthFn,
     mark_seen_fn: &MarkSeenFn,
 ) -> Result<Json<UpdateSeenResponse>, ErrorResponse> {
-    let did = verify_auth_fn(auth, String::from("social.colibri.notification.updateSeen"))
-        .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+    with_authenticated(
+        auth,
+        "social.colibri.notification.updateSeen",
+        db,
+        verify_auth_fn,
+        |caller_did, db| async move {
+            // The cutoff defaults to "now" — anything indexed at or before
+            // this point counts as "seen". Lets clients catch up without a
+            // timestamp round-trip.
+            let cutoff = seen_at_input.clone().unwrap_or_else(current_iso8601_utc);
+            let seen_at = seen_at_input.unwrap_or_else(current_iso8601_utc);
 
-    // The cutoff defaults to "now" — anything indexed at or before this point
-    // counts as "seen". Lets clients catch up without a timestamp round-trip.
-    let cutoff = seen_at_input.clone().unwrap_or_else(current_iso8601_utc);
-    let seen_at = seen_at_input.unwrap_or_else(current_iso8601_utc);
-
-    let updated = mark_seen_fn(db, did, seen_at, cutoff).await?;
-    Ok(Json(UpdateSeenResponse { updated }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
+            let updated = mark_seen_fn(db, caller_did, seen_at, cutoff).await?;
+            Ok(Json(UpdateSeenResponse { updated }))
+        },
+    )
+    .await
 }
 
 fn mark_seen_boxed(
@@ -82,6 +74,7 @@ pub async fn update_seen(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::service_auth::ServiceAuthError;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::{Arc, Mutex};

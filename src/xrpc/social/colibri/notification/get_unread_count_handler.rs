@@ -4,17 +4,15 @@ use rocket::{State, get};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
+use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::notifications;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth::{self, ServiceAuthError};
+use crate::lib::responses::ErrorResponse;
 
 #[derive(Serialize, Debug)]
 pub struct UnreadCountResponse {
     pub count: u64,
 }
 
-type VerifyAuthFn =
-    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
 type CountFn =
     dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>> + Send + Sync;
 
@@ -24,27 +22,17 @@ async fn get_unread_count_with(
     verify_auth_fn: &VerifyAuthFn,
     count_fn: &CountFn,
 ) -> Result<Json<UnreadCountResponse>, ErrorResponse> {
-    let did = verify_auth_fn(
+    with_authenticated(
         auth,
-        String::from("social.colibri.notification.getUnreadCount"),
+        "social.colibri.notification.getUnreadCount",
+        db,
+        verify_auth_fn,
+        |caller_did, db| async move {
+            let count = count_fn(db, caller_did).await?;
+            Ok(Json(UnreadCountResponse { count }))
+        },
     )
     .await
-    .map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: e.to_string(),
-        }),
-    })?;
-
-    let count = count_fn(db, did).await?;
-    Ok(Json(UnreadCountResponse { count }))
-}
-
-fn verify_auth_boxed(
-    auth: String,
-    lxm: String,
-) -> BoxFuture<'static, Result<String, ServiceAuthError>> {
-    Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
 }
 
 fn count_boxed(db: DatabaseConnection, did: String) -> BoxFuture<'static, Result<u64, DbErr>> {
@@ -69,6 +57,7 @@ pub async fn get_unread_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lib::service_auth::ServiceAuthError;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
