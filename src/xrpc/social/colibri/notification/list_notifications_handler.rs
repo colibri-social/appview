@@ -20,28 +20,32 @@ pub struct ListNotificationsResponse {
     pub notifications: Vec<NotificationView>,
 }
 
-async fn list_notifications_with<V, F, H>(
-    auth: String,
-    limit: Option<u64>,
-    cursor: Option<String>,
-    db: DatabaseConnection,
-    verify_auth_fn: V,
-    fetch_fn: F,
-    hydrate_fn: H,
-) -> Result<Json<ListNotificationsResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    F: Fn(
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type FetchFn = dyn Fn(
         DatabaseConnection,
         String,
         u64,
         Option<String>,
-    ) -> BoxFuture<'static, Result<Vec<notifications_model::Model>, DbErr>>,
-    H: Fn(
+    ) -> BoxFuture<'static, Result<Vec<notifications_model::Model>, DbErr>>
+    + Send
+    + Sync;
+type HydrateFn = dyn Fn(
         DatabaseConnection,
         Vec<String>,
-    ) -> BoxFuture<'static, Result<HashMap<String, NotificationMessage>, DbErr>>,
-{
+    ) -> BoxFuture<'static, Result<HashMap<String, NotificationMessage>, DbErr>>
+    + Send
+    + Sync;
+
+async fn list_notifications_with(
+    auth: String,
+    limit: Option<u64>,
+    cursor: Option<String>,
+    db: DatabaseConnection,
+    verify_auth_fn: &VerifyAuthFn,
+    fetch_fn: &FetchFn,
+    hydrate_fn: &HydrateFn,
+) -> Result<Json<ListNotificationsResponse>, ErrorResponse> {
     let did = verify_auth_fn(
         auth,
         String::from("social.colibri.notification.listNotifications"),
@@ -118,9 +122,9 @@ pub async fn list_notifications(
         limit,
         cursor.map(|c| c.to_string()),
         db.inner().clone(),
-        verify_auth_boxed,
-        fetch_boxed,
-        hydrate_boxed,
+        &verify_auth_boxed,
+        &fetch_boxed,
+        &hydrate_boxed,
     )
     .await
 }
@@ -163,9 +167,9 @@ mod tests {
             Some(2),
             None,
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            |_, _, _, _| Box::pin(async { Ok(vec![row(20, "mention"), row(10, "reply")]) }),
-            |_, uris| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, _, _| Box::pin(async { Ok(vec![row(20, "mention"), row(10, "reply")]) }),
+            &|_, uris| {
                 Box::pin(async move {
                     let mut map = HashMap::new();
                     for uri in uris {
@@ -197,9 +201,9 @@ mod tests {
             Some(10),
             None,
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            |_, _, _, _| Box::pin(async { Ok(vec![row(1, "mention")]) }),
-            |_, _| Box::pin(async { Ok(HashMap::new()) }),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, _, _| Box::pin(async { Ok(vec![row(1, "mention")]) }),
+            &|_, _| Box::pin(async { Ok(HashMap::new()) }),
         )
         .await
         .unwrap();
@@ -216,9 +220,9 @@ mod tests {
             None,
             None,
             db,
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _, _, _| Box::pin(async { panic!("should not fetch when auth fails") }),
-            |_, _| Box::pin(async { panic!("should not hydrate when auth fails") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not fetch when auth fails") }),
+            &|_, _| Box::pin(async { panic!("should not hydrate when auth fails") }),
         )
         .await;
 

@@ -58,6 +58,25 @@ fn generate_invitation_code() -> String {
         .collect()
 }
 
+// ---- Shared dependency types --------------------------------------------
+
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type LoadAuthzFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>
+    + Send
+    + Sync;
+type InsertFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<Invitation, DbErr>>
+    + Send
+    + Sync;
+type FetchOneFn = dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Option<Invitation>, DbErr>>
+    + Send
+    + Sync;
+type FetchManyFn = dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Vec<Invitation>, DbErr>>
+    + Send
+    + Sync;
+type DeactivateFn =
+    dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>> + Send + Sync;
+
 // ---- DB helpers ----------------------------------------------------------
 
 pub async fn insert_invitation(
@@ -124,25 +143,15 @@ pub struct CreateInvitationResponse {
     pub active: bool,
 }
 
-async fn create_invitation_with<V, W, I>(
+async fn create_invitation_with(
     community_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    load_authz_fn: W,
-    insert_fn: I,
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
+    insert_fn: &InsertFn,
     code_generator: fn() -> String,
-) -> Result<Json<CreateInvitationResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-    I: Fn(
-        DatabaseConnection,
-        String,
-        String,
-        String,
-    ) -> BoxFuture<'static, Result<Invitation, DbErr>>,
-{
+) -> Result<Json<CreateInvitationResponse>, ErrorResponse> {
     if AtUri::parse(&community_uri).is_none() {
         return Err(invalid_community());
     }
@@ -170,13 +179,16 @@ where
 
 // ---- getInvitation -------------------------------------------------------
 
-async fn get_invitation_with<F>(
+/// Standalone fetch function for `getInvitation`. Distinct from `FetchOneFn`
+/// in that it takes only the code (no DB-passthrough param) so the live
+/// handler can capture its `DatabaseConnection`.
+type FetchByCodeFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<Option<Invitation>, DbErr>> + Send + Sync;
+
+async fn get_invitation_with(
     code: String,
-    fetch_fn: F,
-) -> Result<Json<InvitationView>, ErrorResponse>
-where
-    F: FnOnce(String) -> BoxFuture<'static, Result<Option<Invitation>, DbErr>>,
-{
+    fetch_fn: &FetchByCodeFn,
+) -> Result<Json<InvitationView>, ErrorResponse> {
     let row = fetch_fn(code.clone()).await?.ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("NotFound"),
@@ -188,19 +200,14 @@ where
 
 // ---- listInvitations -----------------------------------------------------
 
-async fn list_invitations_with<V, W, F>(
+async fn list_invitations_with(
     community_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    load_authz_fn: W,
-    fetch_fn: F,
-) -> Result<Json<InvitationListResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-    F: Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Vec<Invitation>, DbErr>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
+    fetch_fn: &FetchManyFn,
+) -> Result<Json<InvitationListResponse>, ErrorResponse> {
     if AtUri::parse(&community_uri).is_none() {
         return Err(invalid_community());
     }
@@ -224,22 +231,16 @@ where
 // ---- deleteInvitation ----------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-async fn delete_invitation_with<V, W, F, D>(
+async fn delete_invitation_with(
     community_uri: String,
     code: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    load_authz_fn: W,
-    fetch_fn: F,
-    deactivate_fn: D,
-) -> Result<Json<DeleteInvitationResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-    F: Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Option<Invitation>, DbErr>>,
-    D: Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
+    fetch_fn: &FetchOneFn,
+    deactivate_fn: &DeactivateFn,
+) -> Result<Json<DeleteInvitationResponse>, ErrorResponse> {
     if AtUri::parse(&community_uri).is_none() {
         return Err(invalid_community());
     }
@@ -367,9 +368,9 @@ pub async fn create_invitation(
         community.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        load_authz_boxed,
-        insert_boxed,
+        &verify_auth_boxed,
+        &load_authz_boxed,
+        &insert_boxed,
         generate_invitation_code,
     )
     .await
@@ -381,10 +382,11 @@ pub async fn get_invitation(
     db: &State<DatabaseConnection>,
 ) -> Result<Json<InvitationView>, ErrorResponse> {
     let db = db.inner().clone();
-    get_invitation_with(code.to_string(), move |c| {
+    let fetch = move |c: String| -> BoxFuture<'static, Result<Option<Invitation>, DbErr>> {
+        let db = db.clone();
         Box::pin(async move { fetch_invitation(&db, &c).await })
-    })
-    .await
+    };
+    get_invitation_with(code.to_string(), &fetch).await
 }
 
 #[post("/xrpc/social.colibri.community.listInvitations?<uri>&<auth>")]
@@ -397,9 +399,9 @@ pub async fn list_invitations(
         uri.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        load_authz_boxed,
-        fetch_by_community_boxed,
+        &verify_auth_boxed,
+        &load_authz_boxed,
+        &fetch_by_community_boxed,
     )
     .await
 }
@@ -416,10 +418,10 @@ pub async fn delete_invitation(
         code.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        load_authz_boxed,
-        fetch_boxed,
-        deactivate_boxed,
+        &verify_auth_boxed,
+        &load_authz_boxed,
+        &fetch_boxed,
+        &deactivate_boxed,
     )
     .await
 }
@@ -463,20 +465,25 @@ mod tests {
         let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
+        let insert = move |_: DatabaseConnection,
+                           code: String,
+                           community: String,
+                           created_by: String|
+              -> BoxFuture<'static, Result<Invitation, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() =
+                    Some((code.clone(), community.clone(), created_by.clone()));
+                Ok(invite(&code, &community, &created_by, true))
+            })
+        };
         let result = create_invitation_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_, _, _| Box::pin(async { Ok(owner_authz()) }),
-            move |_, code, community, created_by| {
-                let captured = captured_clone.clone();
-                Box::pin(async move {
-                    *captured.lock().unwrap() =
-                        Some((code.clone(), community.clone(), created_by.clone()));
-                    Ok(invite(&code, &community, &created_by, true))
-                })
-            },
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
+            &insert,
             || String::from("CODE-FIXED"),
         )
         .await
@@ -499,9 +506,9 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
-            |_, _, _| Box::pin(async { Ok(empty_authz()) }),
-            |_, _, _, _| Box::pin(async { panic!("should not insert") }),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_, _, _| Box::pin(async { Ok(empty_authz()) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not insert") }),
             || String::from("CODE"),
         )
         .await;
@@ -512,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_invitation_returns_view() {
-        let result = get_invitation_with(String::from("CODE"), |c| {
+        let result = get_invitation_with(String::from("CODE"), &|c| {
             Box::pin(async move {
                 Ok(Some(invite(
                     &c,
@@ -536,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn get_invitation_returns_not_found_when_missing() {
         let result =
-            get_invitation_with(String::from("NOPE"), |_| Box::pin(async { Ok(None) })).await;
+            get_invitation_with(String::from("NOPE"), &|_| Box::pin(async { Ok(None) })).await;
 
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().body.into_inner().error, "NotFound");
@@ -549,9 +556,9 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_, _, _| Box::pin(async { Ok(owner_authz()) }),
-            |_, _| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
+            &|_, _| {
                 Box::pin(async {
                     Ok(vec![
                         invite(
@@ -585,14 +592,22 @@ mod tests {
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let calls_clone = calls.clone();
 
+        let deactivate =
+            move |_: DatabaseConnection, c: String| -> BoxFuture<'static, Result<u64, DbErr>> {
+                let calls = calls_clone.clone();
+                Box::pin(async move {
+                    calls.lock().unwrap().push(c);
+                    Ok(1)
+                })
+            };
         let result = delete_invitation_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("CODE"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_, _, _| Box::pin(async { Ok(owner_authz()) }),
-            |_, c| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
+            &|_, c| {
                 Box::pin(async move {
                     Ok(Some(invite(
                         &c,
@@ -602,13 +617,7 @@ mod tests {
                     )))
                 })
             },
-            move |_, c| {
-                let calls = calls_clone.clone();
-                Box::pin(async move {
-                    calls.lock().unwrap().push(c);
-                    Ok(1)
-                })
-            },
+            &deactivate,
         )
         .await
         .unwrap();
@@ -625,9 +634,9 @@ mod tests {
             String::from("CODE"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_, _, _| Box::pin(async { Ok(owner_authz()) }),
-            |_, c| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
+            &|_, c| {
                 Box::pin(async move {
                     Ok(Some(invite(
                         &c,
@@ -637,7 +646,7 @@ mod tests {
                     )))
                 })
             },
-            |_, _| Box::pin(async { panic!("should not deactivate when community mismatches") }),
+            &|_, _| Box::pin(async { panic!("should not deactivate when community mismatches") }),
         )
         .await;
 

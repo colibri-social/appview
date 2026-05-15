@@ -35,6 +35,21 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
     Ok((document.id.clone(), handle))
 }
 
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type ResolveFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> + Send + Sync;
+type LoadAuthzFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>
+    + Send
+    + Sync;
+type WriteRecordFn = dyn Fn(
+        DatabaseConnection,
+        AtUri,
+        ColibriModeration,
+    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>
+    + Send
+    + Sync;
+
 /// Common moderation handler entry point used by both blockUser and
 /// unblockUser. `block` toggles between writing a `ban` or `unban` record.
 ///
@@ -42,7 +57,7 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
 /// load-authz, write); a future combinator (see refactor plan A) will
 /// collapse this surface.
 #[allow(clippy::too_many_arguments)]
-async fn moderate_user_with<R, W, V>(
+async fn moderate_user_with(
     action: &'static str,
     community_uri: String,
     identifier: String,
@@ -50,20 +65,11 @@ async fn moderate_user_with<R, W, V>(
     db: DatabaseConnection,
     lxm: &'static str,
     permission: Permission,
-    verify_auth_fn: V,
-    resolve_fn: R,
-    load_authz_fn: W,
-    write_record_fn: impl FnOnce(
-        DatabaseConnection,
-        AtUri,
-        ColibriModeration,
-    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>,
-) -> Result<Json<BlockUserResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    R: Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>>,
-    W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    resolve_fn: &ResolveFn,
+    load_authz_fn: &LoadAuthzFn,
+    write_record_fn: &WriteRecordFn,
+) -> Result<Json<BlockUserResponse>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("InvalidRequest"),
@@ -174,10 +180,10 @@ pub async fn block_user(
         db.inner().clone(),
         "social.colibri.community.blockUser",
         Permission::MemberBan,
-        verify_auth_boxed,
-        resolve_boxed,
-        load_authz_boxed,
-        write_moderation_boxed,
+        &verify_auth_boxed,
+        &resolve_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
     )
     .await
 }
@@ -198,10 +204,10 @@ pub async fn unblock_user(
         db.inner().clone(),
         "social.colibri.community.unblockUser",
         Permission::MemberUnban,
-        verify_auth_boxed,
-        resolve_boxed,
-        load_authz_boxed,
-        write_moderation_boxed,
+        &verify_auth_boxed,
+        &resolve_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
     )
     .await
 }
@@ -254,6 +260,22 @@ mod tests {
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
+        let write_record = move |_: DatabaseConnection,
+                                 _: AtUri,
+                                 record: ColibriModeration|
+              -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(record);
+                Ok(record_data::Model {
+                    id: 1,
+                    did: String::from("did:plc:owner"),
+                    nsid: String::from("social.colibri.moderation"),
+                    rkey: String::from("mod-1"),
+                    data: serde_json::json!({}),
+                })
+            })
+        };
         let result = moderate_user_with(
             ACTION_BAN,
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -262,13 +284,13 @@ mod tests {
             db,
             "social.colibri.community.blockUser",
             Permission::MemberBan,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, did| {
+            &|_, _, did| {
                 Box::pin(async move {
                     Ok(ActorAuthz {
                         is_owner: did == "did:plc:owner",
@@ -277,19 +299,7 @@ mod tests {
                     })
                 })
             },
-            move |_, _, record| {
-                let captured = captured_clone.clone();
-                Box::pin(async move {
-                    *captured.lock().unwrap() = Some(record);
-                    Ok(record_data::Model {
-                        id: 1,
-                        did: String::from("did:plc:owner"),
-                        nsid: String::from("social.colibri.moderation"),
-                        rkey: String::from("mod-1"),
-                        data: serde_json::json!({}),
-                    })
-                })
-            },
+            &write_record,
         )
         .await
         .unwrap();
@@ -313,13 +323,13 @@ mod tests {
             db,
             "social.colibri.community.blockUser",
             Permission::MemberBan,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
                         is_owner: false,
@@ -328,7 +338,7 @@ mod tests {
                     })
                 })
             },
-            |_, _, _| Box::pin(async { panic!("should not write when permission missing") }),
+            &|_, _, _| Box::pin(async { panic!("should not write when permission missing") }),
         )
         .await;
 
@@ -347,13 +357,13 @@ mod tests {
             db,
             "social.colibri.community.blockUser",
             Permission::MemberBan,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, did| {
+            &|_, _, did| {
                 Box::pin(async move {
                     if did == "did:plc:mod" {
                         Ok(ActorAuthz {
@@ -370,7 +380,7 @@ mod tests {
                     }
                 })
             },
-            |_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
+            &|_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
         )
         .await;
 
@@ -391,13 +401,13 @@ mod tests {
             db,
             "social.colibri.community.unblockUser",
             Permission::MemberUnban,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
-            |_| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
                 })
             },
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
                         is_owner: false,
@@ -406,7 +416,7 @@ mod tests {
                     })
                 })
             },
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(record_data::Model {
                         id: 1,

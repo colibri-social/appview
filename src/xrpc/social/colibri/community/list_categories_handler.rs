@@ -45,16 +45,18 @@ pub async fn fetch_category_records(
         .await
 }
 
-type FetchCategoriesFn = fn(
-    DatabaseConnection,
-    String,
-    String,
-) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>;
+type FetchCategoriesFn = dyn Fn(
+        DatabaseConnection,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>
+    + Send
+    + Sync;
 
 async fn list_categories_with(
     community_uri: String,
     db: DatabaseConnection,
-    fetch_categories_fn: FetchCategoriesFn,
+    fetch_categories_fn: &FetchCategoriesFn,
 ) -> Result<Json<CategoryList>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
@@ -108,7 +110,7 @@ pub async fn list_categories(
     list_categories_with(
         community.to_string(),
         db.inner().clone(),
-        fetch_categories_boxed,
+        &fetch_categories_boxed,
     )
     .await
 }
@@ -125,7 +127,7 @@ mod tests {
         let result = list_categories_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(vec![record_data::Model {
                         id: 1,
@@ -162,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let result = list_categories_with(String::from("not-a-uri"), db, |_, _, _| {
+        let result = list_categories_with(String::from("not-a-uri"), db, &|_, _, _| {
             Box::pin(async { panic!("should not fetch when uri is invalid") })
         })
         .await;
@@ -180,7 +182,7 @@ mod tests {
         let result = list_categories_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _, _| {
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(vec![
                         record_data::Model {

@@ -42,19 +42,22 @@ pub async fn fetch_latest_read_cursor(
         .await
 }
 
-type VerifyAuthFn = fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>;
-type FetchCursorFn = fn(
-    DatabaseConnection,
-    String,
-    String,
-) -> BoxFuture<'static, Result<Option<record_data::Model>, DbErr>>;
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type FetchCursorFn = dyn Fn(
+        DatabaseConnection,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<Option<record_data::Model>, DbErr>>
+    + Send
+    + Sync;
 
 async fn get_read_cursor_with(
     channel_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: VerifyAuthFn,
-    fetch_cursor_fn: FetchCursorFn,
+    verify_auth_fn: &VerifyAuthFn,
+    fetch_cursor_fn: &FetchCursorFn,
 ) -> Result<Json<ReadCursor>, ErrorResponse> {
     if AtUri::parse(&channel_uri).is_none() {
         return Err(ErrorResponse {
@@ -124,8 +127,8 @@ pub async fn get_read_cursor(
         channel.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        fetch_cursor_boxed,
+        &verify_auth_boxed,
+        &fetch_cursor_boxed,
     )
     .await
 }
@@ -156,8 +159,8 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            |_, _, _| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(Some(cursor_record(
                         "rkey-latest",
@@ -187,8 +190,8 @@ mod tests {
             String::from("not-a-uri"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
-            |_, _, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
+            &|_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
+            &|_, _, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
         )
         .await;
 
@@ -206,8 +209,8 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _, _| Box::pin(async { panic!("should not fetch when auth fails") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _, _| Box::pin(async { panic!("should not fetch when auth fails") }),
         )
         .await;
 
@@ -222,8 +225,8 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            |_, _, _| Box::pin(async { Ok(None) }),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, _| Box::pin(async { Ok(None) }),
         )
         .await;
 

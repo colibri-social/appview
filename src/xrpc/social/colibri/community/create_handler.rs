@@ -75,39 +75,45 @@ pub struct AdminCredentials {
     pub password: String,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn create_with<V, A, S, R, U>(
-    auth: String,
-    input: CreateCommunityInput,
-    handle_domain: String,
-    pds_endpoint: String,
-    admin_credentials: AdminCredentials,
-    verify_auth_fn: V,
-    create_account_fn: A,
-    create_session_fn: S,
-    create_record_fn: R,
-    upsert_credentials_fn: U,
-) -> Result<Json<CreateCommunityResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    A: Fn(
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type CreateAccountFn = dyn Fn(
         String,
         AdminCredentials,
         String,
         String,
         String,
-    ) -> BoxFuture<'static, Result<CreatedAccount, PdsError>>,
-    S: Fn(String, String, String) -> BoxFuture<'static, Result<String, PdsError>>,
-    R: Fn(
+    ) -> BoxFuture<'static, Result<CreatedAccount, PdsError>>
+    + Send
+    + Sync;
+type CreateSessionFn =
+    dyn Fn(String, String, String) -> BoxFuture<'static, Result<String, PdsError>> + Send + Sync;
+type CreateRecordFn = dyn Fn(
         String,
         String,
         String,
         String,
         Option<String>,
         Value,
-    ) -> BoxFuture<'static, Result<RecordRef, PdsError>>,
-    U: Fn(String, String, String, String) -> BoxFuture<'static, Result<(), String>>,
-{
+    ) -> BoxFuture<'static, Result<RecordRef, PdsError>>
+    + Send
+    + Sync;
+type UpsertCredentialsFn =
+    dyn Fn(String, String, String, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync;
+
+#[allow(clippy::too_many_arguments)]
+async fn create_with(
+    auth: String,
+    input: CreateCommunityInput,
+    handle_domain: String,
+    pds_endpoint: String,
+    admin_credentials: AdminCredentials,
+    verify_auth_fn: &VerifyAuthFn,
+    create_account_fn: &CreateAccountFn,
+    create_session_fn: &CreateSessionFn,
+    create_record_fn: &CreateRecordFn,
+    upsert_credentials_fn: &UpsertCredentialsFn,
+) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
     let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.create"))
         .await
         .map_err(auth_error)?;
@@ -168,7 +174,7 @@ where
         picture: None,
     };
     let community_ref = write_record(
-        &create_record_fn,
+        create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         community_did.clone(),
@@ -188,7 +194,7 @@ where
         community: COMMUNITY_RKEY.to_string(),
     };
     let category_ref = write_record(
-        &create_record_fn,
+        create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         community_did.clone(),
@@ -211,7 +217,7 @@ where
         owner_only: None,
     };
     let channel_ref = write_record(
-        &create_record_fn,
+        create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         community_did.clone(),
@@ -239,7 +245,7 @@ where
         channel_overrides: vec![],
     };
     let role_ref = write_record(
-        &create_record_fn,
+        create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         community_did.clone(),
@@ -261,7 +267,7 @@ where
         from_membership: None,
     };
     let member_ref = write_record(
-        &create_record_fn,
+        create_record_fn,
         pds_endpoint,
         access_jwt,
         community_did.clone(),
@@ -286,8 +292,8 @@ where
 /// the error-translation boilerplate so the five bootstrap writes above all
 /// surface the same shape of error.
 #[allow(clippy::too_many_arguments)]
-async fn write_record<R, T>(
-    create_record_fn: &R,
+async fn write_record<T>(
+    create_record_fn: &CreateRecordFn,
     pds_endpoint: String,
     access_jwt: String,
     repo: String,
@@ -297,14 +303,6 @@ async fn write_record<R, T>(
     label: &'static str,
 ) -> Result<RecordRef, ErrorResponse>
 where
-    R: Fn(
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Value,
-    ) -> BoxFuture<'static, Result<RecordRef, PdsError>>,
     T: Serialize,
 {
     let value = serde_json::to_value(record)
@@ -465,11 +463,11 @@ pub async fn create(
         handle_domain,
         pds_endpoint,
         admin_credentials,
-        verify_auth_boxed,
-        create_account_boxed,
-        create_session_boxed,
-        create_record_boxed,
-        upsert,
+        &verify_auth_boxed,
+        &create_account_boxed,
+        &create_session_boxed,
+        &create_record_boxed,
+        &upsert,
     )
     .await
 }
@@ -507,47 +505,65 @@ mod tests {
         let admin_captured: Arc<Mutex<Option<AdminCredentials>>> = Arc::new(Mutex::new(None));
         let ac = admin_captured.clone();
 
+        let create_account = move |_: String,
+                                   admin: AdminCredentials,
+                                   handle: String,
+                                   _email: String,
+                                   _password: String|
+              -> BoxFuture<'static, Result<CreatedAccount, PdsError>> {
+            let ac = ac.clone();
+            Box::pin(async move {
+                *ac.lock().unwrap() = Some(admin);
+                Ok(CreatedAccount {
+                    did: String::from("did:plc:newcomm"),
+                    access_jwt: String::from("jwt-from-create"),
+                    handle,
+                })
+            })
+        };
+        let create_record = move |_: String,
+                                  _: String,
+                                  _: String,
+                                  collection: String,
+                                  rkey: Option<String>,
+                                  record: Value|
+              -> BoxFuture<'static, Result<RecordRef, PdsError>> {
+            let cr = cr.clone();
+            Box::pin(async move {
+                cr.lock()
+                    .unwrap()
+                    .push((collection.clone(), rkey.clone(), record));
+                // Pinned-rkey calls echo the supplied rkey; otherwise
+                // pretend the PDS minted a stable test rkey.
+                let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                Ok(RecordRef {
+                    uri: format!("at://did:plc:newcomm/{collection}/{assigned_rkey}"),
+                    cid: String::from("cid"),
+                })
+            })
+        };
+        let upsert = move |did: String,
+                           endpoint: String,
+                           identifier: String,
+                           password: String|
+              -> BoxFuture<'static, Result<(), String>> {
+            let cc = cc.clone();
+            Box::pin(async move {
+                *cc.lock().unwrap() = Some((did, endpoint, identifier, password));
+                Ok(())
+            })
+        };
         let result = create_with(
             String::from("token"),
             input(),
             String::from("community.test"),
             String::from("https://pds.example"),
             admin(),
-            |_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
-            move |_, admin, handle, _email, _password| {
-                let ac = ac.clone();
-                Box::pin(async move {
-                    *ac.lock().unwrap() = Some(admin);
-                    Ok(CreatedAccount {
-                        did: String::from("did:plc:newcomm"),
-                        access_jwt: String::from("jwt-from-create"),
-                        handle,
-                    })
-                })
-            },
-            |_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
-            move |_, _, _, collection, rkey, record| {
-                let cr = cr.clone();
-                Box::pin(async move {
-                    cr.lock()
-                        .unwrap()
-                        .push((collection.clone(), rkey.clone(), record));
-                    // Pinned-rkey calls echo the supplied rkey; otherwise
-                    // pretend the PDS minted a stable test rkey.
-                    let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
-                    Ok(RecordRef {
-                        uri: format!("at://did:plc:newcomm/{collection}/{assigned_rkey}"),
-                        cid: String::from("cid"),
-                    })
-                })
-            },
-            move |did, endpoint, identifier, password| {
-                let cc = cc.clone();
-                Box::pin(async move {
-                    *cc.lock().unwrap() = Some((did, endpoint, identifier, password));
-                    Ok(())
-                })
-            },
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &create_account,
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
+            &create_record,
+            &upsert,
         )
         .await
         .unwrap();
@@ -624,11 +640,11 @@ mod tests {
             String::from("community.test"),
             String::from("https://pds.example"),
             admin(),
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _, _, _, _| Box::pin(async { panic!("should not call") }),
-            |_, _, _| Box::pin(async { panic!("should not call") }),
-            |_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
-            |_, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not call") }),
         )
         .await;
 
@@ -644,8 +660,8 @@ mod tests {
             String::from("community.test"),
             String::from("https://pds.example"),
             admin(),
-            |_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
-            |_, _, _, _, _| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, _, _, _| {
                 Box::pin(async {
                     Err(PdsError::BadStatus {
                         status: 503,
@@ -653,9 +669,9 @@ mod tests {
                     })
                 })
             },
-            |_, _, _| Box::pin(async { panic!("should not call") }),
-            |_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
-            |_, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not call") }),
         )
         .await;
 

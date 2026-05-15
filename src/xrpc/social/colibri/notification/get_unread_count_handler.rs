@@ -13,16 +13,17 @@ pub struct UnreadCountResponse {
     pub count: u64,
 }
 
-async fn get_unread_count_with<V, C>(
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type CountFn =
+    dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>> + Send + Sync;
+
+async fn get_unread_count_with(
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    count_fn: C,
-) -> Result<Json<UnreadCountResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    C: Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    count_fn: &CountFn,
+) -> Result<Json<UnreadCountResponse>, ErrorResponse> {
     let did = verify_auth_fn(
         auth,
         String::from("social.colibri.notification.getUnreadCount"),
@@ -59,8 +60,8 @@ pub async fn get_unread_count(
     get_unread_count_with(
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        count_boxed,
+        &verify_auth_boxed,
+        &count_boxed,
     )
     .await
 }
@@ -77,8 +78,8 @@ mod tests {
         let result = get_unread_count_with(
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            |_, did| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, did| {
                 assert_eq!(did, "did:plc:me");
                 Box::pin(async { Ok(7) })
             },
@@ -95,8 +96,8 @@ mod tests {
         let result = get_unread_count_with(
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _| Box::pin(async { panic!("should not count when auth fails") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _| Box::pin(async { panic!("should not count when auth fails") }),
         )
         .await;
 

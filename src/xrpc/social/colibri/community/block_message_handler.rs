@@ -19,23 +19,28 @@ pub struct BlockMessageResponse {
     pub message: String,
 }
 
-async fn block_message_with<V, W>(
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type LoadAuthzFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>
+    + Send
+    + Sync;
+type WriteRecordFn = dyn Fn(
+        DatabaseConnection,
+        AtUri,
+        ColibriModeration,
+    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>
+    + Send
+    + Sync;
+
+async fn block_message_with(
     community_uri: String,
     message_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    load_authz_fn: W,
-    write_record_fn: impl FnOnce(
-        DatabaseConnection,
-        AtUri,
-        ColibriModeration,
-    ) -> BoxFuture<'static, Result<record_data::Model, DbErr>>,
-) -> Result<Json<BlockMessageResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    W: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<ActorAuthz, DbErr>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
+    write_record_fn: &WriteRecordFn,
+) -> Result<Json<BlockMessageResponse>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("InvalidRequest"),
@@ -125,9 +130,9 @@ pub async fn block_message(
         message.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        verify_auth_boxed,
-        load_authz_boxed,
-        write_moderation_boxed,
+        &verify_auth_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
     )
     .await
 }
@@ -145,13 +150,29 @@ mod tests {
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
+        let write_record = move |_: DatabaseConnection,
+                                 _: AtUri,
+                                 record: ColibriModeration|
+              -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(record);
+                Ok(record_data::Model {
+                    id: 1,
+                    did: String::from("did:plc:owner"),
+                    nsid: String::from("social.colibri.moderation"),
+                    rkey: String::from("mod-1"),
+                    data: serde_json::json!({}),
+                })
+            })
+        };
         let result = block_message_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
-            |_, _, _| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
                         is_owner: true,
@@ -160,19 +181,7 @@ mod tests {
                     })
                 })
             },
-            move |_, _, record| {
-                let captured = captured_clone.clone();
-                Box::pin(async move {
-                    *captured.lock().unwrap() = Some(record);
-                    Ok(record_data::Model {
-                        id: 1,
-                        did: String::from("did:plc:owner"),
-                        nsid: String::from("social.colibri.moderation"),
-                        rkey: String::from("mod-1"),
-                        data: serde_json::json!({}),
-                    })
-                })
-            },
+            &write_record,
         )
         .await
         .unwrap();
@@ -197,9 +206,9 @@ mod tests {
             String::from("not-a-uri"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
-            |_, _, _| Box::pin(async { panic!("should not load authz") }),
-            |_, _, _| Box::pin(async { panic!("should not write") }),
+            &|_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz") }),
+            &|_, _, _| Box::pin(async { panic!("should not write") }),
         )
         .await;
 
@@ -218,8 +227,8 @@ mod tests {
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),
             String::from("token"),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
-            |_, _, _| {
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
                         is_owner: false,
@@ -228,7 +237,7 @@ mod tests {
                     })
                 })
             },
-            |_, _, _| Box::pin(async { panic!("should not write") }),
+            &|_, _, _| Box::pin(async { panic!("should not write") }),
         )
         .await;
 

@@ -14,17 +14,19 @@ pub struct UpdateSeenResponse {
     pub updated: u64,
 }
 
-async fn update_seen_with<V, M>(
+type VerifyAuthFn =
+    dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
+type MarkSeenFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<u64, DbErr>>
+    + Send
+    + Sync;
+
+async fn update_seen_with(
     auth: String,
     seen_at_input: Option<String>,
     db: DatabaseConnection,
-    verify_auth_fn: V,
-    mark_seen_fn: M,
-) -> Result<Json<UpdateSeenResponse>, ErrorResponse>
-where
-    V: Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>>,
-    M: Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<u64, DbErr>>,
-{
+    verify_auth_fn: &VerifyAuthFn,
+    mark_seen_fn: &MarkSeenFn,
+) -> Result<Json<UpdateSeenResponse>, ErrorResponse> {
     let did = verify_auth_fn(auth, String::from("social.colibri.notification.updateSeen"))
         .await
         .map_err(|e| ErrorResponse {
@@ -71,8 +73,8 @@ pub async fn update_seen(
         auth.to_string(),
         seen_at.map(|s| s.to_string()),
         db.inner().clone(),
-        verify_auth_boxed,
-        mark_seen_boxed,
+        &verify_auth_boxed,
+        &mark_seen_boxed,
     )
     .await
 }
@@ -90,18 +92,23 @@ mod tests {
         let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
+        let mark_seen = move |_: DatabaseConnection,
+                              did: String,
+                              seen: String,
+                              cutoff: String|
+              -> BoxFuture<'static, Result<u64, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some((did, seen, cutoff));
+                Ok(3)
+            })
+        };
         let result = update_seen_with(
             String::from("token"),
             None,
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            move |_, did, seen, cutoff| {
-                let captured = captured_clone.clone();
-                Box::pin(async move {
-                    *captured.lock().unwrap() = Some((did, seen, cutoff));
-                    Ok(3)
-                })
-            },
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &mark_seen,
         )
         .await
         .unwrap();
@@ -120,18 +127,23 @@ mod tests {
         let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
+        let mark_seen = move |_: DatabaseConnection,
+                              _did: String,
+                              seen: String,
+                              cutoff: String|
+              -> BoxFuture<'static, Result<u64, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some((seen, cutoff));
+                Ok(1)
+            })
+        };
         let _ = update_seen_with(
             String::from("token"),
             Some(String::from("2026-05-14T05:00:00.000Z")),
             db,
-            |_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            move |_, _, seen, cutoff| {
-                let captured = captured_clone.clone();
-                Box::pin(async move {
-                    *captured.lock().unwrap() = Some((seen, cutoff));
-                    Ok(1)
-                })
-            },
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &mark_seen,
         )
         .await
         .unwrap();
@@ -148,8 +160,8 @@ mod tests {
             String::from("token"),
             None,
             db,
-            |_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            |_, _, _, _| Box::pin(async { panic!("should not mark when auth fails") }),
+            &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not mark when auth fails") }),
         )
         .await;
 
