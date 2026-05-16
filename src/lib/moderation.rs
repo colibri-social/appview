@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use futures::future::BoxFuture;
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, prelude::Expr,
+};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
@@ -10,6 +12,8 @@ use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
+
+pub const MEMBER_NSID: &str = "social.colibri.member";
 
 /// Trait-object alias for the moderation write seam.
 ///
@@ -31,6 +35,27 @@ pub fn write_moderation_boxed(
     record: ColibriModeration,
 ) -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
     Box::pin(async move { write_moderation_record(&db, &community, &record).await })
+}
+
+/// Trait-object alias for the member-revocation seam — used to delete a
+/// `social.colibri.member` record from the community's PDS when a member is
+/// banned, kicked, or leaves on their own. Returns `true` if a record was
+/// actually deleted, `false` if no member record was found for the subject.
+pub type RevokeMemberFn = dyn Fn(
+        DatabaseConnection,
+        /* community_did */ String,
+        /* subject_did */ String,
+    ) -> BoxFuture<'static, Result<bool, DbErr>>
+    + Send
+    + Sync;
+
+/// Production [`RevokeMemberFn`] — forwards to [`revoke_community_member`].
+pub fn revoke_member_boxed(
+    db: DatabaseConnection,
+    community_did: String,
+    subject_did: String,
+) -> BoxFuture<'static, Result<bool, DbErr>> {
+    Box::pin(async move { revoke_community_member(&db, &community_did, &subject_did).await })
 }
 
 pub const MODERATION_NSID: &str = "social.colibri.moderation";
@@ -171,10 +196,10 @@ fn pds_error_to_db_err(e: PdsError) -> DbErr {
 /// `ban`/`unban` moderation event in createdAt order.
 pub async fn currently_banned_dids(
     db: &DatabaseConnection,
-    community: &AtUri,
+    community_did: &str,
 ) -> Result<Vec<String>, DbErr> {
     let records = record_data::Entity::find()
-        .filter(record_data::Column::Did.eq(&community.authority))
+        .filter(record_data::Column::Did.eq(community_did))
         .filter(record_data::Column::Nsid.eq(MODERATION_NSID))
         .order_by_asc(record_data::Column::Rkey)
         .all(db)
@@ -204,16 +229,12 @@ pub async fn currently_banned_dids(
 }
 
 /// Returns true if the given user is currently banned in the community.
-///
-/// Currently used only as a building block — future endpoints (e.g. message
-/// posting that must reject banned users) will consume this directly.
-#[allow(dead_code)]
 pub async fn is_user_banned(
     db: &DatabaseConnection,
-    community: &AtUri,
+    community_did: &str,
     did: &str,
 ) -> Result<bool, DbErr> {
-    let banned = currently_banned_dids(db, community).await?;
+    let banned = currently_banned_dids(db, community_did).await?;
     Ok(banned.iter().any(|b| b == did))
 }
 
@@ -236,6 +257,73 @@ pub async fn issue_action(
 ) -> Result<record_data::Model, DbErr> {
     let record = moderation_record(action, subject, created_by, current_iso8601_utc(), reason);
     write_record_fn(db, community, record).await
+}
+
+/// Looks up the rkey of the `social.colibri.member` record for `subject_did`
+/// in the given community. Returns `None` if no member record exists yet
+/// (e.g. the subject was never admitted).
+pub async fn find_member_rkey(
+    db: &DatabaseConnection,
+    community_did: &str,
+    subject_did: &str,
+) -> Result<Option<String>, DbErr> {
+    let row = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(community_did))
+        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
+        .filter(Expr::cust_with_values(
+            r#""record_data"."data"->>'subject' = $1"#,
+            vec![sea_orm::Value::from(subject_did.to_string())],
+        ))
+        .one(db)
+        .await?;
+    Ok(row.map(|r| r.rkey))
+}
+
+/// Deletes the `social.colibri.member` record for `subject_did` from the
+/// community's PDS. Used on ban, kick, and self-leave to revoke the
+/// community-side role record after the moderation/state event has been
+/// recorded. Returns `Ok(true)` if a record was actually deleted,
+/// `Ok(false)` if no member record was found (already gone or never existed).
+///
+/// The local `record_data` row is not modified here — the firehose ingester
+/// will reconcile via the upstream member-delete event. (For now, the tap
+/// ingester also short-circuits delete-action processing for `member` and
+/// `membership` NSIDs to actually drop the row, partially working around the
+/// generic-delete bug in `ack_tap_msg`.)
+pub async fn revoke_community_member(
+    db: &DatabaseConnection,
+    community_did: &str,
+    subject_did: &str,
+) -> Result<bool, DbErr> {
+    let Some(member_rkey) = find_member_rkey(db, community_did, subject_did).await? else {
+        return Ok(false);
+    };
+
+    let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
+        .await
+        .map_err(credentials_error_to_db_err)?
+        .ok_or_else(|| {
+            DbErr::Custom(format!(
+                "no credentials registered for community {community_did}"
+            ))
+        })?;
+
+    let session =
+        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
+            .await
+            .map_err(pds_error_to_db_err)?;
+
+    pds_client::delete_record(
+        &creds.pds_endpoint,
+        &session.access_jwt,
+        community_did,
+        MEMBER_NSID,
+        &member_rkey,
+    )
+    .await
+    .map_err(pds_error_to_db_err)?;
+
+    Ok(true)
 }
 
 /// Convenience constructor for building a moderation record payload.
