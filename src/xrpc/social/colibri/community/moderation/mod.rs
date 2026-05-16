@@ -8,5 +8,5 @@ pub mod block_user_handler;
 pub mod list_blocked_users_handler;
 
 pub use block_message_handler::block_message;
-pub use block_user_handler::{block_user, unblock_user};
+pub use block_user_handler::{block_user, kick_user, unblock_user};
 pub use list_blocked_users_handler::list_blocked_users;

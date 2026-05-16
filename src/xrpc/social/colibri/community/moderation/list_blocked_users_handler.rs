@@ -36,7 +36,7 @@ fn fetch_banned_boxed(
     db: DatabaseConnection,
     community: AtUri,
 ) -> BoxFuture<'static, Result<Vec<String>, DbErr>> {
-    Box::pin(async move { currently_banned_dids(&db, &community).await })
+    Box::pin(async move { currently_banned_dids(&db, &community.authority).await })
 }
 
 #[get("/xrpc/social.colibri.community.listBlockedUsers?<community>")]

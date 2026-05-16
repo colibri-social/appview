@@ -66,7 +66,6 @@ struct CreateRecordBody<'a> {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)] // Used by `delete_record`, which is reserved for the item-3 follow-up PR
 struct DeleteRecordBody<'a> {
     repo: &'a str,
     collection: &'a str,
@@ -133,10 +132,8 @@ pub async fn create_record(
     handle_response::<RecordRef>(resp).await
 }
 
-/// Calls `com.atproto.repo.deleteRecord`. Reserved for the item-3 follow-up
-/// PR (member-record removal on ban/kick/leave); unused today but kept here
-/// so the PDS-client surface is complete.
-#[allow(dead_code)]
+/// Calls `com.atproto.repo.deleteRecord`. Used by member-record revocation
+/// on ban / kick / self-leave (see `lib::moderation::revoke_community_member`).
 pub async fn delete_record(
     pds_endpoint: &str,
     access_jwt: &str,

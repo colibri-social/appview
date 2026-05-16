@@ -14,6 +14,6 @@ pub mod register_credentials_handler;
 
 pub use create_handler::create;
 pub use invitations::{create_invitation, delete_invitation, get_invitation, list_invitations};
-pub use moderation::{block_message, block_user, list_blocked_users, unblock_user};
+pub use moderation::{block_message, block_user, kick_user, list_blocked_users, unblock_user};
 pub use reads::{list_categories, list_channels, list_members};
 pub use register_credentials_handler::register_credentials;

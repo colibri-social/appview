@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::moderation::currently_banned_dids;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::record_data;
@@ -178,10 +179,22 @@ pub async fn assemble_message_page(
         })
         .unwrap_or_default();
 
-    let records = fetch_message_page(db, &channel.rkey, limit, cursor).await?;
+    let banned: HashSet<String> = currently_banned_dids(db, &channel.authority)
+        .await?
+        .into_iter()
+        .collect();
+
+    let raw_records = fetch_message_page(db, &channel.rkey, limit, cursor).await?;
+    let records: Vec<record_data::Model> = raw_records
+        .into_iter()
+        .filter(|r| !banned.contains(&r.did))
+        .collect();
 
     let message_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
-    let reactions = group_reactions_for_messages(db, &message_rkeys).await?;
+    let reactions = strip_banned_reactors(
+        group_reactions_for_messages(db, &message_rkeys).await?,
+        &banned,
+    );
 
     let parent_rkeys: Vec<String> = records
         .iter()
@@ -191,7 +204,16 @@ pub async fn assemble_message_page(
                 .and_then(|m| m.parent)
         })
         .collect();
-    let parents = fetch_parent_uris(db, &channel.rkey, &parent_rkeys).await?;
+    let parents = fetch_parent_uris(db, &channel.rkey, &parent_rkeys)
+        .await?
+        .into_iter()
+        .filter(|(_, uri)| {
+            // parent_uri is `at://<author>/...`; drop entries whose author is banned.
+            AtUri::parse(uri)
+                .map(|p| !banned.contains(&p.authority))
+                .unwrap_or(true)
+        })
+        .collect();
 
     Ok(MessagePage {
         records,
@@ -199,6 +221,35 @@ pub async fn assemble_message_page(
         parents,
         reactions,
     })
+}
+
+/// Removes banned reactors from every [`ReactionSummary`] in the map, dropping
+/// groups that become empty and recomputing `count`.
+fn strip_banned_reactors(
+    grouped: HashMap<String, Vec<ReactionSummary>>,
+    banned: &HashSet<String>,
+) -> HashMap<String, Vec<ReactionSummary>> {
+    if banned.is_empty() {
+        return grouped;
+    }
+    grouped
+        .into_iter()
+        .map(|(rkey, summaries)| {
+            let filtered = summaries
+                .into_iter()
+                .filter_map(|mut s| {
+                    s.reactor_dids.retain(|d| !banned.contains(d));
+                    if s.reactor_dids.is_empty() {
+                        None
+                    } else {
+                        s.count = s.reactor_dids.len() as u32;
+                        Some(s)
+                    }
+                })
+                .collect();
+            (rkey, filtered)
+        })
+        .collect()
 }
 
 type AssemblePageFn = dyn Fn(
@@ -411,6 +462,34 @@ mod tests {
         .unwrap();
 
         assert!(result.cursor.is_none());
+    }
+
+    #[test]
+    fn strip_banned_reactors_drops_banned_dids_per_message() {
+        let banned: HashSet<String> = ["did:plc:alice".to_string()].into_iter().collect();
+        let mut grouped: HashMap<String, Vec<ReactionSummary>> = HashMap::new();
+        grouped.insert(
+            String::from("msg-1"),
+            vec![
+                ReactionSummary {
+                    emoji: String::from("🦜"),
+                    count: 2,
+                    reactor_dids: vec![String::from("did:plc:alice"), String::from("did:plc:bob")],
+                },
+                ReactionSummary {
+                    emoji: String::from("🔥"),
+                    count: 1,
+                    reactor_dids: vec![String::from("did:plc:alice")],
+                },
+            ],
+        );
+
+        let filtered = strip_banned_reactors(grouped, &banned);
+        let summaries = filtered.get("msg-1").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].emoji, "🦜");
+        assert_eq!(summaries[0].count, 1);
+        assert_eq!(summaries[0].reactor_dids, vec![String::from("did:plc:bob")]);
     }
 
     #[tokio::test]

@@ -9,7 +9,8 @@ use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
 use crate::lib::moderation::{
-    self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN, WriteRecordFn, write_moderation_boxed,
+    self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN, RevokeMemberFn, WriteRecordFn,
+    revoke_member_boxed, write_moderation_boxed,
 };
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
@@ -57,6 +58,7 @@ async fn moderate_user_with(
     resolve_fn: &ResolveFn,
     load_authz_fn: &LoadAuthzFn,
     write_record_fn: &WriteRecordFn,
+    revoke_member_fn: &RevokeMemberFn,
 ) -> Result<Json<BlockUserResponse>, ErrorResponse> {
     let (target_did, target_handle) = resolve_fn(identifier).await?;
     let target_did_for_body = target_did.clone();
@@ -92,9 +94,10 @@ async fn moderate_user_with(
                 }
             }
 
+            let community_did_for_revoke = ctx.community.authority.clone();
             moderation::issue_action(
                 write_record_fn,
-                db,
+                db.clone(),
                 ctx.community,
                 action,
                 ColibriModerationSubject {
@@ -105,6 +108,20 @@ async fn moderate_user_with(
                 None,
             )
             .await?;
+
+            // Best-effort revoke of the community-side `social.colibri.member`
+            // record. The moderation event is the source of truth for ban
+            // state; if the PDS write fails the record stays put but the
+            // user is already filtered out at read time.
+            if (action == ACTION_BAN || action == ACTION_KICK)
+                && let Err(e) =
+                    revoke_member_fn(db, community_did_for_revoke, target_did_for_body.clone())
+                        .await
+            {
+                log::warn!(
+                    "member-record revoke failed for {target_did_for_body} after {action}: {e}"
+                );
+            }
 
             Ok(Json(BlockUserResponse {
                 did: target_did,
@@ -141,6 +158,7 @@ pub async fn block_user(
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
+        &revoke_member_boxed,
     )
     .await
 }
@@ -165,6 +183,36 @@ pub async fn unblock_user(
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
+        &revoke_member_boxed,
+    )
+    .await
+}
+
+#[post("/xrpc/social.colibri.community.kickUser?<community>&<identifier>&<auth>")]
+/// Kicks a user from a community by writing a `kick` moderation record.
+///
+/// Unlike `ban`, the kicked user is not prevented from rejoining; the action
+/// just revokes their current membership. The same hierarchy guard as `ban`
+/// applies — callers can only kick members ranked strictly below them.
+pub async fn kick_user(
+    community: &str,
+    identifier: &str,
+    auth: &str,
+    db: &State<DatabaseConnection>,
+) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    moderate_user_with(
+        ACTION_KICK,
+        community.to_string(),
+        identifier.to_string(),
+        auth.to_string(),
+        db.inner().clone(),
+        "social.colibri.community.kickUser",
+        Permission::MemberKick,
+        &verify_auth_boxed,
+        &resolve_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
+        &revoke_member_boxed,
     )
     .await
 }
@@ -186,6 +234,8 @@ mod tests {
         let db = mock_db();
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
+        let revoke_captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let revoke_clone = revoke_captured.clone();
 
         let write_record = move |_: DatabaseConnection,
                                  _: AtUri,
@@ -201,6 +251,16 @@ mod tests {
                     rkey: String::from("mod-1"),
                     data: serde_json::json!({}),
                 })
+            })
+        };
+        let revoke_fn = move |_: DatabaseConnection,
+                              community_did: String,
+                              subject_did: String|
+              -> BoxFuture<'static, Result<bool, DbErr>> {
+            let revoke = revoke_clone.clone();
+            Box::pin(async move {
+                *revoke.lock().unwrap() = Some((community_did, subject_did));
+                Ok(true)
             })
         };
         let result = moderate_user_with(
@@ -227,6 +287,7 @@ mod tests {
                 })
             },
             &write_record,
+            &revoke_fn,
         )
         .await
         .unwrap();
@@ -237,6 +298,10 @@ mod tests {
         assert_eq!(written.action, "ban");
         assert_eq!(written.subject.did.as_deref(), Some("did:plc:target"));
         assert_eq!(written.created_by, "did:plc:owner");
+
+        let (revoke_community, revoke_subject) = revoke_captured.lock().unwrap().take().unwrap();
+        assert_eq!(revoke_community, "did:plc:owner");
+        assert_eq!(revoke_subject, "did:plc:target");
     }
 
     #[tokio::test]
@@ -266,6 +331,7 @@ mod tests {
                 })
             },
             &|_, _, _| Box::pin(async { panic!("should not write when permission missing") }),
+            &|_, _, _| Box::pin(async { panic!("should not revoke when permission missing") }),
         )
         .await;
 
@@ -308,6 +374,119 @@ mod tests {
                 })
             },
             &|_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
+            &|_, _, _| Box::pin(async { panic!("should not revoke when hierarchy blocks") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().body.into_inner();
+        assert_eq!(err.error, "Forbidden");
+        assert!(err.message.contains("role position"));
+    }
+
+    #[tokio::test]
+    async fn kick_user_writes_kick_record_and_enforces_hierarchy() {
+        let db = mock_db();
+        let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let write_record = move |_: DatabaseConnection,
+                                 _: AtUri,
+                                 record: ColibriModeration|
+              -> BoxFuture<'static, Result<record_data::Model, DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(record);
+                Ok(record_data::Model {
+                    id: 1,
+                    did: String::from("did:plc:owner"),
+                    nsid: String::from("social.colibri.moderation"),
+                    rkey: String::from("mod-1"),
+                    data: serde_json::json!({}),
+                })
+            })
+        };
+
+        let result = moderate_user_with(
+            ACTION_KICK,
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("did:plc:target"),
+            String::from("token"),
+            db,
+            "social.colibri.community.kickUser",
+            Permission::MemberKick,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
+            &|_, _, did| {
+                Box::pin(async move {
+                    if did == "did:plc:mod" {
+                        Ok(ActorAuthz {
+                            is_owner: false,
+                            member: Some(member("did:plc:mod", vec!["r1"])),
+                            roles: vec![role("Moderator", 50, vec![Permission::MemberKick])],
+                        })
+                    } else {
+                        Ok(ActorAuthz {
+                            is_owner: false,
+                            member: Some(member("did:plc:target", vec!["r2"])),
+                            roles: vec![role("Member", 10, vec![])],
+                        })
+                    }
+                })
+            },
+            &write_record,
+            &|_, _, _| Box::pin(async { Ok(true) }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.did, "did:plc:target");
+        let written = captured.lock().unwrap().take().unwrap();
+        assert_eq!(written.action, "kick");
+        assert_eq!(written.subject.did.as_deref(), Some("did:plc:target"));
+        assert_eq!(written.created_by, "did:plc:mod");
+    }
+
+    #[tokio::test]
+    async fn kick_user_rejects_when_target_outranks_caller() {
+        let db = mock_db();
+        let result = moderate_user_with(
+            ACTION_KICK,
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("did:plc:target"),
+            String::from("token"),
+            db,
+            "social.colibri.community.kickUser",
+            Permission::MemberKick,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
+            &|_, _, did| {
+                Box::pin(async move {
+                    if did == "did:plc:mod" {
+                        Ok(ActorAuthz {
+                            is_owner: false,
+                            member: Some(member("did:plc:mod", vec!["r1"])),
+                            roles: vec![role("Moderator", 10, vec![Permission::MemberKick])],
+                        })
+                    } else {
+                        Ok(ActorAuthz {
+                            is_owner: false,
+                            member: Some(member("did:plc:target", vec!["r2"])),
+                            roles: vec![role("Admin", 50, vec![])],
+                        })
+                    }
+                })
+            },
+            &|_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
+            &|_, _, _| Box::pin(async { panic!("should not revoke when hierarchy blocks") }),
         )
         .await;
 
@@ -354,6 +533,7 @@ mod tests {
                     })
                 })
             },
+            &|_, _, _| Box::pin(async { panic!("unblock should not revoke member record") }),
         )
         .await;
 

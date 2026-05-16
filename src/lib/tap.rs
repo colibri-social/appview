@@ -1,11 +1,15 @@
-use crate::lib::colibri::ColibriMessage;
+use crate::lib::at_uri::AtUri;
+use crate::lib::colibri::{ColibriMembership, ColibriMessage};
+use crate::lib::moderation::{self, MEMBER_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use rocket::tokio::sync::{broadcast, mpsc};
 use rocket::tokio::{net::TcpStream, sync::mpsc::Sender};
-use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
+use sea_orm::{
+    ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, sea_query,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::io::Error;
@@ -13,6 +17,8 @@ use tokio_tungstenite::tungstenite::Message as TungMessage;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::client::IntoClientRequest,
 };
+
+const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 
 use crate::xrpc::social::colibri::sync::subscribe_events_handler::DidStruct;
 
@@ -95,35 +101,61 @@ pub async fn register_dids(dids: Vec<String>) {
 }
 
 /// Acknowledges a message from Tap and saves the data in the database.
+///
+/// For `delete` events on `social.colibri.member` and `social.colibri.membership`
+/// the local `record_data` row is actually removed, so subsequent authz / read
+/// queries reflect that the user is gone. The generic delete path still
+/// upserts an empty row (tracked bug — separate follow-up); these two NSIDs
+/// are special-cased here because they drive the role-revocation flow.
 pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, text: String) {
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
 
     if let Some(safe_record) = msg_data.record {
-        let json_data: Value = serde_json::to_value(&safe_record.record).unwrap();
+        let is_membership_or_member_delete = safe_record.action == "delete"
+            && matches!(
+                safe_record.collection.as_str(),
+                MEMBER_NSID | MEMBERSHIP_NSID
+            );
 
-        let insert_result = RecordData::insert(RecordDataModel {
-            data: ActiveValue::Set(json_data),
-            did: ActiveValue::Set(safe_record.did),
-            nsid: ActiveValue::Set(safe_record.collection),
-            rkey: ActiveValue::Set(safe_record.rkey),
-            ..Default::default()
-        })
-        .on_conflict(
-            sea_query::OnConflict::columns([
-                record_data::Column::Did,
-                record_data::Column::Nsid,
-                record_data::Column::Rkey,
-            ])
-            .update_column(record_data::Column::Data)
-            .to_owned(),
-        )
-        .exec(db)
-        .await;
+        if is_membership_or_member_delete {
+            let delete_result = RecordData::delete_many()
+                .filter(record_data::Column::Did.eq(&safe_record.did))
+                .filter(record_data::Column::Nsid.eq(&safe_record.collection))
+                .filter(record_data::Column::Rkey.eq(&safe_record.rkey))
+                .exec(db)
+                .await;
 
-        if let Err(res) = insert_result {
-            log::error!("Unable to save record in database: {}", res);
+            if let Err(res) = delete_result {
+                log::error!("Unable to delete record from database: {}", res);
+                return;
+            }
+        } else {
+            let json_data: Value = serde_json::to_value(&safe_record.record).unwrap();
 
-            return;
+            let insert_result = RecordData::insert(RecordDataModel {
+                data: ActiveValue::Set(json_data),
+                did: ActiveValue::Set(safe_record.did),
+                nsid: ActiveValue::Set(safe_record.collection),
+                rkey: ActiveValue::Set(safe_record.rkey),
+                ..Default::default()
+            })
+            .on_conflict(
+                sea_query::OnConflict::columns([
+                    record_data::Column::Did,
+                    record_data::Column::Nsid,
+                    record_data::Column::Rkey,
+                ])
+                .update_column(record_data::Column::Data)
+                .to_owned(),
+            )
+            .exec(db)
+            .await;
+
+            if let Err(res) = insert_result {
+                log::error!("Unable to save record in database: {}", res);
+
+                return;
+            }
         }
     }
 
@@ -234,12 +266,57 @@ pub async fn run_connection(
                         }
                     }
 
+                    // Self-leave detection: when a user deletes their own
+                    // `social.colibri.membership`, drop their community-side
+                    // `social.colibri.member` record. Runs before `ack_tap_msg`
+                    // so the cached membership row (which holds the community
+                    // URI) is still present to read.
+                    if record.collection == MEMBERSHIP_NSID
+                        && record.action == "delete"
+                        && let Err(e) = revoke_member_for_leave(&db, &record).await
+                    {
+                        log::error!(
+                            "member revoke on leave failed for {}/{}: {}",
+                            record.did,
+                            record.rkey,
+                            e
+                        );
+                    }
+
                     let _ = tx_inbound.send(record);
                     ack_tap_msg(&db, &mut to_tap, text.to_string()).await;
                 }
             }
         }
     }
+}
+
+/// Looks up the cached `social.colibri.membership` row for the deleted record,
+/// resolves the community DID from its payload, and revokes the community-side
+/// `social.colibri.member` record. Returns `Ok(())` when the cached record is
+/// missing or malformed (best-effort — nothing to revoke).
+async fn revoke_member_for_leave(
+    db: &DatabaseConnection,
+    record: &TapMessageRecord,
+) -> Result<(), DbErr> {
+    let old = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&record.did))
+        .filter(record_data::Column::Nsid.eq(MEMBERSHIP_NSID))
+        .filter(record_data::Column::Rkey.eq(&record.rkey))
+        .one(db)
+        .await?;
+    let Some(row) = old else {
+        return Ok(());
+    };
+    let Ok(membership) = serde_json::from_value::<ColibriMembership>(row.data) else {
+        return Ok(());
+    };
+    let Some(community) = AtUri::parse(&membership.community) else {
+        return Ok(());
+    };
+
+    moderation::revoke_community_member(db, &community.authority, &record.did).await?;
+    Ok(())
 }
 
 #[cfg(test)]
