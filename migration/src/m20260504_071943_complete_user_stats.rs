@@ -10,9 +10,9 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table("user_states")
-                    .add_column_if_not_exists(string("vc"))
-                    .add_column_if_not_exists(string("vc_community"))
-                    .add_column_if_not_exists(string("channel"))
+                    .add_column_if_not_exists(string_null("vc"))
+                    .add_column_if_not_exists(string_null("vc_community"))
+                    .add_column_if_not_exists(string_null("channel"))
                     .to_owned(),
             )
             .await

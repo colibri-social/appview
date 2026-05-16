@@ -16,7 +16,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub vc_community: Option<String>,
     #[sea_orm(column_type = "Text")]
-    pub channel: String,
+    pub channel: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

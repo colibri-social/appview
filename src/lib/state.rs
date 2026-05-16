@@ -35,7 +35,7 @@ pub async fn leave_vc(did: String, db: &DatabaseConnection) {
 pub async fn view_channel(did: String, channel: String, db: &DatabaseConnection) {
     let _ = UserStates::insert(UserStatesModel {
         did: ActiveValue::Set(did),
-        channel: ActiveValue::Set(channel),
+        channel: ActiveValue::Set(Some(channel)),
         ..Default::default()
     })
     .on_conflict(

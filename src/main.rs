@@ -123,7 +123,7 @@ async fn rocket() -> _ {
 
     Migrator::up(&db, None)
         .await
-        .expect("Unable to apply SeaORM migrations.");
+        .expect("Unable to apply SeaORM migrations");
 
     let tap_stream: TapStream = tap::connect_to_tap()
         .await
