@@ -237,6 +237,11 @@ pub async fn run_connection(
                         return;
                     }
 
+                    if tap_msg.record.is_none() {
+                        // Event does not carry a record
+                        return;
+                    }
+
                     let record = tap_msg.record.unwrap();
 
                     // Centralized notification indexing for newly authored

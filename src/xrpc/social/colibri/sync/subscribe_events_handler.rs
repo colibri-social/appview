@@ -449,7 +449,7 @@ mod tests {
                 state: String::from("online"),
                 vc: None,
                 vc_community: None,
-                channel: String::from("community-1"),
+                channel: Some(String::from("community-1")),
             }]])
             .into_connection();
         let payload = serialize_typing_broadcast(
