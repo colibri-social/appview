@@ -164,16 +164,50 @@ pub async fn delete_record(
     Err(error_from_response(resp).await)
 }
 
+/// Calls `com.atproto.repo.uploadBlob`. Uploads raw bytes with the supplied
+/// `mime_type` (sent verbatim as the `Content-Type` header — atproto's
+/// uploadBlob reads the type off the header rather than from a JSON
+/// wrapper). Returns the inner `blob` object the PDS issues back, ready to
+/// embed verbatim into a blob-typed record field.
+pub async fn upload_blob(
+    pds_endpoint: &str,
+    access_jwt: &str,
+    bytes: Vec<u8>,
+    mime_type: &str,
+) -> Result<Value, PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.repo.uploadBlob",
+        pds_endpoint.trim_end_matches('/')
+    );
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(access_jwt)
+        .header(reqwest::header::CONTENT_TYPE, mime_type)
+        .body(bytes)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(error_from_response(resp).await);
+    }
+    let envelope: Value = resp.json().await.map_err(PdsError::Http)?;
+    envelope
+        .get("blob")
+        .cloned()
+        .ok_or(PdsError::MissingField("blob"))
+}
+
 /// Calls `com.atproto.server.createAccount`. Used when the AppView mints a new
 /// community DID on its own PDS.
 ///
-/// `admin_credentials` is `Some((user, password))` to send an
-/// `Authorization: Basic …` header, which bypasses invite-code requirements
-/// and lets the AppView act as a PDS administrator. Variant A registration
-/// always passes them.
+/// `admin_password` is `Some(password)` to send an `Authorization: Basic …`
+/// header (`admin:<password>`), which bypasses invite-code requirements and
+/// lets the AppView act as a PDS administrator. Variant A registration
+/// always passes one.
 pub async fn create_account(
     pds_endpoint: &str,
-    admin_credentials: Option<(&str, &str)>,
+    admin_password: Option<&str>,
     handle: &str,
     email: &str,
     password: &str,
@@ -189,8 +223,8 @@ pub async fn create_account(
     };
 
     let mut req = reqwest::Client::new().post(url).json(&body);
-    if let Some((user, pass)) = admin_credentials {
-        req = req.basic_auth(user, Some(pass));
+    if let Some(pass) = admin_password {
+        req = req.basic_auth("admin", Some(pass));
     }
 
     let resp = req.send().await?;
