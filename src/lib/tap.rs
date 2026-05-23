@@ -107,10 +107,17 @@ pub async fn register_dids(dids: Vec<String>) {
 /// queries reflect that the user is gone. The generic delete path still
 /// upserts an empty row (tracked bug — separate follow-up); these two NSIDs
 /// are special-cased here because they drive the role-revocation flow.
-pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, text: String) {
+pub async fn ack_tap_msg(
+    db: &DatabaseConnection,
+    to_tap: &mut Sender<String>,
+    text: String,
+    save_in_db: bool,
+) {
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
 
-    if let Some(safe_record) = msg_data.record {
+    if let Some(safe_record) = msg_data.record
+        && save_in_db
+    {
         let is_membership_or_member_delete = safe_record.action == "delete"
             && matches!(
                 safe_record.collection.as_str(),
@@ -174,6 +181,8 @@ pub async fn ack_tap_msg(db: &DatabaseConnection, to_tap: &mut Sender<String>, t
             msg_data.id,
             res_err
         );
+    } else {
+        log::debug!("Acknowledged tap event with ID {}", msg_data.id);
     }
 }
 
@@ -222,27 +231,33 @@ pub async fn run_connection(
             // Message from Remote Server -> broadcast to all S2C clients
             msg = socket.next() => {
                 if let Some(Ok(TungMessage::Text(text))) = msg {
-                    let Ok(_) = serde_json::from_str::<Value>(&text) else {
-                        // Invalid json, ignore
-                        return;
+                    let tap_msg = match serde_json::from_str::<TapMessage>(&text) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            log::warn!("Received unparseable event from tap: {e}; payload={text}");
+                            continue;
+                        }
                     };
-
-                    let tap_msg = serde_json::from_str::<TapMessage>(&text).unwrap();
 
                     if tap_msg.message_type == "record"
                         && tap_msg.record.is_some()
                         && !tap_msg.record.as_ref().unwrap().live
                     {
+                        log::warn!("Received old event from tap ({})", tap_msg.id);
                         // Event isn't live, skip but stay connected
-                        return;
+                        ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
+                        continue;
                     }
 
                     if tap_msg.record.is_none() {
                         // Event does not carry a record
-                        return;
+                        ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
+                        continue;
                     }
 
                     let record = tap_msg.record.unwrap();
+
+                    log::debug!("Processing Tap event, ID {}", tap_msg.id);
 
                     // Centralized notification indexing for newly authored
                     // Colibri messages. Persists rows + broadcasts to live
@@ -289,7 +304,7 @@ pub async fn run_connection(
                     }
 
                     let _ = tx_inbound.send(record);
-                    ack_tap_msg(&db, &mut to_tap, text.to_string()).await;
+                    ack_tap_msg(&db, &mut to_tap, text.to_string(), true).await;
                 }
             }
         }
@@ -340,6 +355,7 @@ mod tests {
             &db,
             &mut tx,
             String::from(r#"{"id":1,"type":"heartbeat","record":null}"#),
+            true,
         )
         .await;
 

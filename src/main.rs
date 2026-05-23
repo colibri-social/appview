@@ -77,8 +77,6 @@ async fn rocket() -> _ {
     // first-call. Keep this list in sync with the env vars that
     // `community.create` (and downstream PDS-write helpers) consume.
     require_env_var("PDS_LOC");
-    require_env_var("PDS_ADMIN_USER");
-    require_env_var("PDS_ADMIN_PASS");
     require_env_var("APPVIEW_HANDLE_DOMAIN");
 
     // Load the at-rest credential encryption key before any handler that

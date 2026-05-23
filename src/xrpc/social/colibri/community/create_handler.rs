@@ -17,6 +17,8 @@
 //! Rkeys for the four non-singleton records are pre-generated locally so each
 //! record can reference the others before any PDS round-trip.
 
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
@@ -52,6 +54,42 @@ const DEFAULT_CHANNEL_NAME: &str = "general";
 const TEXT_CHANNEL_TYPE: &str = "social.colibri.channel.text";
 const COMMUNITY_RKEY: &str = "self";
 
+/// MIME types the community lexicon's `picture` field accepts. Mirrors
+/// `accept: ["image/jpeg", "image/png", "image/gif"]` in the lexicon doc;
+/// keep in sync.
+const ALLOWED_PICTURE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif"];
+
+/// Decodes a base64-encoded picture and validates its declared MIME type.
+///
+/// Rejects with `InvalidRequest` if `mime_type` isn't in
+/// [`ALLOWED_PICTURE_MIME_TYPES`], or if neither URL-safe nor standard
+/// base64 decoding succeeds against the input. (Query-string base64 most
+/// commonly arrives URL-safe; some clients still send the standard
+/// alphabet, so we accept both.)
+fn decode_picture(picture_b64: &str, mime_type: &str) -> Result<Vec<u8>, ErrorResponse> {
+    if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime_type) {
+        return Err(ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("InvalidRequest"),
+                message: format!(
+                    "Unsupported picture mime_type `{mime_type}`. Accepted: {}.",
+                    ALLOWED_PICTURE_MIME_TYPES.join(", ")
+                ),
+            }),
+        });
+    }
+
+    if let Ok(bytes) = URL_SAFE_NO_PAD.decode(picture_b64) {
+        return Ok(bytes);
+    }
+    STANDARD.decode(picture_b64).map_err(|e| ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("InvalidRequest"),
+            message: format!("Invalid base64 in `image`: {e}"),
+        }),
+    })
+}
+
 #[derive(Deserialize, Debug)]
 pub struct CreateCommunityInput {
     pub name: String,
@@ -59,6 +97,10 @@ pub struct CreateCommunityInput {
     pub description: Option<String>,
     #[serde(rename = "requiresApprovalToJoin", default = "default_true")]
     pub requires_approval_to_join: bool,
+    #[serde(default)]
+    pub picture: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -67,11 +109,9 @@ fn default_true() -> bool {
 
 /// Admin credentials for the AppView's own PDS. Bundled as a struct so the
 /// caller passes them through `create_with` without exploding its parameter
-/// list further. Going through the live handler these come from
-/// `PDS_ADMIN_USER` / `PDS_ADMIN_PASS`.
+/// list further. Going through the live handler these come from `PDS_ADMIN_PASS`.
 #[derive(Debug, Clone)]
 pub struct AdminCredentials {
-    pub user: String,
     pub password: String,
 }
 
@@ -100,6 +140,9 @@ type CreateRecordFn = dyn Fn(
     + Sync;
 type UpsertCredentialsFn =
     dyn Fn(String, String, String, String) -> BoxFuture<'static, Result<(), String>> + Send + Sync;
+type UploadBlobFn = dyn Fn(String, String, Vec<u8>, String) -> BoxFuture<'static, Result<Value, PdsError>>
+    + Send
+    + Sync;
 
 #[allow(clippy::too_many_arguments)]
 async fn create_with(
@@ -113,6 +156,7 @@ async fn create_with(
     create_session_fn: &CreateSessionFn,
     create_record_fn: &CreateRecordFn,
     upsert_credentials_fn: &UpsertCredentialsFn,
+    upload_blob_fn: &UploadBlobFn,
 ) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
     let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.create"))
         .await
@@ -163,6 +207,35 @@ async fn create_with(
     let role_rkey = generate_tid();
     let member_rkey = generate_tid();
 
+    // Upload the optional community picture before writing the community
+    // record so the record can embed the resulting blob ref. Picture bytes
+    // come in as base64 on the query string; the PDS reads the MIME type
+    // off the `Content-Type` header in `upload_blob`.
+    let picture_blob = match (input.picture.as_deref(), input.mime_type.as_deref()) {
+        (Some(b64), Some(mime)) => {
+            let bytes = decode_picture(b64, mime)?;
+            Some(
+                upload_blob_fn(
+                    pds_endpoint.clone(),
+                    access_jwt.clone(),
+                    bytes,
+                    mime.to_string(),
+                )
+                .await
+                .map_err(|e| pds_error(format!("uploadBlob failed: {e}")))?,
+            )
+        }
+        (Some(_), None) => {
+            return Err(ErrorResponse {
+                body: Json(ErrorBody {
+                    error: String::from("InvalidRequest"),
+                    message: String::from("`mime_type` is required when `image` is supplied."),
+                }),
+            });
+        }
+        _ => None,
+    };
+
     // 1. Community (singleton — rkey is fixed at "self"; categoryOrder
     //    references the not-yet-written category by its pre-generated rkey).
     let community_record = ColibriCommunity {
@@ -171,7 +244,7 @@ async fn create_with(
         description: input.description.clone().unwrap_or_default(),
         category_order: vec![category_rkey.clone()],
         requires_approval_to_join: input.requires_approval_to_join,
-        picture: None,
+        picture: picture_blob,
     };
     let community_ref = write_record(
         create_record_fn,
@@ -365,7 +438,7 @@ fn create_account_boxed(
     Box::pin(async move {
         pds_client::create_account(
             &pds_endpoint,
-            Some((&admin_credentials.user, &admin_credentials.password)),
+            Some(&admin_credentials.password),
             &handle,
             &email,
             &password,
@@ -406,14 +479,27 @@ fn create_record_boxed(
     })
 }
 
+fn upload_blob_boxed(
+    pds_endpoint: String,
+    access_jwt: String,
+    bytes: Vec<u8>,
+    mime_type: String,
+) -> BoxFuture<'static, Result<Value, PdsError>> {
+    Box::pin(
+        async move { pds_client::upload_blob(&pds_endpoint, &access_jwt, bytes, &mime_type).await },
+    )
+}
+
 #[post(
-    "/xrpc/social.colibri.community.create?<name>&<description>&<requires_approval_to_join>&<auth>"
+    "/xrpc/social.colibri.community.create?<name>&<description>&<requires_approval_to_join>&<auth>&<image>&<mime_type>"
 )]
 /// Mints a new community DID on the AppView's PDS and bootstraps it.
 pub async fn create(
     name: &str,
     description: Option<&str>,
     requires_approval_to_join: Option<bool>,
+    image: Option<&str>,
+    mime_type: Option<&str>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
@@ -421,14 +507,15 @@ pub async fn create(
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
         requires_approval_to_join: requires_approval_to_join.unwrap_or(true),
+        picture: image.map(|s| s.to_string()),
+        mime_type: mime_type.map(|s| s.to_string()),
     };
+
     let pds_endpoint = std::env::var("PDS_LOC")
         .map_err(|_| internal_error(String::from("PDS_LOC env var not set")))?;
     let handle_domain = std::env::var("APPVIEW_HANDLE_DOMAIN")
         .map_err(|_| internal_error(String::from("APPVIEW_HANDLE_DOMAIN env var not set")))?;
     let admin_credentials = AdminCredentials {
-        user: std::env::var("PDS_ADMIN_USER")
-            .map_err(|_| internal_error(String::from("PDS_ADMIN_USER env var not set")))?,
         password: std::env::var("PDS_ADMIN_PASS")
             .map_err(|_| internal_error(String::from("PDS_ADMIN_PASS env var not set")))?,
     };
@@ -468,6 +555,7 @@ pub async fn create(
         &create_session_boxed,
         &create_record_boxed,
         &upsert,
+        &upload_blob_boxed,
     )
     .await
 }
@@ -483,12 +571,13 @@ mod tests {
             name: String::from("Test"),
             description: Some(String::from("desc")),
             requires_approval_to_join: false,
+            picture: None,
+            mime_type: None,
         }
     }
 
     fn admin() -> AdminCredentials {
         AdminCredentials {
-            user: String::from("admin"),
             password: String::from("admin-pass"),
         }
     }
@@ -564,6 +653,7 @@ mod tests {
             &|_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
             &create_record,
             &upsert,
+            &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
         )
         .await
         .unwrap();
@@ -628,7 +718,6 @@ mod tests {
         // without an invite code.
         let forwarded_admin = admin_captured.lock().unwrap();
         let forwarded = forwarded_admin.as_ref().unwrap();
-        assert_eq!(forwarded.user, "admin");
         assert_eq!(forwarded.password, "admin-pass");
     }
 
@@ -644,6 +733,7 @@ mod tests {
             &|_, _, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _| Box::pin(async { panic!("should not call") }),
         )
         .await;
@@ -672,6 +762,7 @@ mod tests {
             &|_, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not call") }),
         )
         .await;
 
@@ -679,5 +770,187 @@ mod tests {
         let body = result.err().unwrap().body.into_inner();
         assert_eq!(body.error, "UpstreamError");
         assert!(body.message.contains("createAccount"));
+    }
+
+    /// A 1×1 transparent PNG, base64-encoded in the standard alphabet.
+    const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    #[tokio::test]
+    async fn uploads_picture_and_links_blob_into_community_record() {
+        let created_records: Arc<Mutex<Vec<(String, Option<String>, Value)>>> =
+            Arc::new(Mutex::new(vec![]));
+        let upload_captured: Arc<Mutex<Option<(Vec<u8>, String)>>> = Arc::new(Mutex::new(None));
+        let cr = created_records.clone();
+        let uc = upload_captured.clone();
+
+        let create_record = move |_: String,
+                                  _: String,
+                                  _: String,
+                                  collection: String,
+                                  rkey: Option<String>,
+                                  record: Value|
+              -> BoxFuture<'static, Result<RecordRef, PdsError>> {
+            let cr = cr.clone();
+            Box::pin(async move {
+                cr.lock()
+                    .unwrap()
+                    .push((collection.clone(), rkey.clone(), record));
+                let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                Ok(RecordRef {
+                    uri: format!("at://did:plc:newcomm/{collection}/{assigned_rkey}"),
+                    cid: String::from("cid"),
+                })
+            })
+        };
+        let upload_blob = move |_: String,
+                                _: String,
+                                bytes: Vec<u8>,
+                                mime: String|
+              -> BoxFuture<'static, Result<Value, PdsError>> {
+            let uc = uc.clone();
+            Box::pin(async move {
+                *uc.lock().unwrap() = Some((bytes, mime.clone()));
+                Ok(serde_json::json!({
+                    "$type": "blob",
+                    "ref": { "$link": "bafyreigh2akiscaildc7fmsxxq6jr2dpqyz4khsxqzfvuxe7osnrxrxv7q" },
+                    "mimeType": mime,
+                    "size": 70,
+                }))
+            })
+        };
+
+        let input_with_picture = CreateCommunityInput {
+            name: String::from("Pictured"),
+            description: Some(String::from("has a picture")),
+            requires_approval_to_join: false,
+            picture: Some(String::from(TINY_PNG_BASE64)),
+            mime_type: Some(String::from("image/png")),
+        };
+
+        let result = create_with(
+            String::from("token"),
+            input_with_picture,
+            String::from("community.test"),
+            String::from("https://pds.example"),
+            admin(),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, handle, _, _| {
+                Box::pin(async move {
+                    Ok(CreatedAccount {
+                        did: String::from("did:plc:newcomm"),
+                        access_jwt: String::from("jwt-from-create"),
+                        handle,
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
+            &create_record,
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &upload_blob,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.did, "did:plc:newcomm");
+
+        // The upload was called with the decoded bytes (≠ the base64 string)
+        // and the supplied mime type.
+        let captured = upload_captured.lock().unwrap();
+        let (bytes, mime) = captured.as_ref().unwrap();
+        assert_eq!(mime, "image/png");
+        // PNG magic bytes — confirms we decoded base64, not passed the string
+        // through verbatim.
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+
+        // The community record's `picture` field carries the blob ref the
+        // upload returned.
+        let records = created_records.lock().unwrap();
+        let (_, _, community_value) = records
+            .iter()
+            .find(|(c, _, _)| c == "social.colibri.community")
+            .unwrap();
+        let picture = &community_value["picture"];
+        assert_eq!(picture["$type"], "blob");
+        assert_eq!(picture["mimeType"], "image/png");
+        assert!(picture["ref"]["$link"].is_string());
+    }
+
+    #[tokio::test]
+    async fn rejects_image_without_mime_type() {
+        let input_without_mime = CreateCommunityInput {
+            name: String::from("NoMime"),
+            description: None,
+            requires_approval_to_join: false,
+            picture: Some(String::from(TINY_PNG_BASE64)),
+            mime_type: None,
+        };
+
+        let result = create_with(
+            String::from("token"),
+            input_without_mime,
+            String::from("community.test"),
+            String::from("https://pds.example"),
+            admin(),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, handle, _, _| {
+                Box::pin(async move {
+                    Ok(CreatedAccount {
+                        did: String::from("did:plc:newcomm"),
+                        access_jwt: String::from("jwt"),
+                        handle,
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt")) }),
+            &|_, _, _, _, _, _| Box::pin(async { panic!("should not write records") }),
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not upload without mime") }),
+        )
+        .await;
+
+        let body = result.err().unwrap().body.into_inner();
+        assert_eq!(body.error, "InvalidRequest");
+        assert!(body.message.contains("mime_type"));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_mime_type() {
+        let input_bad_mime = CreateCommunityInput {
+            name: String::from("BadMime"),
+            description: None,
+            requires_approval_to_join: false,
+            picture: Some(String::from(TINY_PNG_BASE64)),
+            mime_type: Some(String::from("image/webp")),
+        };
+
+        let result = create_with(
+            String::from("token"),
+            input_bad_mime,
+            String::from("community.test"),
+            String::from("https://pds.example"),
+            admin(),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, handle, _, _| {
+                Box::pin(async move {
+                    Ok(CreatedAccount {
+                        did: String::from("did:plc:newcomm"),
+                        access_jwt: String::from("jwt"),
+                        handle,
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt")) }),
+            &|_, _, _, _, _, _| Box::pin(async { panic!("should not write records") }),
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not upload with bad mime") }),
+        )
+        .await;
+
+        let body = result.err().unwrap().body.into_inner();
+        assert_eq!(body.error, "InvalidRequest");
+        assert!(body.message.contains("image/webp"));
     }
 }
