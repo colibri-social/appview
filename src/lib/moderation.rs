@@ -6,7 +6,7 @@ use sea_orm::{
 };
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::{ColibriModeration, ColibriModerationSubject};
+use crate::lib::colibri::{ColibriMember, ColibriModeration, ColibriModerationSubject};
 use crate::lib::community_credentials::{self, CredentialsError};
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError};
@@ -67,20 +67,30 @@ pub const ACTION_HIDE_MESSAGE: &str = "hideMessage";
 #[allow(dead_code)]
 pub const ACTION_UNHIDE_MESSAGE: &str = "unhideMessage";
 pub const ACTION_KICK: &str = "kick";
+/// System-issued audit entry recorded when a currently-banned user writes a
+/// `social.colibri.membership` targeting this community. The AppView refuses
+/// to write the matching `member` record; this entry exists so moderators can
+/// see the attempt in the audit feed. `created_by` is the community DID
+/// (the action is automated, not moderator-driven).
+pub const ACTION_BLOCKED_JOIN: &str = "blockedJoin";
 
-/// Generates a TID-like rkey (13 base32-sortable chars) based on the current
-/// system time. Sufficient for cursor ordering; the AppView is the only writer.
+/// Generates an atproto TID rkey: 13 base32-sortable chars encoding a 64-bit
+/// big-endian integer laid out as `[reserved=0 | micros(53) | clock_id(10)]`.
+/// The reserved high bit is always 0; `clock_id` is randomized per call so
+/// near-simultaneous calls on the same clock-microsecond don't collide.
 pub fn generate_tid() -> String {
+    use rand::Rng;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const ALPHABET: &[u8] = b"234567abcdefghijklmnopqrstuvwxyz";
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_micros() as u64;
-    // Pack microseconds into 13 base32 chars (65 bits, we drop the high bit).
+        .as_micros() as u64
+        & ((1u64 << 53) - 1);
+    let clock_id: u64 = rand::thread_rng().gen_range(0..(1u64 << 10));
+    let mut value = (micros << 10) | clock_id;
     let mut out = [0u8; 13];
-    let mut value = micros & ((1u64 << 53) - 1);
     for slot in out.iter_mut().rev() {
         *slot = ALPHABET[(value & 31) as usize];
         value >>= 5;
@@ -326,6 +336,106 @@ pub async fn revoke_community_member(
     Ok(true)
 }
 
+/// Writes a `social.colibri.member` record on the community's PDS, admitting
+/// `subject_did` to the community. Mirror of [`revoke_community_member`].
+///
+/// Idempotent: if a member record already exists for `subject_did`, this
+/// returns `Ok(None)` without writing. Callers that need to know whether a
+/// new record was actually minted should branch on the return value.
+///
+/// The write goes through stored community credentials (see
+/// [`community_credentials`]); on success the new row is optimistically
+/// inserted into the local `record_data` cache so the issuer's own reads
+/// reflect the change immediately — the firehose ingester will redeliver
+/// the same record, and the local cache's unique `(did, nsid, rkey)` index
+/// makes that a no-op.
+pub async fn write_member_record(
+    db: &DatabaseConnection,
+    community_did: &str,
+    subject_did: &str,
+    role_rkeys: Vec<String>,
+    from_membership: Option<String>,
+) -> Result<Option<record_data::Model>, DbErr> {
+    if find_member_rkey(db, community_did, subject_did).await?.is_some() {
+        return Ok(None);
+    }
+
+    let record = ColibriMember {
+        record_type: Some(MEMBER_NSID.to_string()),
+        subject: subject_did.to_string(),
+        roles: role_rkeys,
+        joined_at: current_iso8601_utc(),
+        nickname: None,
+        from_membership,
+    };
+    let data = serde_json::to_value(&record).map_err(|e| DbErr::Custom(e.to_string()))?;
+
+    let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
+        .await
+        .map_err(credentials_error_to_db_err)?
+        .ok_or_else(|| {
+            DbErr::Custom(format!(
+                "no credentials registered for community {community_did}"
+            ))
+        })?;
+
+    let session =
+        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
+            .await
+            .map_err(pds_error_to_db_err)?;
+
+    let record_ref = pds_client::create_record(
+        &creds.pds_endpoint,
+        &session.access_jwt,
+        community_did,
+        MEMBER_NSID,
+        None,
+        &data,
+    )
+    .await
+    .map_err(pds_error_to_db_err)?;
+
+    let parsed = AtUri::parse(&record_ref.uri).ok_or_else(|| {
+        DbErr::Custom(format!(
+            "pds returned malformed record URI: {}",
+            record_ref.uri
+        ))
+    })?;
+    let rkey = parsed.rkey;
+
+    let active = record_data::ActiveModel {
+        did: sea_orm::ActiveValue::Set(community_did.to_string()),
+        nsid: sea_orm::ActiveValue::Set(MEMBER_NSID.to_string()),
+        rkey: sea_orm::ActiveValue::Set(rkey.clone()),
+        data: sea_orm::ActiveValue::Set(data.clone()),
+        ..Default::default()
+    };
+    if let Err(e) = record_data::Entity::insert(active).exec(db).await {
+        log::warn!(
+            "optimistic local insert failed for member {community_did}/{rkey}: {e} \
+             (firehose will reconcile)"
+        );
+    }
+
+    if let Some(row) = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(community_did))
+        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
+        .filter(record_data::Column::Rkey.eq(&rkey))
+        .one(db)
+        .await?
+    {
+        return Ok(Some(row));
+    }
+
+    Ok(Some(record_data::Model {
+        id: 0,
+        did: community_did.to_string(),
+        nsid: MEMBER_NSID.to_string(),
+        rkey,
+        data,
+    }))
+}
+
 /// Convenience constructor for building a moderation record payload.
 pub fn moderation_record(
     action: &str,
@@ -408,5 +518,42 @@ mod tests {
         let t = generate_tid();
         assert_eq!(t.len(), 13);
         assert!(t.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    /// Regression: TIDs used to put the microseconds in the low bits of the
+    /// 64-bit value instead of bits 62..10, so parsers decoded them as
+    /// ~January 1970. This test decodes a freshly minted TID with the atproto
+    /// layout (`micros = value >> 10`) and confirms the timestamp matches the
+    /// current wall clock within a couple of seconds.
+    #[test]
+    fn generate_tid_encodes_current_microseconds_in_atproto_layout() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        const ALPHABET: &[u8] = b"234567abcdefghijklmnopqrstuvwxyz";
+        let now_micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        let tid = generate_tid();
+        let mut value: u64 = 0;
+        for c in tid.bytes() {
+            let idx = ALPHABET
+                .iter()
+                .position(|&a| a == c)
+                .expect("TID must use the base32-sortable alphabet") as u64;
+            value = (value << 5) | idx;
+        }
+        // Reserved high bit must be zero.
+        assert_eq!(value >> 63, 0, "TID reserved high bit must be 0");
+        let decoded_micros = value >> 10;
+
+        // Tolerate a couple of seconds of skew between the two wall-clock
+        // reads + any system jitter.
+        let skew = decoded_micros.abs_diff(now_micros);
+        assert!(
+            skew < 2_000_000,
+            "TID timestamp {decoded_micros} differs from now {now_micros} by {skew} µs"
+        );
     }
 }

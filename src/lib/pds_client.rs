@@ -77,6 +77,19 @@ struct CreateAccountBody<'a> {
     handle: &'a str,
     email: &'a str,
     password: &'a str,
+    #[serde(rename = "inviteCode")]
+    invite_code: &'a str,
+}
+
+#[derive(Serialize)]
+struct InviteCodeBody {
+    #[serde(rename = "useCount")]
+    use_count: i32,
+}
+
+#[derive(Deserialize)]
+struct InviteCodeResponse {
+    code: String,
 }
 
 /// Calls `com.atproto.server.createSession` and returns the resulting session.
@@ -98,6 +111,46 @@ pub async fn create_session(
 
     let resp = reqwest::Client::new().post(url).json(&body).send().await?;
     handle_response::<PdsSession>(resp).await
+}
+
+/// Calls `com.atproto.repo.getRecord` and returns the record's `value` (the
+/// actual record payload). Used as a fallback when the local `record_data`
+/// cache doesn't yet know about a record we care about — e.g. a brand-new
+/// community whose `self` record hasn't been backfilled from the firehose.
+///
+/// Returns `Ok(None)` when the PDS responds with a not-found error;
+/// propagates any other HTTP/PDS error.
+pub async fn get_record(
+    pds_endpoint: &str,
+    repo: &str,
+    collection: &str,
+    rkey: &str,
+) -> Result<Option<Value>, PdsError> {
+    #[derive(Deserialize)]
+    struct GetRecordResponse {
+        value: Value,
+    }
+
+    let url = format!(
+        "{}/xrpc/com.atproto.repo.getRecord?repo={repo}&collection={collection}&rkey={rkey}",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new().get(url).send().await?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        // atproto returns 400 with `error: "RecordNotFound"` for missing
+        // records on some PDS implementations; treat that as a soft miss.
+        let body = resp.text().await.unwrap_or_default();
+        if body.contains("RecordNotFound") {
+            return Ok(None);
+        }
+        return Err(PdsError::BadStatus { status: 400, body });
+    }
+    let parsed: GetRecordResponse = handle_response(resp).await?;
+    Ok(Some(parsed.value))
 }
 
 /// Calls `com.atproto.repo.createRecord` and returns the new record's
@@ -212,6 +265,27 @@ pub async fn create_account(
     email: &str,
     password: &str,
 ) -> Result<CreatedAccount, PdsError> {
+    let invite_code_url = format!(
+        "{}/xrpc/com.atproto.server.createInviteCode",
+        pds_endpoint.trim_end_matches('/')
+    );
+
+    let invite_code_body = InviteCodeBody { use_count: 1 };
+
+    let mut invite_code_req = reqwest::Client::new()
+        .post(invite_code_url)
+        .json(&invite_code_body);
+
+    if let Some(pass) = admin_password {
+        invite_code_req = invite_code_req.basic_auth("admin", Some(pass));
+    }
+
+    let invite_code_resp = invite_code_req
+        .send()
+        .await?
+        .json::<InviteCodeResponse>()
+        .await?;
+
     let url = format!(
         "{}/xrpc/com.atproto.server.createAccount",
         pds_endpoint.trim_end_matches('/')
@@ -220,12 +294,10 @@ pub async fn create_account(
         handle,
         email,
         password,
+        invite_code: &invite_code_resp.code,
     };
 
-    let mut req = reqwest::Client::new().post(url).json(&body);
-    if let Some(pass) = admin_password {
-        req = req.basic_auth("admin", Some(pass));
-    }
+    let req = reqwest::Client::new().post(url).json(&body);
 
     let resp = req.send().await?;
     handle_response::<CreatedAccount>(resp).await

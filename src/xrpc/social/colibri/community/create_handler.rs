@@ -27,7 +27,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::colibri::{
-    ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember, ColibriRole,
+    ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
+    ColibriRole,
 };
 use crate::lib::community_credentials::{self, SOURCE_APPVIEW_MANAGED};
 use crate::lib::crypto;
@@ -162,6 +163,8 @@ async fn create_with(
         .await
         .map_err(auth_error)?;
 
+    log::info!("community.create requested by {caller_did}");
+
     // Generate a placeholder handle on the AppView's domain. Colibri clients
     // identify communities by DID; the handle is an implementation detail of
     // PDS account hosting.
@@ -169,6 +172,8 @@ async fn create_with(
     let handle = format!("c-{placeholder_rkey}.{handle_domain}");
     let email = format!("c-{placeholder_rkey}@noreply.{handle_domain}");
     let password = pds_client::generate_strong_password();
+
+    log::debug!("generated placeholder handle {handle} for new community");
 
     let account = create_account_fn(
         pds_endpoint.clone(),
@@ -178,9 +183,16 @@ async fn create_with(
         password.clone(),
     )
     .await
-    .map_err(|e| pds_error(format!("createAccount failed: {e}")))?;
+    .map_err(|e| {
+        log::error!("community.create: createAccount on {pds_endpoint} failed: {e}");
+        pds_error(format!("createAccount failed: {e}"))
+    })?;
 
     let community_did = account.did.clone();
+    log::info!(
+        "minted community DID {community_did} (handle {handle})",
+        handle = account.handle
+    );
 
     // Persist credentials immediately so any partial failure below is still
     // recoverable via a follow-up call.
@@ -191,14 +203,28 @@ async fn create_with(
         password.clone(),
     )
     .await
-    .map_err(|e| internal_error(format!("failed to persist credentials: {e}")))?;
+    .map_err(|e| {
+        log::error!(
+            "community.create: failed to persist credentials for {community_did}: {e} \
+             — PDS account exists but credentials are not stored, manual recovery required"
+        );
+        internal_error(format!("failed to persist credentials: {e}"))
+    })?;
+
+    log::debug!("persisted credentials for {community_did}");
 
     // Fresh session for the bootstrap writes — `account.access_jwt` from
     // createAccount is usable directly, but re-using create_session keeps the
     // dependency surface identical for testing.
     let access_jwt = create_session_fn(pds_endpoint.clone(), account.handle.clone(), password)
         .await
-        .map_err(|e| pds_error(format!("createSession failed: {e}")))?;
+        .map_err(|e| {
+            log::error!(
+                "community.create: createSession for {community_did} failed: {e} \
+                 — credentials persisted, bootstrap recoverable via follow-up call"
+            );
+            pds_error(format!("createSession failed: {e}"))
+        })?;
 
     // Pre-generate rkeys for all bootstrap records up front so each record
     // can embed references to the others before any PDS round-trip.
@@ -213,19 +239,35 @@ async fn create_with(
     // off the `Content-Type` header in `upload_blob`.
     let picture_blob = match (input.picture.as_deref(), input.mime_type.as_deref()) {
         (Some(b64), Some(mime)) => {
-            let bytes = decode_picture(b64, mime)?;
-            Some(
-                upload_blob_fn(
-                    pds_endpoint.clone(),
-                    access_jwt.clone(),
-                    bytes,
-                    mime.to_string(),
-                )
-                .await
-                .map_err(|e| pds_error(format!("uploadBlob failed: {e}")))?,
+            let bytes = decode_picture(b64, mime).map_err(|e| {
+                log::warn!(
+                    "community.create: rejecting picture for {community_did} (mime={mime}, \
+                     account already minted)"
+                );
+                e
+            })?;
+            let byte_len = bytes.len();
+            let blob = upload_blob_fn(
+                pds_endpoint.clone(),
+                access_jwt.clone(),
+                bytes,
+                mime.to_string(),
             )
+            .await
+            .map_err(|e| {
+                log::error!("community.create: uploadBlob for {community_did} failed: {e}");
+                pds_error(format!("uploadBlob failed: {e}"))
+            })?;
+            log::debug!(
+                "uploaded picture blob for {community_did} ({mime}, {byte_len} bytes)"
+            );
+            Some(blob)
         }
         (Some(_), None) => {
+            log::warn!(
+                "community.create: rejecting picture for {community_did}: mime_type missing \
+                 (account already minted)"
+            );
             return Err(ErrorResponse {
                 body: Json(ErrorBody {
                     error: String::from("InvalidRequest"),
@@ -246,10 +288,11 @@ async fn create_with(
         requires_approval_to_join: input.requires_approval_to_join,
         picture: picture_blob,
     };
-    let community_ref = write_record(
+    let community_ref = write_record_logged(
         create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
+        &community_did,
         community_did.clone(),
         "social.colibri.community",
         Some(COMMUNITY_RKEY.to_string()),
@@ -266,10 +309,11 @@ async fn create_with(
         channel_order: vec![channel_rkey.clone()],
         community: COMMUNITY_RKEY.to_string(),
     };
-    let category_ref = write_record(
+    let category_ref = write_record_logged(
         create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
+        &community_did,
         community_did.clone(),
         "social.colibri.category",
         Some(category_rkey.clone()),
@@ -289,10 +333,11 @@ async fn create_with(
         community: COMMUNITY_RKEY.to_string(),
         owner_only: None,
     };
-    let channel_ref = write_record(
+    let channel_ref = write_record_logged(
         create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
+        &community_did,
         community_did.clone(),
         "social.colibri.channel",
         Some(channel_rkey.clone()),
@@ -317,10 +362,11 @@ async fn create_with(
         protected: Some(true),
         channel_overrides: vec![],
     };
-    let role_ref = write_record(
+    let role_ref = write_record_logged(
         create_record_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
+        &community_did,
         community_did.clone(),
         "social.colibri.role",
         Some(role_rkey.clone()),
@@ -339,10 +385,11 @@ async fn create_with(
         nickname: None,
         from_membership: None,
     };
-    let member_ref = write_record(
+    let member_ref = write_record_logged(
         create_record_fn,
-        pds_endpoint,
-        access_jwt,
+        pds_endpoint.clone(),
+        access_jwt.clone(),
+        &community_did,
         community_did.clone(),
         "social.colibri.member",
         Some(member_rkey),
@@ -350,6 +397,36 @@ async fn create_with(
         "member",
     )
     .await?;
+
+    // 6. Empty `social.colibri.actor.data` record at rkey "self". The
+    //    community DID isn't a human actor, but having this record in place
+    //    (a) lets `getData(<community_did>)` succeed without 404ing on the
+    //    actor.data lookup, and (b) gives Tap a stable record on the
+    //    community repo that downstream consumers can rely on as a "this
+    //    DID is a Colibri-managed community" signal.
+    //
+    //    Empty everything: no emoji, empty status, no community memberships.
+    //    The community DID never joins other communities.
+    let actor_data_record = ColibriActorData {
+        record_type: Some(String::from("social.colibri.actor.data")),
+        emoji: Some(String::new()),
+        status: String::new(),
+        communities: vec![],
+    };
+    write_record_logged(
+        create_record_fn,
+        pds_endpoint,
+        access_jwt,
+        &community_did,
+        community_did.clone(),
+        "social.colibri.actor.data",
+        Some(String::from("self")),
+        &actor_data_record,
+        "actor.data",
+    )
+    .await?;
+
+    log::info!("community.create complete for {community_did} (caller {caller_did})");
 
     Ok(Json(CreateCommunityResponse {
         did: community_did,
@@ -359,6 +436,48 @@ async fn create_with(
         owner_role: role_ref.uri,
         member: member_ref.uri,
     }))
+}
+
+/// Wraps `write_record` with bootstrap-flow logging: a `debug` line before the
+/// call and an `error` line if the upstream write fails. Kept separate from
+/// `write_record` so the underlying helper stays generic.
+#[allow(clippy::too_many_arguments)]
+async fn write_record_logged<T>(
+    create_record_fn: &CreateRecordFn,
+    pds_endpoint: String,
+    access_jwt: String,
+    community_did: &str,
+    repo: String,
+    collection: &'static str,
+    rkey: Option<String>,
+    record: &T,
+    label: &'static str,
+) -> Result<RecordRef, ErrorResponse>
+where
+    T: Serialize,
+{
+    log::debug!(
+        "writing {label} record for {community_did} (rkey={})",
+        rkey.as_deref().unwrap_or("<auto>")
+    );
+    write_record(
+        create_record_fn,
+        pds_endpoint,
+        access_jwt,
+        repo,
+        collection,
+        rkey,
+        record,
+        label,
+    )
+    .await
+    .map_err(|e| {
+        log::error!(
+            "community.create: write_record({label}) for {community_did} failed: {}",
+            e.body.0.message
+        );
+        e
+    })
 }
 
 /// Serializes a record payload and issues one `createRecord` call. Centralizes
@@ -544,7 +663,7 @@ pub async fn create(
         })
     };
 
-    create_with(
+    let response = create_with(
         auth.to_string(),
         input,
         handle_domain,
@@ -557,7 +676,20 @@ pub async fn create(
         &upsert,
         &upload_blob_boxed,
     )
-    .await
+    .await?;
+
+    // Register the freshly-minted community DID with Tap so the firehose
+    // starts delivering its records into `record_data`. Without this, the
+    // bootstrap records (community, category, channel, role, member) sit on
+    // the new PDS and never enter the local index — `listCommunities` would
+    // never return the new community, even for its owner.
+    //
+    // Done out here (rather than in `create_with`) so the test seam surface
+    // for `create_with` stays unchanged and the env-var reads inside
+    // `register_dids` don't crash unit tests.
+    crate::lib::tap::register_dids(vec![response.did.clone()]).await;
+
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -666,7 +798,7 @@ mod tests {
         );
 
         let records = created_records.lock().unwrap();
-        assert_eq!(records.len(), 5, "bootstrap writes 5 records");
+        assert_eq!(records.len(), 6, "bootstrap writes 6 records");
 
         let by_collection: std::collections::HashMap<_, _> = records
             .iter()
@@ -708,6 +840,16 @@ mod tests {
         assert_eq!(member_value["subject"], "did:plc:caller");
         let member_roles = member_value["roles"].as_array().unwrap();
         assert_eq!(member_roles.len(), 1);
+
+        // Actor data: pinned at "self" with everything explicitly empty so
+        // Tap indexes a stable, queryable row.
+        let (actor_data_rkey, actor_data_value) =
+            by_collection.get("social.colibri.actor.data").unwrap();
+        assert_eq!(actor_data_rkey.as_deref(), Some("self"));
+        assert_eq!(actor_data_value["status"], "");
+        assert_eq!(actor_data_value["emoji"], "");
+        let community_list = actor_data_value["communities"].as_array().unwrap();
+        assert!(community_list.is_empty());
 
         let creds = credentials_captured.lock().unwrap();
         let saved = creds.as_ref().unwrap();

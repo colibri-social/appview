@@ -163,7 +163,7 @@ pub async fn register_credentials(
         })
     };
 
-    register_with(
+    let response = register_with(
         auth.to_string(),
         did.to_string(),
         pds.to_string(),
@@ -173,7 +173,19 @@ pub async fn register_credentials(
         &create_session_boxed,
         &upsert,
     )
-    .await
+    .await?;
+
+    // Register the BYO community DID with Tap so the firehose starts
+    // delivering its records into `record_data`. Tap's backfill path picks
+    // up everything already on the PDS at the moment of registration, so a
+    // community that pre-existed the AppView still gets indexed in full.
+    //
+    // Done in the handler (not in `register_with`) so unit tests don't
+    // trip on the env-var reads (`TAP_HOSTNAME`, `TAP_ADMIN_PASSWORD`)
+    // inside `register_dids`.
+    crate::lib::tap::register_dids(vec![response.did.clone()]).await;
+
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -17,8 +17,7 @@ pub struct ReactionSummary {
 #[derive(Deserialize)]
 struct StoredReaction {
     emoji: String,
-    #[serde(rename = "targetMessage")]
-    target_message: String,
+    parent: String,
 }
 
 /// Loads every reaction targeting the provided message rkeys and returns them
@@ -39,7 +38,7 @@ pub async fn group_reactions_for_messages(
 
     let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
     let in_clause = format!(
-        r#""record_data"."data"->>'targetMessage' IN ({})"#,
+        r#""record_data"."data"->>'parent' IN ({})"#,
         placeholders.join(", ")
     );
 
@@ -60,7 +59,7 @@ pub async fn list_reactions_for_message(
     let records = record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq("social.colibri.reaction"))
         .filter(Expr::cust_with_values(
-            r#""record_data"."data"->>'targetMessage' = $1"#,
+            r#""record_data"."data"->>'parent' = $1"#,
             vec![sea_orm::Value::from(message_rkey.to_string())],
         ))
         .all(db)
@@ -81,7 +80,7 @@ fn group_reaction_records(
             continue;
         };
         buckets
-            .entry((stored.target_message, stored.emoji))
+            .entry((stored.parent, stored.emoji))
             .or_default()
             .push(record.did);
     }
@@ -112,7 +111,7 @@ mod tests {
             rkey: rkey.to_string(),
             data: serde_json::json!({
                 "emoji": emoji,
-                "targetMessage": target,
+                "parent": target,
             }),
         }
     }

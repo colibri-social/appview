@@ -1,7 +1,11 @@
 use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::{ColibriMembership, ColibriMessage};
-use crate::lib::moderation::{self, MEMBER_NSID};
+use crate::lib::colibri::{
+    ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
+};
+use crate::lib::community_record::fetch_community_record;
+use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MEMBER_NSID, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
+use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
@@ -26,6 +30,7 @@ pub type TapStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TapMessageRecord {
+    #[allow(dead_code)]
     pub live: bool,
     pub did: String,
     #[allow(dead_code)]
@@ -42,6 +47,7 @@ pub struct TapMessageRecord {
 pub struct TapMessage {
     pub id: Number,
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub message_type: String,
     pub record: Option<TapMessageRecord>,
 }
@@ -239,15 +245,15 @@ pub async fn run_connection(
                         }
                     };
 
-                    if tap_msg.message_type == "record"
-                        && tap_msg.record.is_some()
-                        && !tap_msg.record.as_ref().unwrap().live
-                    {
-                        log::warn!("Received old event from tap ({})", tap_msg.id);
-                        // Event isn't live, skip but stay connected
-                        ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
-                        continue;
-                    }
+                    // if tap_msg.message_type == "record"
+                    //     && tap_msg.record.is_some()
+                    //     && !tap_msg.record.as_ref().unwrap().live
+                    // {
+                    //     log::warn!("Received old event from tap ({})", tap_msg.id);
+                    //     // Event isn't live, skip but stay connected
+                    //     ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
+                    //     continue;
+                    // }
 
                     if tap_msg.record.is_none() {
                         // Event does not carry a record
@@ -303,12 +309,184 @@ pub async fn run_connection(
                         );
                     }
 
+                    // Auto-join on membership-create. For open communities the
+                    // AppView writes the matching `social.colibri.member` record
+                    // on the community's PDS. Closed communities sit pending
+                    // until a moderator hits `approveMembership`. Banned users
+                    // get a `blockedJoin` moderation entry for the audit trail
+                    // and no member record. Legacy communities (rkey != "self"
+                    // on the community record) are not auto-joinable — we have
+                    // no community-side credentials for them.
+                    if record.collection == MEMBERSHIP_NSID
+                        && record.action != "delete"
+                        && let Err(e) = process_membership_create(&db, &record).await
+                    {
+                        log::error!(
+                            "membership-create processing failed for {}/{}: {}",
+                            record.did,
+                            record.rkey,
+                            e
+                        );
+                    }
+
                     let _ = tx_inbound.send(record);
                     ack_tap_msg(&db, &mut to_tap, text.to_string(), true).await;
                 }
             }
         }
     }
+}
+
+/// Processes a `social.colibri.membership` create event. Parses the payload,
+/// resolves the community record (cache → PDS fallback), refuses legacy
+/// communities, records a `blockedJoin` audit entry for banned users, and
+/// auto-writes a `social.colibri.member` record on the community's PDS for
+/// open communities. Closed communities are a no-op — moderators advance them
+/// via the `approveMembership` endpoint.
+async fn process_membership_create(
+    db: &DatabaseConnection,
+    record: &TapMessageRecord,
+) -> Result<(), DbErr> {
+    let payload = match record.record.as_ref() {
+        Some(v) => v,
+        None => {
+            log::warn!(
+                "membership-create event from {}/{} carried no payload; skipping",
+                record.did,
+                record.rkey
+            );
+            return Ok(());
+        }
+    };
+    let membership = match serde_json::from_value::<ColibriMembership>(payload.clone()) {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!(
+                "membership-create payload from {}/{} failed to parse: {e}",
+                record.did,
+                record.rkey
+            );
+            return Ok(());
+        }
+    };
+
+    let Some(community_uri) = AtUri::parse(&membership.community) else {
+        log::warn!(
+            "membership from {}/{} has malformed community URI {:?}; skipping",
+            record.did,
+            record.rkey,
+            membership.community
+        );
+        return Ok(());
+    };
+    let community_did = community_uri.authority.clone();
+    let community_rkey = community_uri.rkey.clone();
+
+    // Legacy communities live as one of many records on a user repo with a
+    // TID rkey; AppView holds no credentials for those PDSes, so it can't
+    // write the community-side member record. By design — these communities
+    // are read-only as of the Variant A cutover.
+    if community_rkey != "self" {
+        log::info!(
+            "ignoring membership from {} to legacy community {}/{} (rkey != \"self\")",
+            record.did,
+            community_did,
+            community_rkey
+        );
+        return Ok(());
+    }
+
+    let community = match fetch_community_record(db, &community_did, &community_rkey).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            log::warn!(
+                "membership from {} references unknown community {}/{}; skipping",
+                record.did,
+                community_did,
+                community_rkey
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            log::error!(
+                "community fetch failed for membership {}/{}: {e}",
+                record.did,
+                record.rkey
+            );
+            return Ok(());
+        }
+    };
+
+    if moderation::is_user_banned(db, &community_did, &record.did).await? {
+        log::info!(
+            "refusing membership-create for banned user {} in {}; writing blockedJoin audit",
+            record.did,
+            community_did
+        );
+        let audit = ColibriModeration {
+            record_type: Some(MODERATION_NSID.to_string()),
+            action: ACTION_BLOCKED_JOIN.to_string(),
+            subject: ColibriModerationSubject {
+                did: Some(record.did.clone()),
+                uri: None,
+            },
+            reason: None,
+            created_by: community_did.clone(),
+            created_at: current_iso8601_utc(),
+        };
+        if let Err(e) = moderation::write_moderation_record(db, &community_uri, &audit).await {
+            log::error!(
+                "blockedJoin audit write failed for {} in {}: {e}",
+                record.did,
+                community_did
+            );
+        }
+        return Ok(());
+    }
+
+    if community.requires_approval_to_join {
+        log::debug!(
+            "membership from {} is pending approval for closed community {}",
+            record.did,
+            community_did
+        );
+        return Ok(());
+    }
+
+    let membership_uri = format!("at://{}/{}/{}", record.did, record.collection, record.rkey);
+    match moderation::write_member_record(
+        db,
+        &community_did,
+        &record.did,
+        vec![],
+        Some(membership_uri),
+    )
+    .await
+    {
+        Ok(Some(_)) => {
+            log::info!(
+                "auto-admitted {} to open community {}",
+                record.did,
+                community_did
+            );
+        }
+        Ok(None) => {
+            log::debug!(
+                "membership-create from {} for {} hit existing member record (idempotent skip)",
+                record.did,
+                community_did
+            );
+        }
+        Err(e) => {
+            log::error!(
+                "auto-admit write_member_record failed for {} in {}: {e}",
+                record.did,
+                community_did
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Looks up the cached `social.colibri.membership` row for the deleted record,

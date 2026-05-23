@@ -6,12 +6,14 @@
 //! - `create_handler` + `register_credentials_handler` — community lifecycle
 //!   (top-level because they don't share the prelude shape).
 
+pub mod approve_membership_handler;
 pub mod create_handler;
 pub mod invitations;
 pub mod moderation;
 pub mod reads;
 pub mod register_credentials_handler;
 
+pub use approve_membership_handler::approve_membership;
 pub use create_handler::create;
 pub use invitations::{create_invitation, delete_invitation, get_invitation, list_invitations};
 pub use moderation::{block_message, block_user, kick_user, list_blocked_users, unblock_user};

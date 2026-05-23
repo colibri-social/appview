@@ -45,6 +45,31 @@ pub async fn get_authorized_communities(
     db: &DatabaseConnection,
     user_did: &str,
 ) -> Result<Vec<CommunityExtended>, DbErr> {
+    // Three OR branches describe "the caller is in this community":
+    //
+    // 1. `record_data.did = caller` — the community lives on the caller's
+    //    own repo. Covers legacy communities they host and any self-hosted
+    //    edge cases.
+    //
+    // 2. There's a `social.colibri.member` record on the community's repo
+    //    with `subject = caller`. The Variant A native check — owners get
+    //    this from the bootstrap flow, regular members from auto-admit on
+    //    open communities or `approveMembership` on closed ones.
+    //
+    // 3. Legacy-only fallback: for non-`self` community rkeys (i.e. legacy
+    //    communities that live as one of many records on a user repo), fall
+    //    back to checking for a `social.colibri.membership` record on the
+    //    caller's repo pointing at this community. Necessary because the
+    //    AppView never writes `member` records to legacy communities (no
+    //    PDS credentials for them), so pre-existing memberships would
+    //    otherwise be invisible.
+    //
+    //    Gating the membership-only path behind `rkey <> 'self'` is
+    //    deliberate: for Variant A communities, we want closed-community
+    //    pending applications (membership present, member absent) to stay
+    //    hidden, which only branch 2 enforces.
+    //
+    // `is_legacy` is derived purely from the rkey.
     record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq("social.colibri.community"))
         .filter(
@@ -54,39 +79,31 @@ pub async fn get_authorized_communities(
                     r#"
                     EXISTS (
                         SELECT 1 FROM record_data m
+                        WHERE "m"."nsid" = 'social.colibri.member'
+                          AND "m"."did" = "record_data"."did"
+                          AND "m"."data"->>'subject' = $1
+                    )
+                    "#,
+                    vec![sea_orm::Value::from(user_did)]
+                ))
+                .add(Expr::cust_with_values(
+                    r#"
+                    "record_data"."rkey" <> 'self'
+                    AND EXISTS (
+                        SELECT 1 FROM record_data m
                         WHERE "m"."nsid" = 'social.colibri.membership'
                           AND "m"."did" = $1
-                          AND "m"."data"->>'community' = 'at://' || "record_data"."did" || '/social.colibri.community/' || "record_data"."rkey"
-                          AND (
-                              ("record_data"."data"->>'requiresApprovalToJoin')::boolean IS NOT TRUE
-                              OR EXISTS (
-                                  SELECT 1 FROM record_data a
-                                  WHERE "a"."nsid" = 'social.colibri.approval'
-                                    AND "a"."data" @> jsonb_build_object(
-                                        'membership', 'at://' || "m"."did" || '/social.colibri.membership/' || "m"."rkey"
-                                    )
-                              )
-                          )
+                          AND "m"."data"->>'community' =
+                              'at://' || "record_data"."did" || '/social.colibri.community/' || "record_data"."rkey"
                     )
                     "#,
                     vec![sea_orm::Value::from(user_did)]
                 ))
         )
-        // Add the subquery for the legacy check
         .column_as(
-            Expr::cust(
-                r#"
-                NOT EXISTS (
-                    SELECT 1 FROM record_data p
-                    WHERE "p"."nsid" = 'app.bsky.actor.profile'
-                      AND "p"."did" = "record_data"."did"
-                      AND "p"."data" @> '{"labels": {"values": [{"val": "bot"}]}}'::jsonb
-                )
-                "#
-            ),
+            Expr::cust(r#""record_data"."rkey" <> 'self'"#),
             "is_legacy",
         )
-        // Map the result to the custom struct
         .into_model::<CommunityExtended>()
         .all(db)
         .await

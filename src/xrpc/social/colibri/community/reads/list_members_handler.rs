@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, get};
-use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,16 +39,26 @@ pub async fn fetch_member_aggregate(
     db: &DatabaseConnection,
     community_uri: &str,
 ) -> Result<MemberAggregate, DbErr> {
-    let memberships = record_data::Entity::find()
-        .filter(record_data::Column::Nsid.eq("social.colibri.membership"))
-        .filter(Expr::cust_with_values(
-            r#""record_data"."data"->>'community' = $1"#,
-            vec![sea_orm::Value::from(community_uri.to_string())],
-        ))
+    // Variant A: members are `social.colibri.member` records sitting on the
+    // community's own repo, with `data->>'subject'` carrying the user DID.
+    let community = AtUri::parse(community_uri)
+        .ok_or_else(|| DbErr::Custom(format!("invalid community AT-URI: {community_uri}")))?;
+
+    let members = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&community.authority))
+        .filter(record_data::Column::Nsid.eq("social.colibri.member"))
         .all(db)
         .await?;
 
-    let mut member_dids: Vec<String> = memberships.into_iter().map(|m| m.did).collect();
+    let mut member_dids: Vec<String> = members
+        .into_iter()
+        .filter_map(|m| {
+            m.data
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .collect();
     member_dids.sort();
     member_dids.dedup();
 

@@ -4,8 +4,8 @@ use serde::de::{DeserializeOwned, Error};
 
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{
-    ColibriActorData, ColibriApproval, ColibriApprovalOrMembership, ColibriCategory,
-    ColibriChannel, ColibriCommunity, ColibriMembership, ColibriMessage, ColibriReaction,
+    ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
+    ColibriMembership, ColibriMessage, ColibriReaction,
 };
 use crate::lib::events::{
     CategoryEventData, ChannelEventData, ColibriServerEvent, ColibriServerEventData,
@@ -46,18 +46,6 @@ fn parse_payload<T: DeserializeOwned>(
         .clone()
         .ok_or_else(|| serde_json::Error::custom("Missing record payload"))?;
     serde_json::from_value(payload)
-}
-
-fn parse_at_uri(uri: &str) -> Result<(String, String, String), serde_json::Error> {
-    let bits: Vec<&str> = uri.split('/').collect();
-    if bits.len() < 5 {
-        return Err(serde_json::Error::custom("Invalid AT URI"));
-    }
-    Ok((
-        bits[2].to_string(),
-        bits[3].to_string(),
-        bits[4].to_string(),
-    ))
 }
 
 fn irrelevant_event() -> ColibriServerEvent {
@@ -142,111 +130,73 @@ async fn map_tap_event_with(
                 })
             }
         }
-        "social.colibri.membership" | "social.colibri.approval" => {
-            if event_record.action == "delete" {
-                if event_record.collection == "social.colibri.membership"
-                    && event_record.did == user_did
-                {
-                    let old_record = fetch_record_fn(
-                        event_record.did.clone(),
-                        event_record.collection.clone(),
-                        event_record.rkey.clone(),
-                        db.clone(),
-                    )
-                    .await?;
-                    let safe_record = serde_json::from_value::<ColibriMembership>(old_record)?;
+        "social.colibri.membership" => {
+            // Membership is intent recorded on the user's own repo. It does
+            // NOT broadcast: the authoritative "you're now in" / "you're now
+            // out" signal is the community-side `social.colibri.member`
+            // record, handled below.
+            //
+            // The one exception is membership-delete for the caller — we
+            // emit a community-delete event immediately so the user gets
+            // instant UX feedback on self-leave, without waiting for the
+            // AppView's downstream member-record revoke to round-trip
+            // through the firehose. The eventual member-delete event still
+            // arrives but maps to a no-op on the client (idempotent).
+            if event_record.action == "delete" && event_record.did == user_did {
+                let old_record = fetch_record_fn(
+                    event_record.did.clone(),
+                    event_record.collection.clone(),
+                    event_record.rkey.clone(),
+                    db.clone(),
+                )
+                .await?;
+                let safe_record = serde_json::from_value::<ColibriMembership>(old_record)?;
 
-                    return Ok(ColibriServerEvent {
-                        event_type: String::from("community_event"),
-                        data: Some(ColibriServerEventData::Community(CommunityEventData {
-                            event: String::from("delete"),
-                            uri: safe_record.community,
-                            category_order: None,
-                            description: None,
-                            name: None,
-                            picture: None,
-                        })),
-                        is_relevant: true,
-                    });
-                }
-
-                if event_record.collection == "social.colibri.approval" {
-                    let old_record = fetch_record_fn(
-                        event_record.did.clone(),
-                        event_record.collection.clone(),
-                        event_record.rkey.clone(),
-                        db.clone(),
-                    )
-                    .await?;
-                    let safe_record = serde_json::from_value::<ColibriApproval>(old_record)?;
-                    let (community_did, _, community_rkey) = parse_at_uri(&safe_record.community)?;
-
-                    let community_record = fetch_record_fn(
-                        community_did,
-                        String::from("social.colibri.community"),
-                        community_rkey,
-                        db.clone(),
-                    )
-                    .await?;
-                    let safe_community =
-                        serde_json::from_value::<ColibriCommunity>(community_record)?;
-
-                    if safe_community.requires_approval_to_join {
-                        return Ok(ColibriServerEvent {
-                            event_type: String::from("community_event"),
-                            data: Some(ColibriServerEventData::Community(CommunityEventData {
-                                event: String::from("delete"),
-                                uri: safe_record.community,
-                                category_order: None,
-                                description: None,
-                                name: None,
-                                picture: None,
-                            })),
-                            is_relevant: true,
-                        });
-                    }
-                }
-
-                return Ok(irrelevant_event());
+                return Ok(ColibriServerEvent {
+                    event_type: String::from("community_event"),
+                    data: Some(ColibriServerEventData::Community(CommunityEventData {
+                        event: String::from("delete"),
+                        uri: safe_record.community,
+                        category_order: None,
+                        description: None,
+                        name: None,
+                        picture: None,
+                    })),
+                    is_relevant: true,
+                });
             }
 
-            let record_data = parse_payload::<ColibriApprovalOrMembership>(event_record)?;
-            let (community_did, _, community_rkey) = parse_at_uri(&record_data.community)?;
-            let community_record = fetch_record_fn(
-                community_did,
-                String::from("social.colibri.community"),
-                community_rkey,
-                db.clone(),
-            )
-            .await?;
-            let safe_community = serde_json::from_value::<ColibriCommunity>(community_record)?;
-
-            if event_record.collection == "social.colibri.approval" {
-                let membership_uri = record_data.membership.ok_or_else(|| {
-                    serde_json::Error::custom("Approval record missing membership URI")
-                })?;
-                let (target_did, _, _) = parse_at_uri(&membership_uri)?;
-
-                if target_did == user_did {
-                    return Ok(ColibriServerEvent {
-                        event_type: String::from("community_event"),
-                        data: Some(ColibriServerEventData::Community(CommunityEventData {
-                            event: String::from("upsert"),
-                            uri: record_data.community,
-                            category_order: Some(safe_community.category_order),
-                            description: Some(safe_community.description),
-                            name: Some(safe_community.name),
-                            picture: safe_community.picture,
-                        })),
-                        is_relevant: true,
-                    });
+            Ok(irrelevant_event())
+        }
+        "social.colibri.member" => {
+            // `member` is the source of truth for community membership in the
+            // Variant A model. Broadcasts only fire when the event subject is
+            // the receiving client.
+            //
+            // Create / update → community upsert (auto-admit on open
+            // community, or `approveMembership` on closed). The `did` of a
+            // member record is the community DID; we synthesise the
+            // community URI from it.
+            if event_record.action != "delete" {
+                let record_data = parse_payload::<ColibriMember>(event_record)?;
+                if record_data.subject != user_did {
+                    return Ok(irrelevant_event());
                 }
-            } else if !safe_community.requires_approval_to_join {
+                let community_uri =
+                    format!("at://{}/social.colibri.community/self", event_record.did);
+                let community_record = fetch_record_fn(
+                    event_record.did.clone(),
+                    String::from("social.colibri.community"),
+                    String::from("self"),
+                    db.clone(),
+                )
+                .await?;
+                let safe_community = serde_json::from_value::<ColibriCommunity>(community_record)?;
                 return Ok(ColibriServerEvent {
                     event_type: String::from("community_event"),
                     data: Some(ColibriServerEventData::Community(CommunityEventData {
                         event: String::from("upsert"),
-                        uri: record_data.community,
+                        uri: community_uri,
                         category_order: Some(safe_community.category_order),
                         description: Some(safe_community.description),
                         name: Some(safe_community.name),
@@ -256,7 +206,33 @@ async fn map_tap_event_with(
                 });
             }
 
-            Ok(irrelevant_event())
+            // Delete → community delete to the subject. Look up the prior
+            // member record from cache (still present at this point) to
+            // identify which user the revoke targeted.
+            let old_record = fetch_record_fn(
+                event_record.did.clone(),
+                event_record.collection.clone(),
+                event_record.rkey.clone(),
+                db.clone(),
+            )
+            .await?;
+            let safe_record = serde_json::from_value::<ColibriMember>(old_record)?;
+            if safe_record.subject != user_did {
+                return Ok(irrelevant_event());
+            }
+            let community_uri = format!("at://{}/social.colibri.community/self", event_record.did);
+            Ok(ColibriServerEvent {
+                event_type: String::from("community_event"),
+                data: Some(ColibriServerEventData::Community(CommunityEventData {
+                    event: String::from("delete"),
+                    uri: community_uri,
+                    category_order: None,
+                    description: None,
+                    name: None,
+                    picture: None,
+                })),
+                is_relevant: true,
+            })
         }
         "social.colibri.category" => {
             if event_record.action != "delete" {
@@ -361,7 +337,7 @@ async fn map_tap_event_with(
                         event: String::from("added"),
                         uri,
                         emoji: Some(record_data.emoji),
-                        target: Some(record_data.target_message),
+                        target: Some(record_data.parent),
                     })),
                     is_relevant: true,
                 })
@@ -572,17 +548,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maps_membership_upsert_when_community_is_open() {
+    async fn membership_create_is_irrelevant_in_new_model() {
+        // Intent-only — broadcasts moved to `social.colibri.member` creates.
         let event = map_tap_event_with(
             &record(
                 "social.colibri.membership",
                 "create",
                 json!({
                     "$type":"social.colibri.membership",
-                    "community":"at://did:plc:owner/social.colibri.community/community1",
+                    "community":"at://did:plc:owner/social.colibri.community/self",
                     "createdAt":"2026-01-01T00:00:00Z"
                 }),
             ),
+            "did:plc:abc",
+            mock_db(),
+            &no_fetch,
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(event.event_type, "empty");
+        assert!(!event.is_relevant);
+    }
+
+    #[tokio::test]
+    async fn maps_member_create_to_community_upsert_for_subject() {
+        let event = map_tap_event_with(
+            &TapMessageRecord {
+                live: true,
+                did: String::from("did:plc:community"),
+                rev: String::from("1"),
+                collection: String::from("social.colibri.member"),
+                rkey: String::from("member-1"),
+                action: String::from("create"),
+                record: Some(json!({
+                    "$type": "social.colibri.member",
+                    "subject": "did:plc:abc",
+                    "roles": [],
+                    "joinedAt": "2026-01-01T00:00:00Z"
+                })),
+                cid: Some(String::from("cid")),
+            },
             "did:plc:abc",
             mock_db(),
             &|_, nsid, _, _| {
@@ -606,8 +614,46 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(event.event_type, "community_event");
-        assert!(event.is_relevant);
+        if let Some(ColibriServerEventData::Community(data)) = event.data {
+            assert_eq!(data.event, "upsert");
+            assert_eq!(
+                data.uri,
+                "at://did:plc:community/social.colibri.community/self"
+            );
+            assert_eq!(data.name.as_deref(), Some("General"));
+        } else {
+            panic!("expected community event for member-create");
+        }
+    }
+
+    #[tokio::test]
+    async fn member_create_is_irrelevant_for_other_subjects() {
+        let event = map_tap_event_with(
+            &TapMessageRecord {
+                live: true,
+                did: String::from("did:plc:community"),
+                rev: String::from("1"),
+                collection: String::from("social.colibri.member"),
+                rkey: String::from("member-1"),
+                action: String::from("create"),
+                record: Some(json!({
+                    "$type": "social.colibri.member",
+                    "subject": "did:plc:somebody-else",
+                    "roles": [],
+                    "joinedAt": "2026-01-01T00:00:00Z"
+                })),
+                cid: Some(String::from("cid")),
+            },
+            "did:plc:abc",
+            mock_db(),
+            &no_fetch,
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!event.is_relevant);
     }
 
     #[tokio::test]

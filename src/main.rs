@@ -153,6 +153,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::channel::get_read_cursor,
                 xrpc::social::colibri::channel::list_messages,
                 xrpc::social::colibri::channel::list_reactions,
+                xrpc::social::colibri::community::approve_membership,
                 xrpc::social::colibri::community::block_message,
                 xrpc::social::colibri::community::block_user,
                 xrpc::social::colibri::community::create,
