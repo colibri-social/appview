@@ -149,6 +149,7 @@ mod tests {
                 "channel": "at://did:plc:owner/social.colibri.channel/chan-a",
                 "cursor": cursor,
             }),
+            indexed_at: String::from(""),
         }
     }
 

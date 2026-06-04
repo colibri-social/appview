@@ -66,6 +66,14 @@ struct CreateRecordBody<'a> {
 }
 
 #[derive(Serialize)]
+struct PutRecordBody<'a> {
+    repo: &'a str,
+    collection: &'a str,
+    rkey: &'a str,
+    record: &'a Value,
+}
+
+#[derive(Serialize)]
 struct DeleteRecordBody<'a> {
     repo: &'a str,
     collection: &'a str,
@@ -170,6 +178,38 @@ pub async fn create_record(
         pds_endpoint.trim_end_matches('/')
     );
     let body = CreateRecordBody {
+        repo,
+        collection,
+        rkey,
+        record,
+    };
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(access_jwt)
+        .json(&body)
+        .send()
+        .await?;
+    handle_response::<RecordRef>(resp).await
+}
+
+/// Calls `com.atproto.repo.putRecord` to create or overwrite a record at a
+/// specific rkey. Used by community-management endpoints that update existing
+/// singleton-like records (e.g. the community's `"self"` record, a category,
+/// a channel).
+pub async fn put_record(
+    pds_endpoint: &str,
+    access_jwt: &str,
+    repo: &str,
+    collection: &str,
+    rkey: &str,
+    record: &Value,
+) -> Result<RecordRef, PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.repo.putRecord",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = PutRecordBody {
         repo,
         collection,
         rkey,

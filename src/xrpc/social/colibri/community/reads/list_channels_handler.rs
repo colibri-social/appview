@@ -136,6 +136,7 @@ mod tests {
                             "category": "cat1",
                             "community": "c1"
                         }),
+                        indexed_at: String::from(""),
                     }])
                 })
             },

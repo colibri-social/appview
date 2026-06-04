@@ -113,6 +113,7 @@ mod tests {
                 "emoji": emoji,
                 "parent": target,
             }),
+            indexed_at: String::from(""),
         }
     }
 
@@ -163,6 +164,7 @@ mod tests {
             nsid: String::from("social.colibri.reaction"),
             rkey: String::from("r1"),
             data: serde_json::json!({ "irrelevant": true }),
+            indexed_at: String::from(""),
         }];
         let grouped = group_reaction_records(records);
         assert!(grouped.is_empty());

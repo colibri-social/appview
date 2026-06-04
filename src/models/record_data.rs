@@ -14,6 +14,8 @@ pub struct Model {
     pub rkey: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub data: Value,
+    #[sea_orm(column_type = "Text")]
+    pub indexed_at: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

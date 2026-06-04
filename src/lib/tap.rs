@@ -3,7 +3,7 @@ use crate::lib::colibri::{
     ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
 };
 use crate::lib::community_record::fetch_community_record;
-use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MEMBER_NSID, MODERATION_NSID};
+use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
@@ -108,11 +108,8 @@ pub async fn register_dids(dids: Vec<String>) {
 
 /// Acknowledges a message from Tap and saves the data in the database.
 ///
-/// For `delete` events on `social.colibri.member` and `social.colibri.membership`
-/// the local `record_data` row is actually removed, so subsequent authz / read
-/// queries reflect that the user is gone. The generic delete path still
-/// upserts an empty row (tracked bug — separate follow-up); these two NSIDs
-/// are special-cased here because they drive the role-revocation flow.
+/// For `delete` events the local `record_data` row is removed for any NSID,
+/// keeping the cache consistent with the source repo.
 pub async fn ack_tap_msg(
     db: &DatabaseConnection,
     to_tap: &mut Sender<String>,
@@ -124,13 +121,7 @@ pub async fn ack_tap_msg(
     if let Some(safe_record) = msg_data.record
         && save_in_db
     {
-        let is_membership_or_member_delete = safe_record.action == "delete"
-            && matches!(
-                safe_record.collection.as_str(),
-                MEMBER_NSID | MEMBERSHIP_NSID
-            );
-
-        if is_membership_or_member_delete {
+        if safe_record.action == "delete" {
             let delete_result = RecordData::delete_many()
                 .filter(record_data::Column::Did.eq(&safe_record.did))
                 .filter(record_data::Column::Nsid.eq(&safe_record.collection))
@@ -150,6 +141,7 @@ pub async fn ack_tap_msg(
                 did: ActiveValue::Set(safe_record.did),
                 nsid: ActiveValue::Set(safe_record.collection),
                 rkey: ActiveValue::Set(safe_record.rkey),
+                indexed_at: ActiveValue::Set(current_iso8601_utc()),
                 ..Default::default()
             })
             .on_conflict(

@@ -217,6 +217,33 @@ pub async fn kick_user(
     .await
 }
 
+#[post("/xrpc/social.colibri.community.kick?<community>&<member>&<auth>")]
+/// Kicks a member by DID directly. Identical semantics to `kickUser` but
+/// accepts a DID instead of an identifier, avoiding a handle-resolution
+/// round-trip when the caller already holds the member's DID.
+pub async fn kick(
+    community: &str,
+    member: &str,
+    auth: &str,
+    db: &State<DatabaseConnection>,
+) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    moderate_user_with(
+        ACTION_KICK,
+        community.to_string(),
+        member.to_string(),
+        auth.to_string(),
+        db.inner().clone(),
+        "social.colibri.community.kick",
+        Permission::MemberKick,
+        &verify_auth_boxed,
+        &resolve_boxed,
+        &load_authz_boxed,
+        &write_moderation_boxed,
+        &revoke_member_boxed,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +277,7 @@ mod tests {
                     nsid: String::from("social.colibri.moderation"),
                     rkey: String::from("mod-1"),
                     data: serde_json::json!({}),
+                    indexed_at: String::from(""),
                 })
             })
         };
@@ -403,6 +431,7 @@ mod tests {
                     nsid: String::from("social.colibri.moderation"),
                     rkey: String::from("mod-1"),
                     data: serde_json::json!({}),
+                    indexed_at: String::from(""),
                 })
             })
         };
@@ -530,6 +559,7 @@ mod tests {
                         nsid: String::from("social.colibri.moderation"),
                         rkey: String::from("mod-1"),
                         data: serde_json::json!({}),
+                        indexed_at: String::from(""),
                     })
                 })
             },

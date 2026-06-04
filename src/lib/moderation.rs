@@ -188,6 +188,7 @@ pub async fn write_moderation_record(
         nsid: MODERATION_NSID.to_string(),
         rkey,
         data,
+        indexed_at: current_iso8601_utc(),
     })
 }
 
@@ -433,6 +434,7 @@ pub async fn write_member_record(
         nsid: MEMBER_NSID.to_string(),
         rkey,
         data,
+        indexed_at: current_iso8601_utc(),
     }))
 }
 

@@ -139,6 +139,7 @@ mod tests {
                             "channelOrder": ["chan-a", "chan-b"],
                             "community": "c1"
                         }),
+                        indexed_at: String::from(""),
                     }])
                 })
             },
@@ -191,6 +192,7 @@ mod tests {
                             nsid: String::from("social.colibri.category"),
                             rkey: String::from("cat1"),
                             data: serde_json::json!({ "irrelevant": true }),
+                            indexed_at: String::from(""),
                         },
                         record_data::Model {
                             id: 2,
@@ -202,6 +204,7 @@ mod tests {
                                 "channelOrder": [],
                                 "community": "c1"
                             }),
+                            indexed_at: String::from(""),
                         },
                     ])
                 })

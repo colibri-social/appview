@@ -48,6 +48,7 @@ mod tests {
                 nsid: String::from("social.colibri.message"),
                 rkey: String::from("r1"),
                 data: serde_json::json!({ "text": "hello" }),
+                indexed_at: String::from(""),
             }]])
             .into_connection();
 
@@ -90,6 +91,7 @@ mod tests {
                 nsid: String::from("social.colibri.message"),
                 rkey: String::from("r1"),
                 data: serde_json::json!({ "missing_text": true }),
+                indexed_at: String::from(""),
             }]])
             .into_connection();
 

@@ -9,8 +9,9 @@ use crate::lib::colibri::{
 };
 use crate::lib::events::{
     CategoryEventData, ChannelEventData, ColibriServerEvent, ColibriServerEventData,
-    CommunityEventData, MessageEventData, ReactionEventData, UserEventData, UserEventProfile,
-    UserEventStatus,
+    CommunityEventData, MemberEventData, MemberEventMember, MemberEventMemberData,
+    MemberEventMemberStatus, MessageEventAuthor, MessageEventAuthorData, MessageEventAuthorStatus,
+    MessageEventData, ReactionEventData, UserEventData, UserEventProfile, UserEventStatus,
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::get_state::get_state;
@@ -87,6 +88,71 @@ async fn get_user_state(did: String, db: DatabaseConnection) -> Result<String, s
         .await
         .map(|s| s.to_string())
         .map_err(|e| serde_json::Error::custom(e.to_string()))
+}
+
+/// Builds a fully-enriched [`MemberEventMember`] for the given subject, using
+/// best-effort profile/state lookups. Individual fetch failures fall back to
+/// safe defaults so a missing profile never drops the event.
+async fn build_member_event_member(
+    subject_did: &str,
+    member: &ColibriMember,
+    db: DatabaseConnection,
+    fetch_record_fn: &FetchRecordFn,
+    resolve_handle_fn: &ResolveHandleFn,
+    get_state_fn: &GetStateFn,
+) -> MemberEventMember {
+    let handle = resolve_handle_fn(subject_did.to_string())
+        .await
+        .unwrap_or_else(|_| subject_did.to_string());
+
+    let state = get_state_fn(subject_did.to_string(), db.clone())
+        .await
+        .unwrap_or_else(|_| String::from("offline"));
+
+    let profile = fetch_record_fn(
+        subject_did.to_string(),
+        String::from("app.bsky.actor.profile"),
+        String::from("self"),
+        db.clone(),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
+
+    let actor_data = fetch_record_fn(
+        subject_did.to_string(),
+        String::from("social.colibri.actor.data"),
+        String::from("self"),
+        db.clone(),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
+
+    MemberEventMember {
+        did: subject_did.to_string(),
+        handle,
+        roles: member.roles.clone(),
+        joined_at: member.joined_at.clone(),
+        nickname: member.nickname.clone(),
+        data: MemberEventMemberData {
+            display_name: profile
+                .as_ref()
+                .and_then(|p| p.display_name.clone())
+                .unwrap_or_default(),
+            avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
+            banner: profile.as_ref().and_then(|p| p.banner.clone()),
+            description: profile.as_ref().and_then(|p| p.description.clone()),
+            online_state: state,
+            status: MemberEventMemberStatus {
+                text: actor_data
+                    .as_ref()
+                    .map(|d| d.status.clone())
+                    .unwrap_or_default(),
+                emoji: actor_data.as_ref().and_then(|d| d.emoji.clone()),
+            },
+        },
+    }
 }
 
 async fn map_tap_event_with(
@@ -169,38 +235,56 @@ async fn map_tap_event_with(
             Ok(irrelevant_event())
         }
         "social.colibri.member" => {
-            // `member` is the source of truth for community membership in the
-            // Variant A model. Broadcasts only fire when the event subject is
-            // the receiving client.
-            //
-            // Create / update → community upsert (auto-admit on open
-            // community, or `approveMembership` on closed). The `did` of a
-            // member record is the community DID; we synthesise the
-            // community URI from it.
-            if event_record.action != "delete" {
+            // `member` is the source of truth for community membership.
+            // Both join and role-update events are broadcast to ALL connected
+            // clients. The client checks `member.did` against its own DID to
+            // know when it has been admitted, and checks `community` to scope
+            // updates to the right community.
+            if event_record.action == "create" {
                 let record_data = parse_payload::<ColibriMember>(event_record)?;
-                if record_data.subject != user_did {
-                    return Ok(irrelevant_event());
-                }
                 let community_uri =
                     format!("at://{}/social.colibri.community/self", event_record.did);
-                let community_record = fetch_record_fn(
-                    event_record.did.clone(),
-                    String::from("social.colibri.community"),
-                    String::from("self"),
+                let member = build_member_event_member(
+                    &record_data.subject.clone(),
+                    &record_data,
                     db.clone(),
+                    fetch_record_fn,
+                    resolve_handle_fn,
+                    get_state_fn,
                 )
-                .await?;
-                let safe_community = serde_json::from_value::<ColibriCommunity>(community_record)?;
+                .await;
                 return Ok(ColibriServerEvent {
-                    event_type: String::from("community_event"),
-                    data: Some(ColibriServerEventData::Community(CommunityEventData {
-                        event: String::from("upsert"),
-                        uri: community_uri,
-                        category_order: Some(safe_community.category_order),
-                        description: Some(safe_community.description),
-                        name: Some(safe_community.name),
-                        picture: safe_community.picture,
+                    event_type: String::from("member_event"),
+                    data: Some(ColibriServerEventData::Member(MemberEventData {
+                        event: String::from("join"),
+                        community: community_uri,
+                        membership: record_data.from_membership,
+                        member: Some(member),
+                    })),
+                    is_relevant: true,
+                });
+            }
+
+            if event_record.action == "update" {
+                let record_data = parse_payload::<ColibriMember>(event_record)?;
+                let community_uri =
+                    format!("at://{}/social.colibri.community/self", event_record.did);
+                let member = build_member_event_member(
+                    &record_data.subject.clone(),
+                    &record_data,
+                    db.clone(),
+                    fetch_record_fn,
+                    resolve_handle_fn,
+                    get_state_fn,
+                )
+                .await;
+                return Ok(ColibriServerEvent {
+                    event_type: String::from("member_event"),
+                    data: Some(ColibriServerEventData::Member(MemberEventData {
+                        event: String::from("roles_updated"),
+                        community: community_uri,
+                        membership: None,
+                        member: Some(member),
                     })),
                     is_relevant: true,
                 });
@@ -272,6 +356,7 @@ async fn map_tap_event_with(
                         uri,
                         channel_type: Some(record_data.channel_type),
                         community: Some(record_data.community),
+                        category: Some(record_data.category),
                         description: record_data.description,
                         name: Some(record_data.name),
                     })),
@@ -285,6 +370,7 @@ async fn map_tap_event_with(
                         uri,
                         channel_type: None,
                         community: None,
+                        category: None,
                         description: None,
                         name: None,
                     })),
@@ -295,6 +381,59 @@ async fn map_tap_event_with(
         "social.colibri.message" => {
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriMessage>(event_record)?;
+
+                // Best-effort author enrichment: individual fetch failures fall
+                // back to safe defaults so a missing profile never drops the event.
+                let handle = resolve_handle_fn(event_record.did.clone())
+                    .await
+                    .unwrap_or_else(|_| event_record.did.clone());
+
+                let state = get_state_fn(event_record.did.clone(), db.clone())
+                    .await
+                    .unwrap_or_else(|_| String::from("offline"));
+
+                let profile = fetch_record_fn(
+                    event_record.did.clone(),
+                    String::from("app.bsky.actor.profile"),
+                    String::from("self"),
+                    db.clone(),
+                )
+                .await
+                .ok()
+                .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
+
+                let actor_data = fetch_record_fn(
+                    event_record.did.clone(),
+                    String::from("social.colibri.actor.data"),
+                    String::from("self"),
+                    db.clone(),
+                )
+                .await
+                .ok()
+                .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
+
+                let author = MessageEventAuthor {
+                    did: event_record.did.clone(),
+                    handle,
+                    data: MessageEventAuthorData {
+                        display_name: profile
+                            .as_ref()
+                            .and_then(|p| p.display_name.clone())
+                            .unwrap_or_default(),
+                        avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
+                        banner: profile.as_ref().and_then(|p| p.banner.clone()),
+                        description: profile.as_ref().and_then(|p| p.description.clone()),
+                        online_state: state,
+                        status: MessageEventAuthorStatus {
+                            text: actor_data
+                                .as_ref()
+                                .map(|d| d.status.clone())
+                                .unwrap_or_default(),
+                            emoji: actor_data.as_ref().and_then(|d| d.emoji.clone()),
+                        },
+                    },
+                };
+
                 Ok(ColibriServerEvent {
                     event_type: String::from("message_event"),
                     data: Some(ColibriServerEventData::Message(MessageEventData {
@@ -307,6 +446,7 @@ async fn map_tap_event_with(
                         facets: record_data.facets,
                         parent: record_data.parent,
                         text: Some(record_data.text),
+                        author: Some(author),
                     })),
                     is_relevant: true,
                 })
@@ -323,6 +463,7 @@ async fn map_tap_event_with(
                         facets: None,
                         parent: None,
                         text: None,
+                        author: None,
                     })),
                     is_relevant: true,
                 })
@@ -337,18 +478,33 @@ async fn map_tap_event_with(
                         event: String::from("added"),
                         uri,
                         emoji: Some(record_data.emoji),
-                        target: Some(record_data.parent),
+                        target: Some(record_data.target_message),
                     })),
                     is_relevant: true,
                 })
             } else {
+                // The tap pipeline broadcasts first then deletes, so the
+                // cached reaction record is still present at this point.
+                // Fetch it so we can include emoji + target in the removed
+                // event — without them the client can't know which reaction
+                // to decrement.
+                let cached = fetch_record_fn(
+                    event_record.did.clone(),
+                    event_record.collection.clone(),
+                    event_record.rkey.clone(),
+                    db.clone(),
+                )
+                .await
+                .ok()
+                .and_then(|v| serde_json::from_value::<ColibriReaction>(v).ok());
+
                 Ok(ColibriServerEvent {
                     event_type: String::from("reaction_event"),
                     data: Some(ColibriServerEventData::Reaction(ReactionEventData {
                         event: String::from("removed"),
                         uri,
-                        emoji: None,
-                        target: None,
+                        emoji: cached.as_ref().map(|r| r.emoji.clone()),
+                        target: cached.map(|r| r.target_message),
                     })),
                     is_relevant: true,
                 })
@@ -574,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maps_member_create_to_community_upsert_for_subject() {
+    async fn maps_member_create_to_member_event_with_author_for_subject() {
         let event = map_tap_event_with(
             &TapMessageRecord {
                 live: true,
@@ -586,8 +742,9 @@ mod tests {
                 record: Some(json!({
                     "$type": "social.colibri.member",
                     "subject": "did:plc:abc",
-                    "roles": [],
-                    "joinedAt": "2026-01-01T00:00:00Z"
+                    "roles": ["owner-role"],
+                    "joinedAt": "2026-01-01T00:00:00Z",
+                    "fromMembership": "at://did:plc:abc/social.colibri.membership/m1"
                 })),
                 cid: Some(String::from("cid")),
             },
@@ -595,39 +752,52 @@ mod tests {
             mock_db(),
             &|_, nsid, _, _| {
                 Box::pin(async move {
-                    if nsid == "social.colibri.community" {
-                        Ok(json!({
-                            "$type": "social.colibri.community",
-                            "name": "General",
-                            "description": "desc",
-                            "categoryOrder": ["cat1"],
-                            "requiresApprovalToJoin": false
-                        }))
-                    } else {
-                        Err(serde_json::Error::custom("unexpected nsid"))
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(json!({
+                            "displayName": "Alice",
+                            "avatar": { "ref": "blob1" }
+                        })),
+                        "social.colibri.actor.data" => Ok(json!({
+                            "$type": "social.colibri.actor.data",
+                            "status": "Coding",
+                            "emoji": "💻",
+                            "communities": []
+                        })),
+                        _ => Err(serde_json::Error::custom("unexpected nsid")),
                     }
                 })
             },
-            &no_resolve,
-            &no_state,
+            &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+            &|_, _| Box::pin(async { Ok(String::from("online")) }),
         )
         .await
         .unwrap();
 
-        if let Some(ColibriServerEventData::Community(data)) = event.data {
-            assert_eq!(data.event, "upsert");
+        assert!(event.is_relevant);
+        if let Some(ColibriServerEventData::Member(data)) = event.data {
+            assert_eq!(data.event, "join");
+            assert_eq!(data.community, "at://did:plc:community/social.colibri.community/self");
             assert_eq!(
-                data.uri,
-                "at://did:plc:community/social.colibri.community/self"
+                data.membership.as_deref(),
+                Some("at://did:plc:abc/social.colibri.membership/m1")
             );
-            assert_eq!(data.name.as_deref(), Some("General"));
+            let member = data.member.expect("member should be present");
+            assert_eq!(member.did, "did:plc:abc");
+            assert_eq!(member.handle, "alice.test");
+            assert_eq!(member.roles, vec!["owner-role"]);
+            assert_eq!(member.joined_at, "2026-01-01T00:00:00Z");
+            assert_eq!(member.data.display_name, "Alice");
+            assert_eq!(member.data.online_state, "online");
+            assert_eq!(member.data.status.text, "Coding");
+            assert_eq!(member.data.status.emoji.as_deref(), Some("💻"));
         } else {
-            panic!("expected community event for member-create");
+            panic!("expected member_event for member-create");
         }
     }
 
     #[tokio::test]
-    async fn member_create_is_irrelevant_for_other_subjects() {
+    async fn member_create_is_relevant_for_all_subjects() {
+        // member_event join is broadcast to everyone — not filtered to the subject only.
         let event = map_tap_event_with(
             &TapMessageRecord {
                 live: true,
@@ -646,14 +816,76 @@ mod tests {
             },
             "did:plc:abc",
             mock_db(),
-            &no_fetch,
-            &no_resolve,
-            &no_state,
+            &|_, _, _, _| Box::pin(async { Err(serde_json::Error::custom("no profile")) }),
+            &|did| Box::pin(async move { Ok(did) }),
+            &|_, _| Box::pin(async { Ok(String::from("offline")) }),
         )
         .await
         .unwrap();
 
-        assert!(!event.is_relevant);
+        assert!(event.is_relevant);
+        assert_eq!(event.event_type, "member_event");
+        if let Some(ColibriServerEventData::Member(data)) = event.data {
+            assert_eq!(data.event, "join");
+        } else {
+            panic!("expected member event");
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_member_update_to_roles_updated_event() {
+        let event = map_tap_event_with(
+            &TapMessageRecord {
+                live: true,
+                did: String::from("did:plc:community"),
+                rev: String::from("2"),
+                collection: String::from("social.colibri.member"),
+                rkey: String::from("member-1"),
+                action: String::from("update"),
+                record: Some(json!({
+                    "$type": "social.colibri.member",
+                    "subject": "did:plc:alice",
+                    "roles": ["mod-role", "vip-role"],
+                    "joinedAt": "2026-01-01T00:00:00Z"
+                })),
+                cid: Some(String::from("cid2")),
+            },
+            "did:plc:abc",
+            mock_db(),
+            &|_, nsid, _, _| {
+                Box::pin(async move {
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(json!({
+                            "displayName": "Alice",
+                        })),
+                        "social.colibri.actor.data" => Ok(json!({
+                            "$type": "social.colibri.actor.data",
+                            "status": "",
+                            "communities": []
+                        })),
+                        _ => Err(serde_json::Error::custom("unexpected nsid")),
+                    }
+                })
+            },
+            &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+            &|_, _| Box::pin(async { Ok(String::from("online")) }),
+        )
+        .await
+        .unwrap();
+
+        assert!(event.is_relevant);
+        if let Some(ColibriServerEventData::Member(data)) = event.data {
+            assert_eq!(data.event, "roles_updated");
+            assert_eq!(data.community, "at://did:plc:community/social.colibri.community/self");
+            assert!(data.membership.is_none());
+            let member = data.member.expect("member should be present");
+            assert_eq!(member.did, "did:plc:alice");
+            assert_eq!(member.handle, "alice.test");
+            assert_eq!(member.roles, vec!["mod-role", "vip-role"]);
+            assert_eq!(member.data.online_state, "online");
+        } else {
+            panic!("expected member event for roles_updated");
+        }
     }
 
     #[tokio::test]
@@ -702,6 +934,106 @@ mod tests {
         if let Some(ColibriServerEventData::Message(data)) = event.data {
             assert_eq!(data.event, "delete");
             assert_eq!(data.text, None);
+            assert!(data.author.is_none());
+        } else {
+            panic!("expected message event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_message_upsert_event_with_author() {
+        let event = map_tap_event_with(
+            &record(
+                "social.colibri.message",
+                "create",
+                json!({
+                    "$type": "social.colibri.message",
+                    "text": "hello",
+                    "createdAt": "2026-06-04T00:00:00Z",
+                    "channel": "chan-1"
+                }),
+            ),
+            "",
+            mock_db(),
+            &|_, nsid, _, _| {
+                Box::pin(async move {
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(json!({
+                            "displayName": "Alice",
+                            "description": "Hi there",
+                            "avatar": { "ref": "blob1" }
+                        })),
+                        "social.colibri.actor.data" => Ok(json!({
+                            "$type": "social.colibri.actor.data",
+                            "status": "Coding",
+                            "emoji": "💻",
+                            "communities": []
+                        })),
+                        _ => Err(serde_json::Error::custom("unexpected nsid")),
+                    }
+                })
+            },
+            &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+            &|_, _| Box::pin(async { Ok(String::from("online")) }),
+        )
+        .await
+        .unwrap();
+
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
+            assert_eq!(data.event, "upsert");
+            assert_eq!(data.text.as_deref(), Some("hello"));
+            assert_eq!(data.channel.as_deref(), Some("chan-1"));
+            let author = data.author.expect("author should be present");
+            assert_eq!(author.did, "did:plc:abc");
+            assert_eq!(author.handle, "alice.test");
+            assert_eq!(author.data.display_name, "Alice");
+            assert_eq!(author.data.online_state, "online");
+            assert_eq!(author.data.status.text, "Coding");
+            assert_eq!(author.data.status.emoji.as_deref(), Some("💻"));
+            assert!(author.data.avatar.is_some());
+        } else {
+            panic!("expected message event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_message_upsert_event_with_missing_profile() {
+        // Author enrichment is best-effort: a missing profile/actor-data should
+        // not drop the event — it falls back to empty defaults.
+        let event = map_tap_event_with(
+            &record(
+                "social.colibri.message",
+                "create",
+                json!({
+                    "$type": "social.colibri.message",
+                    "text": "hi",
+                    "createdAt": "2026-06-04T00:00:00Z",
+                    "channel": "chan-1"
+                }),
+            ),
+            "",
+            mock_db(),
+            &|_, _, _, _| {
+                Box::pin(async { Err(serde_json::Error::custom("not found")) })
+            },
+            &|did| Box::pin(async move { Err(serde_json::Error::custom(format!("no handle for {did}"))) }),
+            &|_, _| Box::pin(async { Err(serde_json::Error::custom("no state")) }),
+        )
+        .await
+        .unwrap();
+
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
+            assert_eq!(data.event, "upsert");
+            let author = data.author.expect("author should still be present");
+            // DID is always known
+            assert_eq!(author.did, "did:plc:abc");
+            // Falls back to DID when handle resolution fails
+            assert_eq!(author.handle, "did:plc:abc");
+            // Falls back to empty/offline defaults
+            assert_eq!(author.data.display_name, "");
+            assert_eq!(author.data.online_state, "offline");
+            assert_eq!(author.data.status.text, "");
+            assert!(author.data.status.emoji.is_none());
         } else {
             panic!("expected message event data");
         }
@@ -821,5 +1153,61 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.to_string(), "Unknown collection");
+    }
+
+    #[tokio::test]
+    async fn reaction_removed_includes_emoji_and_target_from_cache() {
+        // The cached record is still present when the delete event fires, so
+        // the removed event should carry emoji + target.
+        let event = map_tap_event_with(
+            &record("social.colibri.reaction", "delete", json!({})),
+            "",
+            mock_db(),
+            &|_, _, _, _| {
+                Box::pin(async {
+                    Ok(json!({
+                        "$type": "social.colibri.reaction",
+                        "emoji": "🦜",
+                        "targetMessage": "msg-1"
+                    }))
+                })
+            },
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        if let Some(ColibriServerEventData::Reaction(data)) = event.data {
+            assert_eq!(data.event, "removed");
+            assert_eq!(data.emoji.as_deref(), Some("🦜"));
+            assert_eq!(data.target.as_deref(), Some("msg-1"));
+        } else {
+            panic!("expected reaction event");
+        }
+    }
+
+    #[tokio::test]
+    async fn reaction_removed_still_emits_when_cache_miss() {
+        // If the cached record is gone (race or already evicted), the event
+        // still fires — just without emoji/target, same as before the fix.
+        let event = map_tap_event_with(
+            &record("social.colibri.reaction", "delete", json!({})),
+            "",
+            mock_db(),
+            &|_, _, _, _| Box::pin(async { Err(serde_json::Error::custom("not found")) }),
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        if let Some(ColibriServerEventData::Reaction(data)) = event.data {
+            assert_eq!(data.event, "removed");
+            assert!(data.emoji.is_none());
+            assert!(data.target.is_none());
+        } else {
+            panic!("expected reaction event");
+        }
     }
 }

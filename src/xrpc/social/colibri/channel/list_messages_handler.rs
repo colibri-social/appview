@@ -12,15 +12,53 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::bsky::ActorProfile;
+use crate::lib::colibri::ColibriActorData;
 use crate::lib::moderation::currently_banned_dids;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::models::record_data;
+use crate::models::{record_data, repos, user_states};
+use crate::xrpc::social::colibri::actor::get_data_handler::{ActorData, ActorStatus};
 
 const MESSAGE_NSID: &str = "social.colibri.message";
 const CHANNEL_NSID: &str = "social.colibri.channel";
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const DEFAULT_LIMIT: u64 = 100;
+
+/// A file attached to a message.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Attachment {
+    pub blob: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Full profile, status, and handle for a message author.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct MessageAuthor {
+    pub did: String,
+    pub handle: String,
+    pub data: ActorData,
+}
+
+/// A parent message embedded one level deep inside a [`Message`]. Identical
+/// shape to `Message` except it has no `parent` field, preventing recursion.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ParentMessage {
+    pub uri: String,
+    pub text: String,
+    #[serde(default)]
+    pub facets: Vec<Value>,
+    pub channel: String,
+    pub community: String,
+    pub author: MessageAuthor,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    pub reactions: Vec<ReactionSummary>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    pub edited: bool,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Message {
@@ -30,12 +68,15 @@ pub struct Message {
     pub facets: Vec<Value>,
     pub channel: String,
     pub community: String,
-    pub author: String,
+    pub author: MessageAuthor,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
+    pub parent: Option<ParentMessage>,
     #[serde(default)]
-    pub attachments: Vec<Value>,
+    pub attachments: Vec<Attachment>,
     pub reactions: Vec<ReactionSummary>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    pub edited: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -53,7 +94,11 @@ struct StoredMessage {
     #[serde(default)]
     parent: Option<String>,
     #[serde(default)]
-    attachments: Option<Vec<Value>>,
+    attachments: Option<Vec<Attachment>>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
+    #[serde(default)]
+    edited: bool,
 }
 
 #[derive(Deserialize)]
@@ -103,13 +148,13 @@ pub async fn fetch_message_page(
         .await
 }
 
-/// Resolves parent message rkeys to fully-qualified AT-URIs. Looks up the
-/// authors of each rkey within the same channel.
-pub async fn fetch_parent_uris(
+/// Fetches the full records for parent messages within the same channel,
+/// keyed by rkey. Used to embed one level of parent data in the response.
+pub async fn fetch_parent_records(
     db: &DatabaseConnection,
     channel_rkey: &str,
     parent_rkeys: &[String],
-) -> Result<HashMap<String, String>, DbErr> {
+) -> Result<HashMap<String, record_data::Model>, DbErr> {
     if parent_rkeys.is_empty() {
         return Ok(HashMap::new());
     }
@@ -123,22 +168,55 @@ pub async fn fetch_parent_uris(
         .all(db)
         .await?;
 
-    Ok(parents
-        .into_iter()
-        .map(|p| {
-            (
-                p.rkey.clone(),
-                format!("at://{}/{}/{}", p.did, p.nsid, p.rkey),
-            )
+    Ok(parents.into_iter().map(|p| (p.rkey.clone(), p)).collect())
+}
+
+fn build_author(
+    did: String,
+    handle: Option<String>,
+    profile: Option<ActorProfile>,
+    actor_data: Option<ColibriActorData>,
+    state: Option<String>,
+) -> MessageAuthor {
+    let handle = handle.unwrap_or_else(|| did.clone());
+    let display_name = profile
+        .as_ref()
+        .and_then(|p| p.display_name.clone())
+        .unwrap_or_else(|| handle.clone());
+    let (avatar, banner, description) = match profile {
+        Some(p) => (p.avatar, p.banner, p.description),
+        None => (None, None, None),
+    };
+    let status = actor_data
+        .map(|d| ActorStatus {
+            text: d.status,
+            emoji: d.emoji,
         })
-        .collect())
+        .unwrap_or(ActorStatus {
+            text: String::new(),
+            emoji: None,
+        });
+    let online_state = state.unwrap_or_else(|| String::from("offline"));
+    MessageAuthor {
+        did,
+        handle,
+        data: ActorData {
+            display_name,
+            avatar,
+            banner,
+            description,
+            online_state,
+            status,
+        },
+    }
 }
 
 fn build_message(
     record: &record_data::Model,
     channel_uri: &str,
     community_uri: &str,
-    parent_uri: Option<String>,
+    author: MessageAuthor,
+    parent: Option<ParentMessage>,
     reactions: Vec<ReactionSummary>,
 ) -> Option<Message> {
     let stored = serde_json::from_value::<StoredMessage>(record.data.clone()).ok()?;
@@ -148,18 +226,28 @@ fn build_message(
         facets: stored.facets.unwrap_or_default(),
         channel: channel_uri.to_string(),
         community: community_uri.to_string(),
-        author: record.did.clone(),
-        parent: parent_uri,
+        author,
+        parent,
         attachments: stored.attachments.unwrap_or_default(),
         reactions,
+        created_at: stored
+            .created_at
+            .unwrap_or_else(|| record.indexed_at.clone()),
+        edited: stored.edited,
     })
 }
 
 pub struct MessagePage {
     pub records: Vec<record_data::Model>,
     pub community_uri: String,
-    pub parents: HashMap<String, String>,
+    /// Full parent message records keyed by rkey. Reactions for these are
+    /// included in the top-level `reactions` map so a single fetch covers both.
+    pub parent_records: HashMap<String, record_data::Model>,
     pub reactions: HashMap<String, Vec<ReactionSummary>>,
+    pub author_profiles: HashMap<String, ActorProfile>,
+    pub author_actor_data: HashMap<String, ColibriActorData>,
+    pub author_states: HashMap<String, String>,
+    pub author_handles: HashMap<String, String>,
 }
 
 pub async fn assemble_message_page(
@@ -190,12 +278,6 @@ pub async fn assemble_message_page(
         .filter(|r| !banned.contains(&r.did))
         .collect();
 
-    let message_rkeys: Vec<String> = records.iter().map(|r| r.rkey.clone()).collect();
-    let reactions = strip_banned_reactors(
-        group_reactions_for_messages(db, &message_rkeys).await?,
-        &banned,
-    );
-
     let parent_rkeys: Vec<String> = records
         .iter()
         .filter_map(|r| {
@@ -204,22 +286,91 @@ pub async fn assemble_message_page(
                 .and_then(|m| m.parent)
         })
         .collect();
-    let parents = fetch_parent_uris(db, &channel.rkey, &parent_rkeys)
-        .await?
-        .into_iter()
-        .filter(|(_, uri)| {
-            // parent_uri is `at://<author>/...`; drop entries whose author is banned.
-            AtUri::parse(uri)
-                .map(|p| !banned.contains(&p.authority))
-                .unwrap_or(true)
-        })
+    let parent_records: HashMap<String, record_data::Model> =
+        fetch_parent_records(db, &channel.rkey, &parent_rkeys)
+            .await?
+            .into_iter()
+            .filter(|(_, r)| !banned.contains(&r.did))
+            .collect();
+
+    // Fetch reactions for page messages and their parents in one round-trip.
+    let all_rkeys: Vec<String> = records
+        .iter()
+        .map(|r| r.rkey.clone())
+        .chain(parent_records.keys().cloned())
         .collect();
+    let reactions = strip_banned_reactors(
+        group_reactions_for_messages(db, &all_rkeys).await?,
+        &banned,
+    );
+
+    // Collect unique author DIDs from page messages and their parents.
+    let mut author_dids: Vec<String> = records
+        .iter()
+        .map(|r| r.did.clone())
+        .chain(parent_records.values().map(|r| r.did.clone()))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    author_dids.sort();
+
+    let (author_profiles, author_actor_data, author_states, author_handles) =
+        if author_dids.is_empty() {
+            (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new())
+        } else {
+            let self_records = record_data::Entity::find()
+                .filter(record_data::Column::Did.is_in(author_dids.clone()))
+                .filter(record_data::Column::Rkey.eq("self"))
+                .filter(
+                    Condition::any()
+                        .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
+                        .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
+                )
+                .all(db)
+                .await?;
+
+            let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
+            let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
+            for rec in self_records {
+                if rec.nsid == "app.bsky.actor.profile" {
+                    if let Ok(p) = serde_json::from_value::<ActorProfile>(rec.data) {
+                        profiles.insert(rec.did, p);
+                    }
+                } else if rec.nsid == "social.colibri.actor.data" {
+                    if let Ok(d) = serde_json::from_value::<ColibriActorData>(rec.data) {
+                        actor_data.insert(rec.did, d);
+                    }
+                }
+            }
+
+            let states: HashMap<String, String> = user_states::Entity::find()
+                .filter(user_states::Column::Did.is_in(author_dids.clone()))
+                .all(db)
+                .await?
+                .into_iter()
+                .map(|row| (row.did, row.state))
+                .collect();
+
+            let handles: HashMap<String, String> = repos::Entity::find()
+                .filter(repos::Column::Did.is_in(author_dids))
+                .all(db)
+                .await?
+                .into_iter()
+                .filter_map(|row| row.handle.map(|h| (row.did, h)))
+                .collect();
+
+            (profiles, actor_data, states, handles)
+        };
 
     Ok(MessagePage {
         records,
         community_uri,
-        parents,
+        parent_records,
         reactions,
+        author_profiles,
+        author_actor_data,
+        author_states,
+        author_handles,
     })
 }
 
@@ -289,10 +440,39 @@ async fn list_messages_with(
         .iter()
         .filter_map(|record| {
             let stored = serde_json::from_value::<StoredMessage>(record.data.clone()).ok()?;
-            let parent_uri = stored
-                .parent
-                .as_ref()
-                .and_then(|rkey| page.parents.get(rkey).cloned());
+            let parent = stored.parent.as_ref().and_then(|rkey| {
+                let pr = page.parent_records.get(rkey)?;
+                let ps = serde_json::from_value::<StoredMessage>(pr.data.clone()).ok()?;
+                let parent_reactions = page.reactions.get(rkey).cloned().unwrap_or_default();
+                let parent_author = build_author(
+                    pr.did.clone(),
+                    page.author_handles.get(&pr.did).cloned(),
+                    page.author_profiles.get(&pr.did).cloned(),
+                    page.author_actor_data.get(&pr.did).cloned(),
+                    page.author_states.get(&pr.did).cloned(),
+                );
+                Some(ParentMessage {
+                    uri: format!("at://{}/{}/{}", pr.did, pr.nsid, pr.rkey),
+                    text: ps.text,
+                    facets: ps.facets.unwrap_or_default(),
+                    channel: channel_uri.clone(),
+                    community: page.community_uri.clone(),
+                    author: parent_author,
+                    attachments: ps.attachments.unwrap_or_default(),
+                    reactions: parent_reactions,
+                    created_at: ps
+                        .created_at
+                        .unwrap_or_else(|| pr.indexed_at.clone()),
+                    edited: ps.edited,
+                })
+            });
+            let author = build_author(
+                record.did.clone(),
+                page.author_handles.get(&record.did).cloned(),
+                page.author_profiles.get(&record.did).cloned(),
+                page.author_actor_data.get(&record.did).cloned(),
+                page.author_states.get(&record.did).cloned(),
+            );
             let reactions = page
                 .reactions
                 .get(&record.rkey)
@@ -302,7 +482,8 @@ async fn list_messages_with(
                 record,
                 &channel_uri,
                 &page.community_uri,
-                parent_uri,
+                author,
+                parent,
                 reactions,
             )
         })
@@ -372,6 +553,7 @@ mod tests {
             nsid: MESSAGE_NSID.to_string(),
             rkey: rkey.to_string(),
             data,
+            indexed_at: String::from("2026-05-26T00:00:00.000Z"),
         }
     }
 
@@ -394,9 +576,9 @@ mod tests {
                         community_uri: String::from(
                             "at://did:plc:owner/social.colibri.community/c1",
                         ),
-                        parents: HashMap::from([(
+                        parent_records: HashMap::from([(
                             String::from("msg-1"),
-                            String::from("at://did:plc:alice/social.colibri.message/msg-1"),
+                            message_record("msg-1", "did:plc:alice", "hello", None),
                         )]),
                         reactions: HashMap::from([(
                             String::from("msg-1"),
@@ -406,6 +588,13 @@ mod tests {
                                 reactor_dids: vec![String::from("did:plc:carol")],
                             }],
                         )]),
+                        author_profiles: HashMap::new(),
+                        author_actor_data: HashMap::new(),
+                        author_states: HashMap::new(),
+                        author_handles: HashMap::from([
+                            (String::from("did:plc:bob"), String::from("bob.test")),
+                            (String::from("did:plc:alice"), String::from("alice.test")),
+                        ]),
                     })
                 })
             },
@@ -426,13 +615,24 @@ mod tests {
             result.messages[0].channel,
             "at://did:plc:owner/social.colibri.channel/chan-a"
         );
+        let parent = result.messages[0].parent.as_ref().unwrap();
         assert_eq!(
-            result.messages[0].parent.as_deref(),
-            Some("at://did:plc:alice/social.colibri.message/msg-1")
+            parent.uri,
+            "at://did:plc:alice/social.colibri.message/msg-1"
         );
+        assert_eq!(parent.text, "hello");
+        assert_eq!(parent.author.did, "did:plc:alice");
+        assert_eq!(parent.author.handle, "alice.test");
+        assert_eq!(parent.reactions.len(), 1);
+        assert_eq!(parent.reactions[0].emoji, "🦜");
+        assert_eq!(result.messages[0].author.did, "did:plc:bob");
+        assert_eq!(result.messages[0].author.handle, "bob.test");
         assert!(result.messages[0].reactions.is_empty());
+        assert_eq!(result.messages[0].created_at, "2026-05-13T00:00:00Z");
         assert_eq!(result.messages[1].reactions.len(), 1);
         assert_eq!(result.messages[1].reactions[0].emoji, "🦜");
+        let parent = result.messages[0].parent.as_ref().unwrap();
+        assert_eq!(parent.created_at, "2026-05-13T00:00:00Z");
 
         assert_eq!(result.cursor.as_deref(), Some("msg-1"));
     }
@@ -452,8 +652,12 @@ mod tests {
                         community_uri: String::from(
                             "at://did:plc:owner/social.colibri.community/c1",
                         ),
-                        parents: HashMap::new(),
+                        parent_records: HashMap::new(),
                         reactions: HashMap::new(),
+                        author_profiles: HashMap::new(),
+                        author_actor_data: HashMap::new(),
+                        author_states: HashMap::new(),
+                        author_handles: HashMap::new(),
                     })
                 })
             },

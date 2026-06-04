@@ -4,6 +4,7 @@ pub mod colibri;
 pub mod community_authz;
 pub mod community_credentials;
 pub mod community_record;
+pub mod community_write;
 pub mod crypto;
 pub mod db;
 pub mod did_document;

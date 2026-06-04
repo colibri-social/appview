@@ -18,6 +18,7 @@ use crate::xrpc::social::colibri::actor::get_data_handler::{ActorData, ActorStat
 pub struct Member {
     pub did: String,
     pub handle: String,
+    pub roles: Vec<String>,
     pub data: ActorData,
 }
 
@@ -33,6 +34,9 @@ pub struct MemberAggregate {
     pub actor_data: HashMap<String, ColibriActorData>,
     pub states: HashMap<String, String>,
     pub handles: HashMap<String, String>,
+    /// Role rkeys assigned to each member, keyed by member DID. These are
+    /// raw record keys — callers must expand them to full AT-URIs.
+    pub member_roles: HashMap<String, Vec<String>>,
 }
 
 pub async fn fetch_member_aggregate(
@@ -50,13 +54,23 @@ pub async fn fetch_member_aggregate(
         .all(db)
         .await?;
 
+    let mut member_roles: HashMap<String, Vec<String>> = HashMap::new();
     let mut member_dids: Vec<String> = members
         .into_iter()
         .filter_map(|m| {
-            m.data
-                .get("subject")
-                .and_then(|v| v.as_str())
-                .map(String::from)
+            let did = m.data.get("subject").and_then(|v| v.as_str()).map(String::from)?;
+            let roles = m
+                .data
+                .get("roles")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            member_roles.insert(did.clone(), roles);
+            Some(did)
         })
         .collect();
     member_dids.sort();
@@ -69,6 +83,7 @@ pub async fn fetch_member_aggregate(
             actor_data: HashMap::new(),
             states: HashMap::new(),
             handles: HashMap::new(),
+            member_roles: HashMap::new(),
         });
     }
 
@@ -121,6 +136,7 @@ pub async fn fetch_member_aggregate(
         actor_data,
         states,
         handles,
+        member_roles,
     })
 }
 
@@ -130,6 +146,8 @@ pub fn build_member(
     profile: Option<ActorProfile>,
     actor_data: Option<ColibriActorData>,
     state: Option<String>,
+    community_authority: &str,
+    role_rkeys: Vec<String>,
 ) -> Member {
     let handle = handle.unwrap_or_else(|| did.clone());
     let display_name = profile
@@ -155,9 +173,15 @@ pub fn build_member(
 
     let online_state = state.unwrap_or_else(|| String::from("offline"));
 
+    let roles = role_rkeys
+        .into_iter()
+        .map(|rkey| format!("at://{}/social.colibri.role/{}", community_authority, rkey))
+        .collect();
+
     Member {
         did,
         handle,
+        roles,
         data: ActorData {
             display_name,
             avatar,
@@ -177,14 +201,12 @@ async fn list_members_with(
     db: DatabaseConnection,
     fetch_aggregate_fn: FetchAggregateFn,
 ) -> Result<Json<MemberList>, ErrorResponse> {
-    if AtUri::parse(&community_uri).is_none() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Invalid community AT-URI."),
-            }),
-        });
-    }
+    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("InvalidRequest"),
+            message: String::from("Invalid community AT-URI."),
+        }),
+    })?;
 
     let aggregate = fetch_aggregate_fn(db, community_uri).await?;
 
@@ -194,6 +216,7 @@ async fn list_members_with(
         mut actor_data,
         mut states,
         mut handles,
+        mut member_roles,
     } = aggregate;
 
     let members = member_dids
@@ -203,7 +226,8 @@ async fn list_members_with(
             let profile = profiles.remove(&did);
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
-            build_member(did, handle, profile, data, state)
+            let role_rkeys = member_roles.remove(&did).unwrap_or_default();
+            build_member(did, handle, profile, data, state, &community.authority, role_rkeys)
         })
         .collect();
 
@@ -291,6 +315,7 @@ mod tests {
                             (String::from("did:plc:alice"), String::from("alice.test")),
                             (String::from("did:plc:bob"), String::from("bob.test")),
                         ]),
+                        member_roles: HashMap::new(),
                     })
                 })
             },
@@ -309,6 +334,7 @@ mod tests {
         assert_eq!(alice.data.online_state, "online");
         assert_eq!(alice.data.status.text, "Working");
         assert_eq!(alice.data.status.emoji.as_deref(), Some("🦜"));
+        assert!(alice.roles.is_empty());
 
         let bob = result
             .members
@@ -320,13 +346,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expands_role_rkeys_to_uris_per_member() {
+        let db = mock_db();
+        let result = list_members_with(
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            db,
+            |_, _| {
+                Box::pin(async {
+                    Ok(MemberAggregate {
+                        member_dids: vec![String::from("did:plc:alice")],
+                        profiles: HashMap::new(),
+                        actor_data: HashMap::new(),
+                        states: HashMap::new(),
+                        handles: HashMap::new(),
+                        member_roles: HashMap::from([(
+                            String::from("did:plc:alice"),
+                            vec![String::from("owner"), String::from("mod")],
+                        )]),
+                    })
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        let alice = &result.members[0];
+        assert_eq!(
+            alice.roles,
+            vec![
+                "at://did:plc:owner/social.colibri.role/owner",
+                "at://did:plc:owner/social.colibri.role/mod",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn falls_back_to_did_when_handle_and_profile_missing() {
-        let member = build_member(String::from("did:plc:alice"), None, None, None, None);
+        let member = build_member(
+            String::from("did:plc:alice"),
+            None,
+            None,
+            None,
+            None,
+            "did:plc:owner",
+            vec![],
+        );
         assert_eq!(member.handle, "did:plc:alice");
         assert_eq!(member.data.display_name, "did:plc:alice");
         assert_eq!(member.data.online_state, "offline");
         assert_eq!(member.data.status.text, "");
         assert!(member.data.status.emoji.is_none());
+        assert!(member.roles.is_empty());
     }
 
     #[tokio::test]

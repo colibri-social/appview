@@ -137,7 +137,8 @@ pub struct ColibriReaction {
 
     /// The message this relation belongs to.
     /// Format: record-key
-    pub parent: String,
+    #[serde(rename = "targetMessage")]
+    pub target_message: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

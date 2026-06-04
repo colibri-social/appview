@@ -136,8 +136,16 @@ async fn list_communities_with(
 
     let communities: Vec<Community> = community_models
         .iter()
-        .map(|c| {
-            let mut c_data = serde_json::from_value::<Community>(c.community.data.clone()).unwrap();
+        .filter_map(|c| {
+            let mut c_data = serde_json::from_value::<Community>(c.community.data.clone())
+                .map_err(|e| {
+                    log::warn!(
+                        "skipping malformed community record {}/{}: {e}",
+                        c.community.did,
+                        c.community.rkey
+                    )
+                })
+                .ok()?;
             let uri = format!(
                 "at://{}/{}/{}",
                 c.community.did, c.community.nsid, c.community.rkey
@@ -146,7 +154,7 @@ async fn list_communities_with(
             c_data.uri = Some(uri);
             c_data.is_legacy = Some(c.is_legacy);
 
-            c_data
+            Some(c_data)
         })
         .collect();
 
@@ -210,6 +218,7 @@ mod tests {
                                 "description": "desc",
                                 "categoryOrder": ["cat1"]
                             }),
+                            indexed_at: String::from(""),
                         },
                         is_legacy: true,
                     }])

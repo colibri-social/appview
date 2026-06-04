@@ -76,6 +76,7 @@ mod tests {
             nsid: String::from("social.colibri.message"),
             rkey: String::from(rkey),
             data: json!({ "text": text }),
+            indexed_at: String::from(""),
         }
     }
 

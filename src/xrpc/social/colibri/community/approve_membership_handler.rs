@@ -268,6 +268,7 @@ mod tests {
                     nsid: String::from("social.colibri.member"),
                     rkey: String::from("member-1"),
                     data: serde_json::json!({}),
+                    indexed_at: String::from(""),
                 }))
             })
         };
