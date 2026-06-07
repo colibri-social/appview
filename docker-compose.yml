@@ -11,6 +11,12 @@ services:
       JETSTREAM_URL: ${JETSTREAM_URL:-}
       TAP_HOSTNAME: ${TAP_HOSTNAME}
       TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
+      APPVIEW_DOMAIN: ${api.colibri.social}
+      INVITE_API_KEY: ${INVITE_API_KEY}
+      PDS_LOC: ${PDS_LOC}
+      PDS_ADMIN_PASS: ${PDS_ADMIN_PASS}
+      APPVIEW_HANDLE_DOMAIN: ${APPVIEW_HANDLE_DOMAIN}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
     depends_on:
       postgres:
         condition: service_healthy
