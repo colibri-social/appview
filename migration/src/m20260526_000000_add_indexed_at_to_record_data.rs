@@ -10,7 +10,7 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(Alias::new("record_data"))
-                    .add_column(
+                    .add_column_if_not_exists(
                         ColumnDef::new(Alias::new("indexed_at"))
                             .text()
                             .not_null()
