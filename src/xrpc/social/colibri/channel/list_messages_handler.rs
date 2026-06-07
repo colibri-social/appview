@@ -334,13 +334,14 @@ pub async fn assemble_message_page(
     let mut legacy_parent_rkeys: Vec<String> = Vec::new();
     for r in &records {
         if let Ok(m) = serde_json::from_value::<StoredMessage>(r.data.clone())
-            && let Some(p) = m.parent {
-                if p.starts_with("at://") {
-                    parent_uris.push(p);
-                } else {
-                    legacy_parent_rkeys.push(p);
-                }
+            && let Some(p) = m.parent
+        {
+            if p.starts_with("at://") {
+                parent_uris.push(p);
+            } else {
+                legacy_parent_rkeys.push(p);
             }
+        }
     }
 
     let mut parent_records: HashMap<String, record_data::Model> =
@@ -404,9 +405,10 @@ pub async fn assemble_message_page(
                         profiles.insert(rec.did, p);
                     }
                 } else if rec.nsid == "social.colibri.actor.data"
-                    && let Ok(d) = serde_json::from_value::<ColibriActorData>(rec.data) {
-                        actor_data.insert(rec.did, d);
-                    }
+                    && let Ok(d) = serde_json::from_value::<ColibriActorData>(rec.data)
+                {
+                    actor_data.insert(rec.did, d);
+                }
             }
 
             let states: HashMap<String, String> = user_states::Entity::find()

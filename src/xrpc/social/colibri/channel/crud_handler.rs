@@ -241,24 +241,25 @@ async fn delete_channel_with(
             if let Some(cat_rkey) = category_rkey
                 && let Ok(Some(cat_current)) =
                     community_write::read_cached(&db, community_did, CATEGORY_NSID, &cat_rkey).await
-                    && let Ok(mut cat) = serde_json::from_value::<ColibriCategory>(cat_current) {
-                        cat.channel_order.retain(|r| r != channel_rkey);
-                        if let Ok(data) = serde_json::to_value(&cat)
-                            && let Err(e) = community_write::put_record(
-                                &db,
-                                community_did,
-                                CATEGORY_NSID,
-                                &cat_rkey,
-                                data,
-                            )
-                            .await
-                            {
-                                log::warn!(
-                                    "failed to remove deleted channel {channel_rkey} from \
+                && let Ok(mut cat) = serde_json::from_value::<ColibriCategory>(cat_current)
+            {
+                cat.channel_order.retain(|r| r != channel_rkey);
+                if let Ok(data) = serde_json::to_value(&cat)
+                    && let Err(e) = community_write::put_record(
+                        &db,
+                        community_did,
+                        CATEGORY_NSID,
+                        &cat_rkey,
+                        data,
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "failed to remove deleted channel {channel_rkey} from \
                                      category {cat_rkey}: {e}"
-                                );
-                            }
-                    }
+                    );
+                }
+            }
 
             Ok(Json(ChannelUriResponse { uri: channel_uri }))
         },

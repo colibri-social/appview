@@ -220,24 +220,24 @@ async fn delete_category_with(
                     .await
                 && let Ok(mut community) =
                     serde_json::from_value::<ColibriCommunity>(community_data)
+            {
+                community.category_order.retain(|r| r != category_rkey);
+                if let Ok(data) = serde_json::to_value(&community)
+                    && let Err(e) = community_write::put_record(
+                        &db,
+                        community_did,
+                        COMMUNITY_NSID,
+                        COMMUNITY_RKEY,
+                        data,
+                    )
+                    .await
                 {
-                    community.category_order.retain(|r| r != category_rkey);
-                    if let Ok(data) = serde_json::to_value(&community)
-                        && let Err(e) = community_write::put_record(
-                            &db,
-                            community_did,
-                            COMMUNITY_NSID,
-                            COMMUNITY_RKEY,
-                            data,
-                        )
-                        .await
-                        {
-                            log::warn!(
-                                "failed to remove deleted category {category_rkey} from \
+                    log::warn!(
+                        "failed to remove deleted category {category_rkey} from \
                                  community {community_did} categoryOrder: {e}"
-                            );
-                        }
+                    );
                 }
+            }
 
             Ok(Json(CategoryUriResponse { uri: category_uri }))
         },
