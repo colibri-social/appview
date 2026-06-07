@@ -478,7 +478,7 @@ async fn map_tap_event_with(
                         event: String::from("added"),
                         uri,
                         emoji: Some(record_data.emoji),
-                        target: Some(record_data.target_message),
+                        target: Some(record_data.parent),
                     })),
                     is_relevant: true,
                 })
@@ -504,7 +504,7 @@ async fn map_tap_event_with(
                         event: String::from("removed"),
                         uri,
                         emoji: cached.as_ref().map(|r| r.emoji.clone()),
-                        target: cached.map(|r| r.target_message),
+                        target: cached.map(|r| r.parent),
                     })),
                     is_relevant: true,
                 })
@@ -776,7 +776,10 @@ mod tests {
         assert!(event.is_relevant);
         if let Some(ColibriServerEventData::Member(data)) = event.data {
             assert_eq!(data.event, "join");
-            assert_eq!(data.community, "at://did:plc:community/social.colibri.community/self");
+            assert_eq!(
+                data.community,
+                "at://did:plc:community/social.colibri.community/self"
+            );
             assert_eq!(
                 data.membership.as_deref(),
                 Some("at://did:plc:abc/social.colibri.membership/m1")
@@ -876,7 +879,10 @@ mod tests {
         assert!(event.is_relevant);
         if let Some(ColibriServerEventData::Member(data)) = event.data {
             assert_eq!(data.event, "roles_updated");
-            assert_eq!(data.community, "at://did:plc:community/social.colibri.community/self");
+            assert_eq!(
+                data.community,
+                "at://did:plc:community/social.colibri.community/self"
+            );
             assert!(data.membership.is_none());
             let member = data.member.expect("member should be present");
             assert_eq!(member.did, "did:plc:alice");
@@ -1013,10 +1019,12 @@ mod tests {
             ),
             "",
             mock_db(),
-            &|_, _, _, _| {
-                Box::pin(async { Err(serde_json::Error::custom("not found")) })
+            &|_, _, _, _| Box::pin(async { Err(serde_json::Error::custom("not found")) }),
+            &|did| {
+                Box::pin(
+                    async move { Err(serde_json::Error::custom(format!("no handle for {did}"))) },
+                )
             },
-            &|did| Box::pin(async move { Err(serde_json::Error::custom(format!("no handle for {did}"))) }),
             &|_, _| Box::pin(async { Err(serde_json::Error::custom("no state")) }),
         )
         .await
