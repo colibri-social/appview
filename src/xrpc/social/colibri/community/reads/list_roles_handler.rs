@@ -61,10 +61,7 @@ pub fn build_roles(records: Vec<record_data::Model>, authority: &str) -> Vec<Rol
                 .channel_overrides
                 .into_iter()
                 .map(|o| RoleChannelOverride {
-                    channel: format!(
-                        "at://{}/social.colibri.channel/{}",
-                        authority, o.channel
-                    ),
+                    channel: format!("at://{}/social.colibri.channel/{}", authority, o.channel),
                     allow: o.allow,
                     deny: o.deny,
                 })

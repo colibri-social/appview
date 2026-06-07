@@ -61,8 +61,7 @@ pub async fn fetch_raw_community_data(
 
     let category_records =
         fetch_category_records(db, &community.authority, &community.rkey).await?;
-    let channel_records =
-        fetch_channel_records(db, &community.authority, &community.rkey).await?;
+    let channel_records = fetch_channel_records(db, &community.authority, &community.rkey).await?;
     let role_records = fetch_role_records(db, &community.authority).await?;
     let member_aggregate = fetch_member_aggregate(db, community_uri).await?;
 
@@ -114,14 +113,12 @@ async fn get_data_with(
         }),
     })?;
 
-    let stored_community =
-        serde_json::from_value::<ColibriCommunity>(community_record.data).map_err(|_| {
-            ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("InternalError"),
-                    message: String::from("Failed to parse community record."),
-                }),
-            }
+    let stored_community = serde_json::from_value::<ColibriCommunity>(community_record.data)
+        .map_err(|_| ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("InternalError"),
+                message: String::from("Failed to parse community record."),
+            }),
         })?;
 
     let category_order = stored_community
@@ -206,7 +203,15 @@ async fn get_data_with(
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
             let role_rkeys = member_roles.remove(&did).unwrap_or_default();
-            build_member(did, handle, profile, data, state, &community.authority, role_rkeys)
+            build_member(
+                did,
+                handle,
+                profile,
+                data,
+                state,
+                &community.authority,
+                role_rkeys,
+            )
         })
         .collect();
 
@@ -233,12 +238,7 @@ pub async fn get_data(
     community: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<CommunityDataResponse>, ErrorResponse> {
-    get_data_with(
-        community.to_string(),
-        db.inner().clone(),
-        fetch_data_boxed,
-    )
-    .await
+    get_data_with(community.to_string(), db.inner().clone(), fetch_data_boxed).await
 }
 
 #[cfg(test)]
@@ -362,20 +362,15 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(
-            result.err().unwrap().body.into_inner().error,
-            "NotFound"
-        );
+        assert_eq!(result.err().unwrap().body.into_inner().error, "NotFound");
     }
 
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = mock_db();
-        let result = get_data_with(
-            String::from("not-a-uri"),
-            db,
-            |_, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
-        )
+        let result = get_data_with(String::from("not-a-uri"), db, |_, _| {
+            Box::pin(async { panic!("should not fetch when uri is invalid") })
+        })
         .await;
 
         assert!(result.is_err());

@@ -58,7 +58,11 @@ pub async fn fetch_member_aggregate(
     let mut member_dids: Vec<String> = members
         .into_iter()
         .filter_map(|m| {
-            let did = m.data.get("subject").and_then(|v| v.as_str()).map(String::from)?;
+            let did = m
+                .data
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .map(String::from)?;
             let roles = m
                 .data
                 .get("roles")
@@ -227,7 +231,15 @@ async fn list_members_with(
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
             let role_rkeys = member_roles.remove(&did).unwrap_or_default();
-            build_member(did, handle, profile, data, state, &community.authority, role_rkeys)
+            build_member(
+                did,
+                handle,
+                profile,
+                data,
+                state,
+                &community.authority,
+                role_rkeys,
+            )
         })
         .collect();
 

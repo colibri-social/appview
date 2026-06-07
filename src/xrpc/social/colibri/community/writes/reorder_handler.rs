@@ -31,10 +31,12 @@ async fn reorder_channels_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
-    let category = AtUri::parse(&category_uri).ok_or_else(|| {
-        invalid_request("Invalid category AT-URI.")
-    })?;
-    let community_uri = format!("at://{}/{}/{}", category.authority, COMMUNITY_NSID, COMMUNITY_RKEY);
+    let category =
+        AtUri::parse(&category_uri).ok_or_else(|| invalid_request("Invalid category AT-URI."))?;
+    let community_uri = format!(
+        "at://{}/{}/{}",
+        category.authority, COMMUNITY_NSID, COMMUNITY_RKEY
+    );
 
     with_community_authz(
         auth,
@@ -48,12 +50,14 @@ async fn reorder_channels_with(
             let community_did = &ctx.community.authority;
             let category_rkey = &category.rkey;
 
-            let current = community_write::read_cached(&db, community_did, CATEGORY_NSID, category_rkey)
-                .await?
-                .ok_or_else(|| not_found_error("Category not found in AppView cache."))?;
+            let current =
+                community_write::read_cached(&db, community_did, CATEGORY_NSID, category_rkey)
+                    .await?
+                    .ok_or_else(|| not_found_error("Category not found in AppView cache."))?;
 
-            let mut rec: ColibriCategory = serde_json::from_value(current)
-                .map_err(|e| invalid_request(format!("Cached category record is malformed: {e}")))?;
+            let mut rec: ColibriCategory = serde_json::from_value(current).map_err(|e| {
+                invalid_request(format!("Cached category record is malformed: {e}"))
+            })?;
 
             // The frontend sends AT-URIs; extract just the rkey from each.
             rec.channel_order = channel_order
@@ -65,9 +69,10 @@ async fn reorder_channels_with(
                 })
                 .collect();
 
-            let data = serde_json::to_value(&rec)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-            community_write::put_record(&db, community_did, CATEGORY_NSID, category_rkey, data).await?;
+            let data =
+                serde_json::to_value(&rec).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            community_write::put_record(&db, community_did, CATEGORY_NSID, category_rkey, data)
+                .await?;
 
             Ok(Json(ReorderResponse { uri: category_uri }))
         },
@@ -75,9 +80,7 @@ async fn reorder_channels_with(
     .await
 }
 
-#[post(
-    "/xrpc/social.colibri.community.reorderChannels?<category>&<channel_order>&<auth>"
-)]
+#[post("/xrpc/social.colibri.community.reorderChannels?<category>&<channel_order>&<auth>")]
 /// Persists a new channel order within a category. `channel_order` is
 /// provided as repeated query-string values.
 pub async fn reorder_channels(
@@ -118,17 +121,16 @@ async fn reorder_categories_with(
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
 
-            let current = community_write::read_cached(
-                &db,
-                community_did,
-                COMMUNITY_NSID,
-                COMMUNITY_RKEY,
-            )
-            .await?
-            .ok_or_else(|| not_found_error("Community record not found in AppView cache."))?;
+            let current =
+                community_write::read_cached(&db, community_did, COMMUNITY_NSID, COMMUNITY_RKEY)
+                    .await?
+                    .ok_or_else(|| {
+                        not_found_error("Community record not found in AppView cache.")
+                    })?;
 
-            let mut community: ColibriCommunity = serde_json::from_value(current)
-                .map_err(|e| invalid_request(format!("Cached community record is malformed: {e}")))?;
+            let mut community: ColibriCommunity = serde_json::from_value(current).map_err(|e| {
+                invalid_request(format!("Cached community record is malformed: {e}"))
+            })?;
 
             // Accept either AT-URIs or bare rkeys.
             community.category_order = category_order
@@ -156,9 +158,7 @@ async fn reorder_categories_with(
     .await
 }
 
-#[post(
-    "/xrpc/social.colibri.community.reorderCategories?<community>&<category_order>&<auth>"
-)]
+#[post("/xrpc/social.colibri.community.reorderCategories?<community>&<category_order>&<auth>")]
 /// Persists a new category order for the community sidebar. `category_order`
 /// is provided as repeated query-string values.
 pub async fn reorder_categories(

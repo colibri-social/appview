@@ -5,15 +5,15 @@ use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
 use crate::lib::colibri::ColibriCommunity;
+use crate::lib::community_credentials;
 use crate::lib::community_write::{self, invalid_request, not_found_error};
+use crate::lib::crypto;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
-use crate::lib::permissions::Permission;
 use crate::lib::pds_client;
+use crate::lib::permissions::Permission;
 use crate::lib::responses::ErrorResponse;
-use crate::lib::crypto;
-use crate::lib::community_credentials;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
@@ -24,6 +24,7 @@ pub struct UpdateCommunityResponse {
     pub uri: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_community_with(
     community_uri: String,
     name: Option<String>,
@@ -82,9 +83,7 @@ async fn update_community_with(
                 }
                 let bytes = base64::engine::general_purpose::STANDARD
                     .decode(&b64)
-                    .or_else(|_| {
-                        base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&b64)
-                    })
+                    .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&b64))
                     .map_err(|_| invalid_request("picture is not valid base64."))?;
 
                 let creds = community_credentials::load_credentials(
@@ -109,14 +108,10 @@ async fn update_community_with(
                 .await
                 .map_err(community_write::pds_err_to_db)?;
 
-                let blob = pds_client::upload_blob(
-                    &creds.pds_endpoint,
-                    &session.access_jwt,
-                    bytes,
-                    mt,
-                )
-                .await
-                .map_err(community_write::pds_err_to_db)?;
+                let blob =
+                    pds_client::upload_blob(&creds.pds_endpoint, &session.access_jwt, bytes, mt)
+                        .await
+                        .map_err(community_write::pds_err_to_db)?;
 
                 community.picture = Some(blob);
             }
@@ -149,6 +144,7 @@ async fn update_community_with(
 )]
 /// Updates the community's metadata. Only the fields supplied are changed;
 /// omitted fields keep their current values.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_community(
     community: &str,
     name: Option<&str>,

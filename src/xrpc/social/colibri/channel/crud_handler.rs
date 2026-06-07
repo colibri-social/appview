@@ -25,6 +25,7 @@ pub struct ChannelUriResponse {
 
 // ---- channel.create --------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn create_channel_with(
     community_uri: String,
     category_uri: String,
@@ -36,9 +37,8 @@ async fn create_channel_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
-    let category = AtUri::parse(&category_uri).ok_or_else(|| {
-        invalid_request("Invalid category AT-URI.")
-    })?;
+    let category =
+        AtUri::parse(&category_uri).ok_or_else(|| invalid_request("Invalid category AT-URI."))?;
 
     with_community_authz(
         auth,
@@ -75,20 +75,17 @@ async fn create_channel_with(
             .await?;
 
             // Append the new channel rkey to the category's channelOrder.
-            let cat_current = community_write::read_cached(
-                &db,
-                community_did,
-                CATEGORY_NSID,
-                category_rkey,
-            )
-            .await?
-            .ok_or_else(|| not_found_error("Category not found in AppView cache."))?;
+            let cat_current =
+                community_write::read_cached(&db, community_did, CATEGORY_NSID, category_rkey)
+                    .await?
+                    .ok_or_else(|| not_found_error("Category not found in AppView cache."))?;
 
-            let mut cat: ColibriCategory = serde_json::from_value(cat_current)
-                .map_err(|e| invalid_request(format!("Cached category record is malformed: {e}")))?;
+            let mut cat: ColibriCategory = serde_json::from_value(cat_current).map_err(|e| {
+                invalid_request(format!("Cached category record is malformed: {e}"))
+            })?;
             cat.channel_order.push(channel_rkey.clone());
-            let cat_data = serde_json::to_value(&cat)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            let cat_data =
+                serde_json::to_value(&cat).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
             community_write::put_record(&db, community_did, CATEGORY_NSID, category_rkey, cat_data)
                 .await?;
 
@@ -137,11 +134,12 @@ async fn update_channel_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
-    let channel = AtUri::parse(&channel_uri).ok_or_else(|| {
-        invalid_request("Invalid channel AT-URI.")
-    })?;
-    let community_uri =
-        format!("at://{}/{}/{}", channel.authority, COMMUNITY_NSID, COMMUNITY_RKEY);
+    let channel =
+        AtUri::parse(&channel_uri).ok_or_else(|| invalid_request("Invalid channel AT-URI."))?;
+    let community_uri = format!(
+        "at://{}/{}/{}",
+        channel.authority, COMMUNITY_NSID, COMMUNITY_RKEY
+    );
 
     with_community_authz(
         auth,
@@ -160,9 +158,8 @@ async fn update_channel_with(
                     .await?
                     .ok_or_else(|| not_found_error("Channel not found in AppView cache."))?;
 
-            let mut rec: ColibriChannel = serde_json::from_value(current).map_err(|e| {
-                invalid_request(format!("Cached channel record is malformed: {e}"))
-            })?;
+            let mut rec: ColibriChannel = serde_json::from_value(current)
+                .map_err(|e| invalid_request(format!("Cached channel record is malformed: {e}")))?;
 
             if let Some(n) = name {
                 rec.name = n;
@@ -171,8 +168,8 @@ async fn update_channel_with(
                 rec.description = Some(d);
             }
 
-            let data = serde_json::to_value(&rec)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            let data =
+                serde_json::to_value(&rec).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
             community_write::put_record(&db, community_did, CHANNEL_NSID, channel_rkey, data)
                 .await?;
 
@@ -211,11 +208,12 @@ async fn delete_channel_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
-    let channel = AtUri::parse(&channel_uri).ok_or_else(|| {
-        invalid_request("Invalid channel AT-URI.")
-    })?;
-    let community_uri =
-        format!("at://{}/{}/{}", channel.authority, COMMUNITY_NSID, COMMUNITY_RKEY);
+    let channel =
+        AtUri::parse(&channel_uri).ok_or_else(|| invalid_request("Invalid channel AT-URI."))?;
+    let community_uri = format!(
+        "at://{}/{}/{}",
+        channel.authority, COMMUNITY_NSID, COMMUNITY_RKEY
+    );
 
     with_community_authz(
         auth,
@@ -240,17 +238,13 @@ async fn delete_channel_with(
             community_write::delete_record(&db, community_did, CHANNEL_NSID, channel_rkey).await?;
 
             // Remove from the parent category's channelOrder.
-            if let Some(cat_rkey) = category_rkey {
-                if let Ok(Some(cat_current)) =
-                    community_write::read_cached(&db, community_did, CATEGORY_NSID, &cat_rkey)
-                        .await
-                {
-                    if let Ok(mut cat) =
-                        serde_json::from_value::<ColibriCategory>(cat_current)
-                    {
+            if let Some(cat_rkey) = category_rkey
+                && let Ok(Some(cat_current)) =
+                    community_write::read_cached(&db, community_did, CATEGORY_NSID, &cat_rkey).await
+                    && let Ok(mut cat) = serde_json::from_value::<ColibriCategory>(cat_current) {
                         cat.channel_order.retain(|r| r != channel_rkey);
-                        if let Ok(data) = serde_json::to_value(&cat) {
-                            if let Err(e) = community_write::put_record(
+                        if let Ok(data) = serde_json::to_value(&cat)
+                            && let Err(e) = community_write::put_record(
                                 &db,
                                 community_did,
                                 CATEGORY_NSID,
@@ -264,10 +258,7 @@ async fn delete_channel_with(
                                      category {cat_rkey}: {e}"
                                 );
                             }
-                        }
                     }
-                }
-            }
 
             Ok(Json(ChannelUriResponse { uri: channel_uri }))
         },

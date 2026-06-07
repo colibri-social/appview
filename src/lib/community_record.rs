@@ -61,12 +61,13 @@ pub async fn fetch_community_record(
         return Ok(Some(parsed));
     }
 
-    let did_doc = resolve_did(community_did).await.map_err(|e| {
-        CommunityRecordError::ResolveDid {
-            did: community_did.to_string(),
-            message: e.body.into_inner().message,
-        }
-    })?;
+    let did_doc =
+        resolve_did(community_did)
+            .await
+            .map_err(|e| CommunityRecordError::ResolveDid {
+                did: community_did.to_string(),
+                message: e.body.into_inner().message,
+            })?;
     let pds_endpoint = did_doc
         .service
         .iter()

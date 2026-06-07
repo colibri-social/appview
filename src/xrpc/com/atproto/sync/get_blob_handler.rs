@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use rocket::http::{ContentType, Status};
 use rocket::request::Request;
-use rocket::response::{Response, Responder};
+use rocket::response::{Responder, Response};
 use rocket::{get, response};
 
 use crate::lib::did_document::DidDocument;
@@ -66,10 +66,7 @@ impl<'r> Responder<'r, 'static> for GetBlobResponse {
             GetBlobResponse::NotFound => Response::build()
                 .status(Status::NotFound)
                 .header(ContentType::JSON)
-                .sized_body(
-                    27,
-                    Cursor::new(r#"{"error":"BlobNotFound"}"#),
-                )
+                .sized_body(27, Cursor::new(r#"{"error":"BlobNotFound"}"#))
                 .ok(),
             GetBlobResponse::Upstream(e) => e.respond_to(req),
         }

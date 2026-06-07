@@ -357,7 +357,10 @@ pub async fn write_member_record(
     role_rkeys: Vec<String>,
     from_membership: Option<String>,
 ) -> Result<Option<record_data::Model>, DbErr> {
-    if find_member_rkey(db, community_did, subject_did).await?.is_some() {
+    if find_member_rkey(db, community_did, subject_did)
+        .await?
+        .is_some()
+    {
         return Ok(None);
     }
 

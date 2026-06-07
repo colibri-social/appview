@@ -27,8 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::colibri::{
-    ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
-    ColibriRole,
+    ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember, ColibriRole,
 };
 use crate::lib::community_credentials::{self, SOURCE_APPVIEW_MANAGED};
 use crate::lib::crypto;
@@ -239,12 +238,11 @@ async fn create_with(
     // off the `Content-Type` header in `upload_blob`.
     let picture_blob = match (input.picture.as_deref(), input.mime_type.as_deref()) {
         (Some(b64), Some(mime)) => {
-            let bytes = decode_picture(b64, mime).map_err(|e| {
+            let bytes = decode_picture(b64, mime).inspect_err(|_e| {
                 log::warn!(
                     "community.create: rejecting picture for {community_did} (mime={mime}, \
                      account already minted)"
                 );
-                e
             })?;
             let byte_len = bytes.len();
             let blob = upload_blob_fn(
@@ -258,9 +256,7 @@ async fn create_with(
                 log::error!("community.create: uploadBlob for {community_did} failed: {e}");
                 pds_error(format!("uploadBlob failed: {e}"))
             })?;
-            log::debug!(
-                "uploaded picture blob for {community_did} ({mime}, {byte_len} bytes)"
-            );
+            log::debug!("uploaded picture blob for {community_did} ({mime}, {byte_len} bytes)");
             Some(blob)
         }
         (Some(_), None) => {
@@ -471,12 +467,11 @@ where
         label,
     )
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         log::error!(
             "community.create: write_record({label}) for {community_did} failed: {}",
             e.body.0.message
         );
-        e
     })
 }
 

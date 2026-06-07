@@ -121,23 +121,35 @@ pub fn extract_mentioned_dids(facets: &[Value]) -> Vec<String> {
     out
 }
 
-/// Looks up the author DID of a parent message inside the same channel.
+/// Looks up the author DID of a parent message.
 /// Returns `None` if the parent is not in the cache.
 ///
-/// `channel` may be a full AT-URI (new messages) or a bare rkey (legacy).
-/// Both formats are matched so reply notifications work across the transition.
+/// `parent` may be a full AT-URI (new messages) or a bare rkey (legacy).
+/// `channel` is only used for the legacy bare-rkey path to scope the lookup.
 pub async fn fetch_parent_author(
     db: &DatabaseConnection,
     channel: &str,
-    parent_rkey: &str,
+    parent: &str,
 ) -> Result<Option<String>, DbErr> {
+    // New format: full AT-URI → look up by (did, rkey), no channel filter needed.
+    if let Some(parsed) = AtUri::parse(parent) {
+        let record = record_data::Entity::find()
+            .filter(record_data::Column::Nsid.eq("social.colibri.message"))
+            .filter(record_data::Column::Did.eq(&parsed.authority))
+            .filter(record_data::Column::Rkey.eq(&parsed.rkey))
+            .one(db)
+            .await?;
+        return Ok(record.map(|r| r.did));
+    }
+
+    // Legacy format: bare rkey → scope to channel.
     let channel_rkey = AtUri::parse(channel)
         .map(|u| u.rkey)
         .unwrap_or_else(|| channel.to_string());
 
     let record = record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq("social.colibri.message"))
-        .filter(record_data::Column::Rkey.eq(parent_rkey))
+        .filter(record_data::Column::Rkey.eq(parent))
         .filter(sea_orm::prelude::Expr::cust_with_values(
             r#"("record_data"."data"->>'channel' = $1 OR "record_data"."data"->>'channel' = $2)"#,
             vec![

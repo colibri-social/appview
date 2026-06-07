@@ -63,14 +63,12 @@ async fn create_category_with(
             .await?;
 
             // Append the new rkey to the community's categoryOrder.
-            let community_data = community_write::read_cached(
-                &db,
-                community_did,
-                COMMUNITY_NSID,
-                COMMUNITY_RKEY,
-            )
-            .await?
-            .ok_or_else(|| not_found_error("Community record not found in AppView cache."))?;
+            let community_data =
+                community_write::read_cached(&db, community_did, COMMUNITY_NSID, COMMUNITY_RKEY)
+                    .await?
+                    .ok_or_else(|| {
+                        not_found_error("Community record not found in AppView cache.")
+                    })?;
 
             let mut community: ColibriCommunity =
                 serde_json::from_value(community_data).map_err(|e| {
@@ -79,8 +77,14 @@ async fn create_category_with(
             community.category_order.push(category_rkey.clone());
             let comm_data = serde_json::to_value(&community)
                 .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-            community_write::put_record(&db, community_did, COMMUNITY_NSID, COMMUNITY_RKEY, comm_data)
-                .await?;
+            community_write::put_record(
+                &db,
+                community_did,
+                COMMUNITY_NSID,
+                COMMUNITY_RKEY,
+                comm_data,
+            )
+            .await?;
 
             Ok(Json(CategoryUriResponse {
                 uri: format!("at://{}/{}/{}", community_did, CATEGORY_NSID, category_rkey),
@@ -90,9 +94,7 @@ async fn create_category_with(
     .await
 }
 
-#[post(
-    "/xrpc/social.colibri.category.create?<community>&<name>&<auth>"
-)]
+#[post("/xrpc/social.colibri.category.create?<community>&<name>&<auth>")]
 pub async fn create_category(
     community: &str,
     name: &str,
@@ -120,10 +122,12 @@ async fn update_category_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
-    let category = AtUri::parse(&category_uri).ok_or_else(|| {
-        invalid_request("Invalid category AT-URI.")
-    })?;
-    let community_uri = format!("at://{}/{}/{}", category.authority, COMMUNITY_NSID, COMMUNITY_RKEY);
+    let category =
+        AtUri::parse(&category_uri).ok_or_else(|| invalid_request("Invalid category AT-URI."))?;
+    let community_uri = format!(
+        "at://{}/{}/{}",
+        category.authority, COMMUNITY_NSID, COMMUNITY_RKEY
+    );
 
     with_community_authz(
         auth,
@@ -137,20 +141,23 @@ async fn update_category_with(
             let community_did = &ctx.community.authority;
             let category_rkey = &category.rkey;
 
-            let current = community_write::read_cached(&db, community_did, CATEGORY_NSID, category_rkey)
-                .await?
-                .ok_or_else(|| not_found_error("Category not found in AppView cache."))?;
+            let current =
+                community_write::read_cached(&db, community_did, CATEGORY_NSID, category_rkey)
+                    .await?
+                    .ok_or_else(|| not_found_error("Category not found in AppView cache."))?;
 
-            let mut rec: ColibriCategory = serde_json::from_value(current)
-                .map_err(|e| invalid_request(format!("Cached category record is malformed: {e}")))?;
+            let mut rec: ColibriCategory = serde_json::from_value(current).map_err(|e| {
+                invalid_request(format!("Cached category record is malformed: {e}"))
+            })?;
 
             if let Some(n) = name {
                 rec.name = n;
             }
 
-            let data = serde_json::to_value(&rec)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-            community_write::put_record(&db, community_did, CATEGORY_NSID, category_rkey, data).await?;
+            let data =
+                serde_json::to_value(&rec).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            community_write::put_record(&db, community_did, CATEGORY_NSID, category_rkey, data)
+                .await?;
 
             Ok(Json(CategoryUriResponse { uri: category_uri }))
         },
@@ -185,10 +192,12 @@ async fn delete_category_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
-    let category = AtUri::parse(&category_uri).ok_or_else(|| {
-        invalid_request("Invalid category AT-URI.")
-    })?;
-    let community_uri = format!("at://{}/{}/{}", category.authority, COMMUNITY_NSID, COMMUNITY_RKEY);
+    let category =
+        AtUri::parse(&category_uri).ok_or_else(|| invalid_request("Invalid category AT-URI."))?;
+    let community_uri = format!(
+        "at://{}/{}/{}",
+        category.authority, COMMUNITY_NSID, COMMUNITY_RKEY
+    );
 
     with_community_authz(
         auth,
@@ -202,23 +211,19 @@ async fn delete_category_with(
             let community_did = &ctx.community.authority;
             let category_rkey = &category.rkey;
 
-            community_write::delete_record(&db, community_did, CATEGORY_NSID, category_rkey).await?;
+            community_write::delete_record(&db, community_did, CATEGORY_NSID, category_rkey)
+                .await?;
 
             // Remove the rkey from the community's categoryOrder.
-            if let Ok(Some(community_data)) = community_write::read_cached(
-                &db,
-                community_did,
-                COMMUNITY_NSID,
-                COMMUNITY_RKEY,
-            )
-            .await
-            {
-                if let Ok(mut community) =
+            if let Ok(Some(community_data)) =
+                community_write::read_cached(&db, community_did, COMMUNITY_NSID, COMMUNITY_RKEY)
+                    .await
+                && let Ok(mut community) =
                     serde_json::from_value::<ColibriCommunity>(community_data)
                 {
                     community.category_order.retain(|r| r != category_rkey);
-                    if let Ok(data) = serde_json::to_value(&community) {
-                        if let Err(e) = community_write::put_record(
+                    if let Ok(data) = serde_json::to_value(&community)
+                        && let Err(e) = community_write::put_record(
                             &db,
                             community_did,
                             COMMUNITY_NSID,
@@ -232,9 +237,7 @@ async fn delete_category_with(
                                  community {community_did} categoryOrder: {e}"
                             );
                         }
-                    }
                 }
-            }
 
             Ok(Json(CategoryUriResponse { uri: category_uri }))
         },

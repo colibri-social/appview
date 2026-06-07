@@ -148,10 +148,9 @@ async fn approve_membership_with(
         ));
     }
 
-    let (subject_did, membership) =
-        fetch_membership_fn(db.clone(), parsed_membership_uri.clone())
-            .await?
-            .ok_or_else(|| invalid_request("Membership record not found in local index."))?;
+    let (subject_did, membership) = fetch_membership_fn(db.clone(), parsed_membership_uri.clone())
+        .await?
+        .ok_or_else(|| invalid_request("Membership record not found in local index."))?;
 
     let community_uri_string = membership.community.clone();
 
@@ -164,8 +163,12 @@ async fn approve_membership_with(
         verify_auth_fn,
         load_authz_fn,
         move |ctx, db| async move {
-            if is_banned_fn(db.clone(), ctx.community.authority.clone(), subject_did.clone())
-                .await?
+            if is_banned_fn(
+                db.clone(),
+                ctx.community.authority.clone(),
+                subject_did.clone(),
+            )
+            .await?
             {
                 return Err(ErrorResponse {
                     body: Json(ErrorBody {
@@ -186,12 +189,8 @@ async fn approve_membership_with(
             )
             .await?;
 
-            let member_uri = written.map(|row| {
-                format!(
-                    "at://{}/{}/{}",
-                    row.did, row.nsid, row.rkey
-                )
-            });
+            let member_uri =
+                written.map(|row| format!("at://{}/{}/{}", row.did, row.nsid, row.rkey));
 
             Ok(Json(ApproveMembershipResponse {
                 did: subject_did,
@@ -249,29 +248,27 @@ mod tests {
             Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
-        let write_member = move |_: DatabaseConnection,
-                                 community_did: String,
-                                 subject_did: String,
-                                 _roles: Vec<String>,
-                                 from_membership: Option<String>|
-              -> BoxFuture<
-            'static,
-            Result<Option<record_data::Model>, DbErr>,
-        > {
-            let captured = captured_clone.clone();
-            Box::pin(async move {
-                *captured.lock().unwrap() =
-                    Some((community_did.clone(), subject_did.clone(), from_membership));
-                Ok(Some(record_data::Model {
-                    id: 1,
-                    did: community_did,
-                    nsid: String::from("social.colibri.member"),
-                    rkey: String::from("member-1"),
-                    data: serde_json::json!({}),
-                    indexed_at: String::from(""),
-                }))
-            })
-        };
+        let write_member =
+            move |_: DatabaseConnection,
+                  community_did: String,
+                  subject_did: String,
+                  _roles: Vec<String>,
+                  from_membership: Option<String>|
+                  -> BoxFuture<'static, Result<Option<record_data::Model>, DbErr>> {
+                let captured = captured_clone.clone();
+                Box::pin(async move {
+                    *captured.lock().unwrap() =
+                        Some((community_did.clone(), subject_did.clone(), from_membership));
+                    Ok(Some(record_data::Model {
+                        id: 1,
+                        did: community_did,
+                        nsid: String::from("social.colibri.member"),
+                        rkey: String::from("member-1"),
+                        data: serde_json::json!({}),
+                        indexed_at: String::from(""),
+                    }))
+                })
+            };
 
         let result = approve_membership_with(
             String::from("at://did:plc:applicant/social.colibri.membership/m1"),
@@ -283,19 +280,11 @@ mod tests {
                     Ok(ActorAuthz {
                         is_owner: false,
                         member: Some(member("did:plc:mod", vec!["r1"])),
-                        roles: vec![role(
-                            "Moderator",
-                            10,
-                            vec![Permission::ApprovalManage],
-                        )],
+                        roles: vec![role("Moderator", 10, vec![Permission::ApprovalManage])],
                     })
                 })
             },
-            &|_, uri| {
-                Box::pin(async move {
-                    Ok(Some((uri.authority, sample_membership())))
-                })
-            },
+            &|_, uri| Box::pin(async move { Ok(Some((uri.authority, sample_membership()))) }),
             &write_member,
             &|_, _, _| Box::pin(async { Ok(false) }),
         )
@@ -336,11 +325,7 @@ mod tests {
                     })
                 })
             },
-            &|_, uri| {
-                Box::pin(async move {
-                    Ok(Some((uri.authority, sample_membership())))
-                })
-            },
+            &|_, uri| Box::pin(async move { Ok(Some((uri.authority, sample_membership()))) }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member") }),
             &|_, _, _| Box::pin(async { panic!("should not check ban before permission") }),
         )
@@ -361,19 +346,11 @@ mod tests {
                     Ok(ActorAuthz {
                         is_owner: false,
                         member: Some(member("did:plc:mod", vec!["r1"])),
-                        roles: vec![role(
-                            "Moderator",
-                            10,
-                            vec![Permission::ApprovalManage],
-                        )],
+                        roles: vec![role("Moderator", 10, vec![Permission::ApprovalManage])],
                     })
                 })
             },
-            &|_, uri| {
-                Box::pin(async move {
-                    Ok(Some((uri.authority, sample_membership())))
-                })
-            },
+            &|_, uri| Box::pin(async move { Ok(Some((uri.authority, sample_membership()))) }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member when banned") }),
             &|_, _, _| Box::pin(async { Ok(true) }),
         )

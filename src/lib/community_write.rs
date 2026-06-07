@@ -89,10 +89,9 @@ pub async fn create_record(
 ) -> Result<String, DbErr> {
     let (endpoint, jwt) = community_session(db, community_did).await?;
 
-    let record_ref =
-        pds_client::create_record(&endpoint, &jwt, community_did, nsid, rkey, &data)
-            .await
-            .map_err(pds_err_to_db)?;
+    let record_ref = pds_client::create_record(&endpoint, &jwt, community_did, nsid, rkey, &data)
+        .await
+        .map_err(pds_err_to_db)?;
 
     let final_rkey = AtUri::parse(&record_ref.uri)
         .map(|u| u.rkey)
@@ -158,13 +157,7 @@ pub async fn read_cached(
 
 /// Upserts a row in the local `record_data` cache. Failures are logged but
 /// not fatal — the firehose ingester reconciles asynchronously.
-pub async fn cache_upsert(
-    db: &DatabaseConnection,
-    did: &str,
-    nsid: &str,
-    rkey: &str,
-    data: Value,
-) {
+pub async fn cache_upsert(db: &DatabaseConnection, did: &str, nsid: &str, rkey: &str, data: Value) {
     let active = record_data::ActiveModel {
         did: ActiveValue::Set(did.to_string()),
         nsid: ActiveValue::Set(nsid.to_string()),

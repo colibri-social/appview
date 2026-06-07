@@ -1,8 +1,8 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
+use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::Serialize;
-use sea_orm::prelude::Expr;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriMember;
@@ -52,11 +52,12 @@ async fn set_member_roles_with(
                 ))
                 .one(&db)
                 .await?
-                .ok_or_else(|| not_found_error(format!("{member_did} is not a member of this community.")))?;
+                .ok_or_else(|| {
+                    not_found_error(format!("{member_did} is not a member of this community."))
+                })?;
 
-            let mut member: ColibriMember = serde_json::from_value(member_row.data).map_err(|e| {
-                invalid_request(format!("Cached member record is malformed: {e}"))
-            })?;
+            let mut member: ColibriMember = serde_json::from_value(member_row.data)
+                .map_err(|e| invalid_request(format!("Cached member record is malformed: {e}")))?;
 
             // Accept AT-URIs or bare rkeys for roles.
             member.roles = roles
@@ -69,17 +70,11 @@ async fn set_member_roles_with(
                 .collect();
 
             let new_roles = member.roles.clone();
-            let data = serde_json::to_value(&member)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            let data =
+                serde_json::to_value(&member).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
 
-            community_write::put_record(
-                &db,
-                community_did,
-                MEMBER_NSID,
-                &member_row.rkey,
-                data,
-            )
-            .await?;
+            community_write::put_record(&db, community_did, MEMBER_NSID, &member_row.rkey, data)
+                .await?;
 
             Ok(Json(SetMemberRolesResponse {
                 did: member_did,
@@ -90,9 +85,7 @@ async fn set_member_roles_with(
     .await
 }
 
-#[post(
-    "/xrpc/social.colibri.community.setMemberRoles?<community>&<member>&<roles>&<auth>"
-)]
+#[post("/xrpc/social.colibri.community.setMemberRoles?<community>&<member>&<roles>&<auth>")]
 /// Replaces the role set for a community member. `roles` is provided as
 /// repeated query-string values (AT-URIs or bare rkeys).
 pub async fn set_member_roles(
