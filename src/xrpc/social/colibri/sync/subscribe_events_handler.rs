@@ -245,6 +245,9 @@ fn serialize_notification_for(indexed: IndexedNotification, did: &str) -> Option
     if indexed.row.recipient_did != did {
         return None;
     }
+    if !indexed.row.channel_uri.starts_with("at://") {
+        return None;
+    }
     let event = ColibriServerEvent {
         event_type: String::from("notification_event"),
         data: Some(ColibriServerEventData::Notification(
@@ -253,7 +256,7 @@ fn serialize_notification_for(indexed: IndexedNotification, did: &str) -> Option
                 kind: indexed.row.kind,
                 message_uri: indexed.row.message_uri,
                 author_did: indexed.row.author_did,
-                channel_rkey: indexed.row.channel_rkey,
+                channel_uri: indexed.row.channel_uri,
                 indexed_at: indexed.row.indexed_at,
                 message: NotificationEventMessage {
                     text: indexed.message.text,

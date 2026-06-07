@@ -6,6 +6,7 @@ mod m20260513_120000_create_community_invitations;
 mod m20260514_090000_create_notifications;
 mod m20260515_120000_create_community_credentials;
 mod m20260526_000000_add_indexed_at_to_record_data;
+mod m20260607_000000_rename_notifications_channel_rkey;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260514_090000_create_notifications::Migration),
             Box::new(m20260515_120000_create_community_credentials::Migration),
             Box::new(m20260526_000000_add_indexed_at_to_record_data::Migration),
+            Box::new(m20260607_000000_rename_notifications_channel_rkey::Migration),
         ]
     }
 }

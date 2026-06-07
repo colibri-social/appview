@@ -66,8 +66,8 @@ pub struct NotificationView {
     pub message_uri: String,
     #[serde(rename = "authorDid")]
     pub author_did: String,
-    #[serde(rename = "channelRkey")]
-    pub channel_rkey: String,
+    #[serde(rename = "channelUri")]
+    pub channel_uri: String,
     #[serde(rename = "indexedAt")]
     pub indexed_at: String,
     #[serde(rename = "seenAt", skip_serializing_if = "Option::is_none")]
@@ -86,7 +86,7 @@ impl NotificationView {
             kind: row.kind,
             message_uri: row.message_uri,
             author_did: row.author_did,
-            channel_rkey: row.channel_rkey,
+            channel_uri: row.channel_uri,
             indexed_at: row.indexed_at,
             seen_at: row.seen_at,
             message,
@@ -197,7 +197,7 @@ pub async fn index_message_notifications(
             kind: ActiveValue::Set(kind.to_string()),
             message_uri: ActiveValue::Set(message_uri.to_string()),
             author_did: ActiveValue::Set(author_did.to_string()),
-            channel_rkey: ActiveValue::Set(message.channel.clone()),
+            channel_uri: ActiveValue::Set(message.channel.clone()),
             indexed_at: ActiveValue::Set(now.clone()),
             seen_at: ActiveValue::Set(None),
             ..Default::default()
@@ -248,7 +248,11 @@ pub async fn list_notifications(
     limit: u64,
     cursor: Option<&str>,
 ) -> Result<Vec<notifications::Model>, DbErr> {
-    let mut condition = Condition::all().add(notifications::Column::RecipientDid.eq(recipient_did));
+    let mut condition = Condition::all()
+        .add(notifications::Column::RecipientDid.eq(recipient_did))
+        .add(sea_orm::prelude::Expr::cust(
+            r#""notifications"."channel_uri" LIKE 'at://%'"#,
+        ));
 
     if let Some(c) = cursor {
         let parsed: i64 = c

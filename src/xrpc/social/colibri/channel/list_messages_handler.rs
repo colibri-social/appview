@@ -154,10 +154,42 @@ pub async fn fetch_message_page(
         .await
 }
 
-/// Fetches the full records for parent messages within the same channel,
-/// keyed by rkey. Matches messages that store either the full channel AT-URI
-/// (new format) or just the rkey (legacy format) in their `channel` field.
+/// Fetches full records for parent messages identified by full AT-URIs.
+/// Returns the map keyed by canonical AT-URI `"at://{did}/{nsid}/{rkey}"`.
 pub async fn fetch_parent_records(
+    db: &DatabaseConnection,
+    parent_uris: &[String],
+) -> Result<HashMap<String, record_data::Model>, DbErr> {
+    if parent_uris.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut pair_condition = Condition::any();
+    for uri in parent_uris {
+        let Some(parsed) = AtUri::parse(uri) else { continue };
+        pair_condition = pair_condition.add(
+            Condition::all()
+                .add(record_data::Column::Did.eq(parsed.authority))
+                .add(record_data::Column::Rkey.eq(parsed.rkey)),
+        );
+    }
+
+    let records = record_data::Entity::find()
+        .filter(record_data::Column::Nsid.eq(MESSAGE_NSID))
+        .filter(pair_condition)
+        .all(db)
+        .await?;
+
+    Ok(records
+        .into_iter()
+        .map(|r| (format!("at://{}/{}/{}", r.did, r.nsid, r.rkey), r))
+        .collect())
+}
+
+/// Fetches full records for legacy parent messages identified by bare rkeys
+/// within a channel. Returns the map keyed by bare rkey.
+/// Matches messages storing either the full channel AT-URI or bare rkey.
+async fn fetch_legacy_parent_records(
     db: &DatabaseConnection,
     channel_uri: &str,
     channel_rkey: &str,
@@ -253,6 +285,8 @@ pub struct MessagePage {
     pub community_uri: String,
     /// Full parent message records keyed by rkey. Reactions for these are
     /// included in the top-level `reactions` map so a single fetch covers both.
+    /// Keyed by canonical AT-URI for new-format parents, or by bare rkey for
+    /// legacy parents. Both are valid lookup keys via `stored.parent`.
     pub parent_records: HashMap<String, record_data::Model>,
     pub reactions: HashMap<String, Vec<ReactionSummary>>,
     pub author_profiles: HashMap<String, ActorProfile>,
@@ -290,26 +324,40 @@ pub async fn assemble_message_page(
         .filter(|r| !banned.contains(&r.did))
         .collect();
 
-    let parent_rkeys: Vec<String> = records
-        .iter()
-        .filter_map(|r| {
-            serde_json::from_value::<StoredMessage>(r.data.clone())
-                .ok()
-                .and_then(|m| m.parent)
-        })
-        .collect();
-    let parent_records: HashMap<String, record_data::Model> =
-        fetch_parent_records(db, &channel_uri, &channel.rkey, &parent_rkeys)
+    // Split parent values: full AT-URIs (new) vs bare rkeys (legacy).
+    let mut parent_uris: Vec<String> = Vec::new();
+    let mut legacy_parent_rkeys: Vec<String> = Vec::new();
+    for r in &records {
+        if let Ok(m) = serde_json::from_value::<StoredMessage>(r.data.clone()) {
+            if let Some(p) = m.parent {
+                if p.starts_with("at://") {
+                    parent_uris.push(p);
+                } else {
+                    legacy_parent_rkeys.push(p);
+                }
+            }
+        }
+    }
+
+    let mut parent_records: HashMap<String, record_data::Model> =
+        fetch_parent_records(db, &parent_uris)
             .await?
             .into_iter()
             .filter(|(_, r)| !banned.contains(&r.did))
             .collect();
 
+    let legacy_records =
+        fetch_legacy_parent_records(db, &channel_uri, &channel.rkey, &legacy_parent_rkeys)
+            .await?
+            .into_iter()
+            .filter(|(_, r)| !banned.contains(&r.did));
+    parent_records.extend(legacy_records);
+
     // Fetch reactions for page messages and their parents in one round-trip.
     let all_rkeys: Vec<String> = records
         .iter()
         .map(|r| r.rkey.clone())
-        .chain(parent_records.keys().cloned())
+        .chain(parent_records.values().map(|r| r.rkey.clone()))
         .collect();
     let reactions = strip_banned_reactors(
         group_reactions_for_messages(db, &all_rkeys).await?,
@@ -452,10 +500,10 @@ async fn list_messages_with(
         .iter()
         .filter_map(|record| {
             let stored = serde_json::from_value::<StoredMessage>(record.data.clone()).ok()?;
-            let parent = stored.parent.as_ref().and_then(|rkey| {
-                let pr = page.parent_records.get(rkey)?;
+            let parent = stored.parent.as_ref().and_then(|parent_uri| {
+                let pr = page.parent_records.get(parent_uri)?;
                 let ps = serde_json::from_value::<StoredMessage>(pr.data.clone()).ok()?;
-                let parent_reactions = page.reactions.get(rkey).cloned().unwrap_or_default();
+                let parent_reactions = page.reactions.get(&pr.rkey).cloned().unwrap_or_default();
                 let parent_author = build_author(
                     pr.did.clone(),
                     page.author_handles.get(&pr.did).cloned(),
@@ -582,14 +630,21 @@ mod tests {
                 Box::pin(async {
                     Ok(MessagePage {
                         records: vec![
-                            message_record("msg-2", "did:plc:bob", "hi", Some("msg-1")),
+                            message_record(
+                                "msg-2",
+                                "did:plc:bob",
+                                "hi",
+                                Some("at://did:plc:alice/social.colibri.message/msg-1"),
+                            ),
                             message_record("msg-1", "did:plc:alice", "hello", None),
                         ],
                         community_uri: String::from(
                             "at://did:plc:owner/social.colibri.community/c1",
                         ),
                         parent_records: HashMap::from([(
-                            String::from("msg-1"),
+                            String::from(
+                                "at://did:plc:alice/social.colibri.message/msg-1",
+                            ),
                             message_record("msg-1", "did:plc:alice", "hello", None),
                         )]),
                         reactions: HashMap::from([(

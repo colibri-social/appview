@@ -131,7 +131,7 @@ mod tests {
             kind: kind.to_string(),
             message_uri: format!("at://did:plc:author/social.colibri.message/m{id}"),
             author_did: String::from("did:plc:author"),
-            channel_rkey: String::from("chan-a"),
+            channel_uri: String::from("at://did:plc:owner/social.colibri.channel.text/chan-a"),
             indexed_at: String::from("2026-05-14T00:00:00Z"),
             seen_at: None,
         }

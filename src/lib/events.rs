@@ -209,8 +209,8 @@ pub struct NotificationEventData {
     pub message_uri: String,
     #[serde(rename = "authorDid")]
     pub author_did: String,
-    #[serde(rename = "channelRkey")]
-    pub channel_rkey: String,
+    #[serde(rename = "channelUri")]
+    pub channel_uri: String,
     #[serde(rename = "indexedAt")]
     pub indexed_at: String,
     pub message: NotificationEventMessage,

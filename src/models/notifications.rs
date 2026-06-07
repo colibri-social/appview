@@ -16,7 +16,7 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub author_did: String,
     #[sea_orm(column_type = "Text")]
-    pub channel_rkey: String,
+    pub channel_uri: String,
     #[sea_orm(column_type = "Text")]
     pub indexed_at: String,
     #[sea_orm(column_type = "Text", nullable)]
