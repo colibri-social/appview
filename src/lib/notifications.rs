@@ -123,17 +123,27 @@ pub fn extract_mentioned_dids(facets: &[Value]) -> Vec<String> {
 
 /// Looks up the author DID of a parent message inside the same channel.
 /// Returns `None` if the parent is not in the cache.
+///
+/// `channel` may be a full AT-URI (new messages) or a bare rkey (legacy).
+/// Both formats are matched so reply notifications work across the transition.
 pub async fn fetch_parent_author(
     db: &DatabaseConnection,
-    channel_rkey: &str,
+    channel: &str,
     parent_rkey: &str,
 ) -> Result<Option<String>, DbErr> {
+    let channel_rkey = AtUri::parse(channel)
+        .map(|u| u.rkey)
+        .unwrap_or_else(|| channel.to_string());
+
     let record = record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq("social.colibri.message"))
         .filter(record_data::Column::Rkey.eq(parent_rkey))
         .filter(sea_orm::prelude::Expr::cust_with_values(
-            r#""record_data"."data"->>'channel' = $1"#,
-            vec![sea_orm::Value::from(channel_rkey.to_string())],
+            r#"("record_data"."data"->>'channel' = $1 OR "record_data"."data"->>'channel' = $2)"#,
+            vec![
+                sea_orm::Value::from(channel.to_string()),
+                sea_orm::Value::from(channel_rkey),
+            ],
         ))
         .one(db)
         .await?;

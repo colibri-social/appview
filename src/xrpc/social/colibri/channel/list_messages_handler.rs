@@ -121,11 +121,14 @@ pub async fn fetch_channel_record(
         .await
 }
 
-/// Fetches a page of message records targeting the given channel rkey,
-/// ordered by rkey descending. The optional cursor filters out rkeys at or
-/// past the cursor, matching the listRecords convention.
+/// Fetches a page of message records targeting the given channel, ordered by
+/// rkey descending. Matches messages that store either the full channel AT-URI
+/// (new format) or just the rkey (legacy format) in their `channel` field.
+/// The optional cursor filters out rkeys at or past the cursor, matching the
+/// listRecords convention.
 pub async fn fetch_message_page(
     db: &DatabaseConnection,
+    channel_uri: &str,
     channel_rkey: &str,
     limit: u64,
     cursor: Option<&str>,
@@ -133,8 +136,11 @@ pub async fn fetch_message_page(
     let mut condition = Condition::all()
         .add(record_data::Column::Nsid.eq(MESSAGE_NSID))
         .add(Expr::cust_with_values(
-            r#""record_data"."data"->>'channel' = $1"#,
-            vec![sea_orm::Value::from(channel_rkey.to_string())],
+            r#"("record_data"."data"->>'channel' = $1 OR "record_data"."data"->>'channel' = $2)"#,
+            vec![
+                sea_orm::Value::from(channel_uri.to_string()),
+                sea_orm::Value::from(channel_rkey.to_string()),
+            ],
         ));
     if let Some(c) = cursor {
         condition = condition.add(record_data::Column::Rkey.lt(c));
@@ -149,9 +155,11 @@ pub async fn fetch_message_page(
 }
 
 /// Fetches the full records for parent messages within the same channel,
-/// keyed by rkey. Used to embed one level of parent data in the response.
+/// keyed by rkey. Matches messages that store either the full channel AT-URI
+/// (new format) or just the rkey (legacy format) in their `channel` field.
 pub async fn fetch_parent_records(
     db: &DatabaseConnection,
+    channel_uri: &str,
     channel_rkey: &str,
     parent_rkeys: &[String],
 ) -> Result<HashMap<String, record_data::Model>, DbErr> {
@@ -162,8 +170,11 @@ pub async fn fetch_parent_records(
         .filter(record_data::Column::Nsid.eq(MESSAGE_NSID))
         .filter(record_data::Column::Rkey.is_in(parent_rkeys.to_vec()))
         .filter(Expr::cust_with_values(
-            r#""record_data"."data"->>'channel' = $1"#,
-            vec![sea_orm::Value::from(channel_rkey.to_string())],
+            r#"("record_data"."data"->>'channel' = $1 OR "record_data"."data"->>'channel' = $2)"#,
+            vec![
+                sea_orm::Value::from(channel_uri.to_string()),
+                sea_orm::Value::from(channel_rkey.to_string()),
+            ],
         ))
         .all(db)
         .await?;
@@ -272,7 +283,8 @@ pub async fn assemble_message_page(
         .into_iter()
         .collect();
 
-    let raw_records = fetch_message_page(db, &channel.rkey, limit, cursor).await?;
+    let channel_uri = format!("at://{}/{}/{}", channel.authority, channel.collection, channel.rkey);
+    let raw_records = fetch_message_page(db, &channel_uri, &channel.rkey, limit, cursor).await?;
     let records: Vec<record_data::Model> = raw_records
         .into_iter()
         .filter(|r| !banned.contains(&r.did))
@@ -287,7 +299,7 @@ pub async fn assemble_message_page(
         })
         .collect();
     let parent_records: HashMap<String, record_data::Model> =
-        fetch_parent_records(db, &channel.rkey, &parent_rkeys)
+        fetch_parent_records(db, &channel_uri, &channel.rkey, &parent_rkeys)
             .await?
             .into_iter()
             .filter(|(_, r)| !banned.contains(&r.did))
