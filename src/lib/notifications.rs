@@ -334,6 +334,9 @@ pub async fn unseen_count(db: &DatabaseConnection, recipient_did: &str) -> Resul
     notifications::Entity::find()
         .filter(notifications::Column::RecipientDid.eq(recipient_did))
         .filter(notifications::Column::SeenAt.is_null())
+        .filter(sea_orm::prelude::Expr::cust(
+            r#""notifications"."channel_uri" LIKE 'at://%'"#,
+        ))
         .count(db)
         .await
 }
