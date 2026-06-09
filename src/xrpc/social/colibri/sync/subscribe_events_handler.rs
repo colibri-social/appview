@@ -6,7 +6,7 @@ use crate::lib::events::{
 use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::notifications::IndexedNotification;
-use crate::lib::state::{join_vc, leave_vc, view_channel};
+use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, view_channel};
 use crate::lib::tap::CommsBridge;
 use crate::lib::tap::TapMessageRecord;
 use crate::{
@@ -293,9 +293,11 @@ async fn handle_notification_msg(
 }
 
 /// Handles the event loop and allows both messages from Tap and the Client to get processed.
+#[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     io: DuplexStream,
     from_tap: Receiver<TapMessageRecord>,
+    to_tap_broadcast: Sender<TapMessageRecord>,
     did: String,
     db: DatabaseConnection,
     to_c2c_broadcast: Sender<EventNotification>,
@@ -309,6 +311,7 @@ async fn run_event_loop(
 
     save_state(&db, did.clone(), String::from("online")).await;
     register_dids(vec![did.clone()]).await;
+    broadcast_state_change(&to_tap_broadcast, &did, &db).await;
 
     loop {
         let connected = tokio::select! {
@@ -324,6 +327,7 @@ async fn run_event_loop(
     }
 
     save_state(&db, did.clone(), String::from("offline")).await;
+    broadcast_state_change(&to_tap_broadcast, &did, &db).await;
 }
 
 #[get("/xrpc/social.colibri.sync.subscribeEvents?<auth>")]
@@ -348,6 +352,7 @@ pub async fn subscribe_events(
     let cloned_db = db.inner().clone();
 
     let from_tap = bridge.broadcast.subscribe();
+    let to_tap_broadcast = bridge.broadcast.clone();
     let from_notifications = bridge.notifications.subscribe();
 
     let to_c2c_broadcast = c2c_broadcast_channel.0.clone();
@@ -358,6 +363,7 @@ pub async fn subscribe_events(
             run_event_loop(
                 io,
                 from_tap,
+                to_tap_broadcast,
                 did,
                 cloned_db,
                 to_c2c_broadcast,

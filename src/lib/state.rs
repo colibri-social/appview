@@ -1,5 +1,52 @@
+use crate::lib::get_atproto_record::get_atproto_record;
+use crate::lib::tap::TapMessageRecord;
 use crate::models::user_states::{self, ActiveModel as UserStatesModel, Entity as UserStates};
+use rocket::tokio::sync::broadcast::Sender;
 use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
+use serde_json::Value;
+
+/// Broadcasts the user's current online state to every connected client by
+/// synthesizing an `actor.data` update and pushing it onto the shared tap
+/// fan-out. Each subscriber maps it through `map_tap_event`, which enriches it
+/// with the state we just persisted, and forwards a `user_event` to the clients
+/// that know the user — i.e. those viewing a community the user is part of. This
+/// is the same path real profile/status updates travel, so the user themselves
+/// and everyone who shares a community with them stay in sync after a state
+/// change (connect/disconnect or an explicit `setState`).
+pub async fn broadcast_state_change(
+    broadcast: &Sender<TapMessageRecord>,
+    did: &str,
+    db: &DatabaseConnection,
+) {
+    let actor_data = get_atproto_record::<Value>(
+        did.to_string(),
+        String::from("social.colibri.actor.data"),
+        String::from("self"),
+        db,
+    )
+    .await;
+
+    let actor_data = match actor_data {
+        Ok(record) => record,
+        Err(e) => {
+            log::error!("Unable to load actor data for {did} on state change: {e}");
+            return;
+        }
+    };
+
+    let record = TapMessageRecord {
+        live: true,
+        did: did.to_string(),
+        rev: String::new(),
+        collection: String::from("social.colibri.actor.data"),
+        rkey: String::from("self"),
+        action: String::from("update"),
+        record: Some(actor_data),
+        cid: None,
+    };
+
+    let _ = broadcast.send(record);
+}
 
 pub async fn join_vc(did: String, vc: String, community: String, db: &DatabaseConnection) {
     let _ = UserStates::insert(UserStatesModel {
