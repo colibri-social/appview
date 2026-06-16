@@ -35,6 +35,7 @@ pub struct CommunityDataResponse {
     pub channels: Vec<Channel>,
     pub roles: Vec<Role>,
     pub members: Vec<Member>,
+    pub did: String,
 }
 
 pub struct RawCommunityData {
@@ -221,6 +222,7 @@ async fn get_data_with(
         channels,
         roles,
         members,
+        did: community.authority,
     }))
 }
 

@@ -1,13 +1,18 @@
+use std::collections::HashMap;
+
 use futures::future::BoxFuture;
 use rand::Rng;
 use rand::distributions::Alphanumeric;
 use rocket::serde::json::Json;
 use rocket::{State, get, post};
 use sea_orm::{
-    ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, sea_query,
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter,
+    sea_query,
 };
 use serde::Serialize;
 
+use crate::lib::bsky::ActorProfile;
+use crate::lib::colibri::ColibriActorData;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -17,6 +22,8 @@ use crate::lib::time::current_iso8601_utc;
 use crate::models::community_invitations::{
     self, ActiveModel as InvitationModel, Entity as Invitations, Model as Invitation,
 };
+use crate::models::{record_data, repos, user_states};
+use crate::xrpc::social::colibri::actor::get_data_handler::{Actor, ActorData, ActorStatus};
 
 #[derive(Serialize, Debug)]
 pub struct InvitationView {
@@ -27,9 +34,20 @@ pub struct InvitationView {
     pub active: bool,
 }
 
+/// Like [`InvitationView`], but `createdBy` is hydrated into the full creator
+/// profile rather than a bare DID. Used by `listInvitations`.
+#[derive(Serialize, Debug)]
+pub struct InvitationProfileView {
+    pub code: String,
+    pub community: String,
+    #[serde(rename = "createdBy")]
+    pub created_by: Actor,
+    pub active: bool,
+}
+
 #[derive(Serialize, Debug)]
 pub struct InvitationListResponse {
-    pub codes: Vec<InvitationView>,
+    pub codes: Vec<InvitationProfileView>,
 }
 
 #[derive(Serialize, Debug)]
@@ -191,6 +209,131 @@ async fn get_invitation_with(
     Ok(Json(row.into()))
 }
 
+// ---- Profile hydration ---------------------------------------------------
+
+/// Hydrates a set of DIDs into their full creator [`Actor`] profiles, keyed by
+/// DID. DIDs without a stored profile, handle, or state fall back to sensible
+/// defaults (see [`build_actor`]).
+type HydrateFn = dyn Fn(DatabaseConnection, Vec<String>) -> BoxFuture<'static, Result<HashMap<String, Actor>, DbErr>>
+    + Send
+    + Sync;
+
+/// Assembles an [`Actor`] from its component records, mirroring the fallbacks
+/// used by `listMembers`: handle and display name default to the DID, online
+/// state defaults to `offline`, and an empty status is used when none exists.
+fn build_actor(
+    did: String,
+    handle: Option<String>,
+    profile: Option<ActorProfile>,
+    actor_data: Option<ColibriActorData>,
+    state: Option<String>,
+) -> Actor {
+    let handle = handle.unwrap_or_else(|| did.clone());
+    let display_name = profile
+        .as_ref()
+        .and_then(|p| p.display_name.clone())
+        .unwrap_or_else(|| handle.clone());
+
+    let (avatar, banner, description) = match profile {
+        Some(p) => (p.avatar, p.banner, p.description),
+        None => (None, None, None),
+    };
+
+    let status = actor_data
+        .map(|d| ActorStatus {
+            text: d.status,
+            emoji: d.emoji,
+        })
+        .unwrap_or(ActorStatus {
+            text: String::new(),
+            emoji: None,
+        });
+
+    Actor {
+        did,
+        handle,
+        data: ActorData {
+            display_name,
+            avatar,
+            banner,
+            description,
+            online_state: state.unwrap_or_else(|| String::from("offline")),
+            status,
+        },
+    }
+}
+
+/// Fetches profile records, Colibri actor data, online states, and handles for
+/// every DID in `dids` in a single round-trip per backing table, then builds an
+/// [`Actor`] for each.
+pub async fn hydrate_actors(
+    db: &DatabaseConnection,
+    dids: Vec<String>,
+) -> Result<HashMap<String, Actor>, DbErr> {
+    if dids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let self_records = record_data::Entity::find()
+        .filter(record_data::Column::Did.is_in(dids.clone()))
+        .filter(record_data::Column::Rkey.eq("self"))
+        .filter(
+            Condition::any()
+                .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
+                .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
+        )
+        .all(db)
+        .await?;
+
+    let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
+    let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
+    for record in self_records {
+        if record.nsid == "app.bsky.actor.profile" {
+            if let Ok(profile) = serde_json::from_value::<ActorProfile>(record.data) {
+                profiles.insert(record.did, profile);
+            }
+        } else if record.nsid == "social.colibri.actor.data"
+            && let Ok(data) = serde_json::from_value::<ColibriActorData>(record.data)
+        {
+            actor_data.insert(record.did, data);
+        }
+    }
+
+    let state_rows = user_states::Entity::find()
+        .filter(user_states::Column::Did.is_in(dids.clone()))
+        .all(db)
+        .await?;
+    let mut states: HashMap<String, String> = state_rows
+        .into_iter()
+        .map(|row| (row.did, row.state))
+        .collect();
+
+    let repo_rows = repos::Entity::find()
+        .filter(repos::Column::Did.is_in(dids.clone()))
+        .all(db)
+        .await?;
+    let mut handles: HashMap<String, String> = repo_rows
+        .into_iter()
+        .filter_map(|row| row.handle.map(|h| (row.did, h)))
+        .collect();
+
+    let actors = dids
+        .into_iter()
+        .map(|did| {
+            let actor = build_actor(
+                did.clone(),
+                handles.remove(&did),
+                profiles.remove(&did),
+                actor_data.remove(&did),
+                states.remove(&did),
+            );
+            (did, actor)
+        })
+        .collect();
+
+    Ok(actors)
+}
+
 // ---- listInvitations -----------------------------------------------------
 
 async fn list_invitations_with(
@@ -200,6 +343,7 @@ async fn list_invitations_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
     fetch_fn: &FetchManyFn,
+    hydrate_fn: &HydrateFn,
 ) -> Result<Json<InvitationListResponse>, ErrorResponse> {
     with_community_authz(
         auth,
@@ -210,10 +354,32 @@ async fn list_invitations_with(
         verify_auth_fn,
         load_authz_fn,
         |ctx, db| async move {
-            let rows = fetch_fn(db, ctx.community_uri).await?;
-            Ok(Json(InvitationListResponse {
-                codes: rows.into_iter().map(Into::into).collect(),
-            }))
+            let rows = fetch_fn(db.clone(), ctx.community_uri).await?;
+
+            let mut creator_dids: Vec<String> =
+                rows.iter().map(|inv| inv.created_by.clone()).collect();
+            creator_dids.sort();
+            creator_dids.dedup();
+
+            let creators = hydrate_fn(db, creator_dids).await?;
+
+            let codes = rows
+                .into_iter()
+                .map(|inv| {
+                    let created_by = creators
+                        .get(&inv.created_by)
+                        .cloned()
+                        .unwrap_or_else(|| build_actor(inv.created_by, None, None, None, None));
+                    InvitationProfileView {
+                        code: inv.code,
+                        community: inv.community_uri,
+                        created_by,
+                        active: inv.active,
+                    }
+                })
+                .collect();
+
+            Ok(Json(InvitationListResponse { codes }))
         },
     )
     .await
@@ -301,6 +467,13 @@ fn deactivate_boxed(
     Box::pin(async move { deactivate_invitation(&db, &code).await })
 }
 
+fn hydrate_actors_boxed(
+    db: DatabaseConnection,
+    dids: Vec<String>,
+) -> BoxFuture<'static, Result<HashMap<String, Actor>, DbErr>> {
+    Box::pin(async move { hydrate_actors(&db, dids).await })
+}
+
 // ---- Public Rocket routes -----------------------------------------------
 
 #[post("/xrpc/social.colibri.community.createInvitation?<community>&<auth>")]
@@ -347,6 +520,7 @@ pub async fn list_invitations(
         &verify_auth_boxed,
         &load_authz_boxed,
         &fetch_by_community_boxed,
+        &hydrate_actors_boxed,
     )
     .await
 }
@@ -505,6 +679,34 @@ mod tests {
                     ])
                 })
             },
+            &|_, dids| {
+                Box::pin(async move {
+                    // Both invitations share one creator, so a single distinct
+                    // DID must be passed for hydration.
+                    assert_eq!(dids, vec![String::from("did:plc:owner")]);
+                    Ok(HashMap::from([(
+                        String::from("did:plc:owner"),
+                        build_actor(
+                            String::from("did:plc:owner"),
+                            Some(String::from("owner.test")),
+                            Some(ActorProfile {
+                                display_name: Some(String::from("Owner")),
+                                description: None,
+                                pronouns: None,
+                                website: None,
+                                avatar: None,
+                                banner: None,
+                                labels: None,
+                                joined_via_starter_pack: None,
+                                pinned_post: None,
+                                created_at: None,
+                            }),
+                            None,
+                            Some(String::from("online")),
+                        ),
+                    )]))
+                })
+            },
         )
         .await
         .unwrap();
@@ -513,6 +715,14 @@ mod tests {
         assert_eq!(result.codes[0].code, "A");
         assert!(result.codes[0].active);
         assert!(!result.codes[1].active);
+
+        // createdBy is hydrated into the full creator profile, and the shared
+        // creator is hydrated for every invitation (not just the first).
+        assert_eq!(result.codes[0].created_by.did, "did:plc:owner");
+        assert_eq!(result.codes[0].created_by.handle, "owner.test");
+        assert_eq!(result.codes[0].created_by.data.display_name, "Owner");
+        assert_eq!(result.codes[0].created_by.data.online_state, "online");
+        assert_eq!(result.codes[1].created_by.data.display_name, "Owner");
     }
 
     #[tokio::test]
