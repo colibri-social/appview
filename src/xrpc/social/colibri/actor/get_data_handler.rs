@@ -105,7 +105,7 @@ async fn get_data_with(
             display_name: bsky_profile.display_name.unwrap_or(handle),
             online_state: actor_state.to_string(),
             status: ActorStatus {
-                text: colibri_actor.status,
+                text: colibri_actor.status.unwrap_or(String::from("")),
                 emoji: colibri_actor.emoji,
             },
         },

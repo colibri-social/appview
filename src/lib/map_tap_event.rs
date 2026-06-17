@@ -15,6 +15,7 @@ use crate::lib::events::{
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::get_state::get_state;
+use crate::lib::pds_client;
 use crate::lib::tap::TapMessageRecord;
 use crate::xrpc::com::atproto::identity::resolve_did;
 
@@ -63,9 +64,31 @@ async fn fetch_record_value(
     rkey: String,
     db: DatabaseConnection,
 ) -> Result<serde_json::Value, serde_json::Error> {
-    get_atproto_record::<serde_json::Value>(did, nsid, rkey, &db)
+    match get_atproto_record::<serde_json::Value>(did.clone(), nsid.clone(), rkey.clone(), &db)
+        .await
+    {
+        Ok(v) => return Ok(v),
+        Err(sea_orm::DbErr::RecordNotFound(_)) => {} // fall through to live fetch
+        Err(e) => return Err(serde_json::Error::custom(e.to_string())),
+    }
+
+    // Record missing from local index — fetch live from the user's PDS.
+    let doc = resolve_did(&did)
+        .await
+        .map_err(|e| serde_json::Error::custom(e.body.into_inner().message))?
+        .0;
+
+    let pds_url = doc
+        .service
+        .iter()
+        .find(|s| s.service_type == "AtprotoPersonalDataServer")
+        .map(|s| s.service_endpoint.clone())
+        .ok_or_else(|| serde_json::Error::custom("No PDS endpoint in DID document"))?;
+
+    pds_client::get_record(&pds_url, &did, &nsid, &rkey)
         .await
         .map_err(|e| serde_json::Error::custom(e.to_string()))
+        .and_then(|opt| opt.ok_or_else(|| serde_json::Error::custom("Record not found on PDS")))
 }
 
 async fn resolve_handle_for_did(did: String) -> Result<String, serde_json::Error> {
@@ -147,7 +170,7 @@ async fn build_member_event_member(
             status: MemberEventMemberStatus {
                 text: actor_data
                     .as_ref()
-                    .map(|d| d.status.clone())
+                    .map(|d| d.status.clone().unwrap_or(String::from("")))
                     .unwrap_or_default(),
                 emoji: actor_data.as_ref().and_then(|d| d.emoji.clone()),
             },
@@ -427,7 +450,7 @@ async fn map_tap_event_with(
                         status: MessageEventAuthorStatus {
                             text: actor_data
                                 .as_ref()
-                                .map(|d| d.status.clone())
+                                .map(|d| d.status.clone().unwrap_or(String::from("")))
                                 .unwrap_or_default(),
                             emoji: actor_data.as_ref().and_then(|d| d.emoji.clone()),
                         },
@@ -538,7 +561,7 @@ async fn map_tap_event_with(
                     status: Some(UserEventStatus {
                         emoji: safe_actor_data.emoji,
                         state,
-                        text: safe_actor_data.status,
+                        text: safe_actor_data.status.unwrap_or(String::from("")),
                     }),
                 })),
                 is_relevant: true,
@@ -551,8 +574,16 @@ async fn map_tap_event_with(
                 event_record.rkey.clone(),
                 db.clone(),
             )
-            .await?;
-            let safe_colibri_data = serde_json::from_value::<ColibriActorData>(colibri_data)?;
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
+
+            // User has no Colibri actor data — not a Colibri user, skip.
+            let safe_colibri_data = match colibri_data {
+                Some(d) => d,
+                None => return Ok(irrelevant_event()),
+            };
+
             let safe_profile = parse_payload::<ActorProfile>(event_record)?;
 
             let handle = resolve_handle_fn(event_record.did.clone()).await?;
@@ -572,12 +603,13 @@ async fn map_tap_event_with(
                     status: Some(UserEventStatus {
                         emoji: safe_colibri_data.emoji,
                         state,
-                        text: safe_colibri_data.status,
+                        text: safe_colibri_data.status.unwrap_or(String::from("")),
                     }),
                 })),
                 is_relevant: true,
             })
         }
+        "social.colibri.approval" => Ok(irrelevant_event()),
         "social.colibri.richtext.facet" => Err(serde_json::Error::custom("Facet")),
         _ => Err(serde_json::Error::custom("Unknown collection")),
     }
@@ -1083,7 +1115,7 @@ mod tests {
 
         if let Some(ColibriServerEventData::User(data)) = event.data {
             assert_eq!(data.profile.handle, "alice.test");
-            assert_eq!(data.status.unwrap().state, "away");
+            assert_eq!(data.status.unwrap().state, String::from("away"));
         } else {
             panic!("expected user event data");
         }
@@ -1128,6 +1160,86 @@ mod tests {
             assert_eq!(data.status.unwrap().text, "Busy");
         } else {
             panic!("expected user event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn bsky_profile_without_colibri_actor_data_is_irrelevant() {
+        let event = map_tap_event_with(
+            &record(
+                "app.bsky.actor.profile",
+                "update",
+                json!({
+                    "displayName": "Marius",
+                    "description": "lazy by nature"
+                }),
+            ),
+            "",
+            mock_db(),
+            &|_, _, _, _| Box::pin(async { Err(serde_json::Error::custom("not found")) }),
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(event.event_type, "empty");
+        assert!(!event.is_relevant);
+    }
+
+    #[tokio::test]
+    async fn approval_collection_is_irrelevant() {
+        let event = map_tap_event_with(
+            &record(
+                "social.colibri.approval",
+                "create",
+                json!({
+                    "$type": "social.colibri.approval",
+                    "community": "at://did:plc:abc/social.colibri.community/self",
+                    "membership": "at://did:plc:xyz/social.colibri.membership/r1",
+                    "createdAt": "2026-03-26T19:42:54.652Z"
+                }),
+            ),
+            "",
+            mock_db(),
+            &no_fetch,
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(event.event_type, "empty");
+        assert!(!event.is_relevant);
+    }
+
+    #[tokio::test]
+    async fn reaction_create_with_parent_field_is_accepted() {
+        let event = map_tap_event_with(
+            &record(
+                "social.colibri.reaction",
+                "create",
+                json!({
+                    "$type": "social.colibri.reaction",
+                    "emoji": "🫡",
+                    "parent": "3mhydckzgys2d"
+                }),
+            ),
+            "",
+            mock_db(),
+            &no_fetch,
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        if let Some(ColibriServerEventData::Reaction(data)) = event.data {
+            assert_eq!(data.event, "added");
+            assert_eq!(data.emoji.as_deref(), Some("🫡"));
+            assert_eq!(data.target.as_deref(), Some("3mhydckzgys2d"));
+        } else {
+            panic!("expected reaction event");
         }
     }
 

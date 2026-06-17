@@ -234,7 +234,7 @@ fn build_author(
     };
     let status = actor_data
         .map(|d| ActorStatus {
-            text: d.status,
+            text: d.status.unwrap_or(String::from("")),
             emoji: d.emoji,
         })
         .unwrap_or(ActorStatus {

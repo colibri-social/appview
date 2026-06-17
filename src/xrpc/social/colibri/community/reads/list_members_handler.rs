@@ -167,7 +167,7 @@ pub fn build_member(
 
     let status = actor_data
         .map(|d| ActorStatus {
-            text: d.status,
+            text: d.status.unwrap_or(String::from("")),
             emoji: d.emoji,
         })
         .unwrap_or(ActorStatus {
@@ -293,7 +293,7 @@ mod tests {
         ColibriActorData {
             record_type: None,
             emoji: emoji.map(|e| e.to_string()),
-            status: status.to_string(),
+            status: Some(status.to_string()),
             communities: vec![],
         }
     }

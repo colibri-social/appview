@@ -231,7 +231,7 @@ pub fn build_applications(aggregate: ApplicationAggregate) -> Vec<Application> {
                 };
             let status = data
                 .map(|d| ActorStatus {
-                    text: d.status,
+                    text: d.status.unwrap_or(String::from("")),
                     emoji: d.emoji,
                 })
                 .unwrap_or(ActorStatus {
@@ -398,7 +398,7 @@ mod tests {
             ColibriActorData {
                 record_type: None,
                 emoji: Some(String::from("🦜")),
-                status: String::from("Working"),
+                status: Some(String::from("Working")),
                 communities: vec![],
             },
         );

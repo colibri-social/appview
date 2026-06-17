@@ -10,7 +10,8 @@ pub struct ColibriActorData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
 
-    pub status: String, // required, default ""
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 
     pub communities: Vec<String>, // required, items are record-keys
 }
@@ -135,9 +136,9 @@ pub struct ColibriReaction {
     /// The emoji of the reaction. Supports custom strings.
     pub emoji: String,
 
-    /// The message this relation belongs to.
+    /// The message this reaction belongs to.
     /// Format: record-key
-    #[serde(rename = "targetMessage")]
+    #[serde(rename = "targetMessage", alias = "parent")]
     pub parent: String,
 }
 

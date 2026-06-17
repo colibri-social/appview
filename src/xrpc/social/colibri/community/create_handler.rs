@@ -406,7 +406,7 @@ async fn create_with(
     let actor_data_record = ColibriActorData {
         record_type: Some(String::from("social.colibri.actor.data")),
         emoji: Some(String::new()),
-        status: String::new(),
+        status: Some(String::new()),
         communities: vec![],
     };
     write_record_logged(
