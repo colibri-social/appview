@@ -8,6 +8,7 @@
 
 pub mod approve_membership_handler;
 pub mod create_handler;
+pub mod delete_handler;
 pub mod invitations;
 pub mod list_applications_handler;
 pub mod moderation;
@@ -18,6 +19,7 @@ pub mod writes;
 
 pub use approve_membership_handler::approve_membership;
 pub use create_handler::create;
+pub use delete_handler::delete_community;
 pub use invitations::{create_invitation, delete_invitation, get_invitation, list_invitations};
 pub use list_applications_handler::list_applications;
 pub use moderation::{

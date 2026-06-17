@@ -94,6 +94,20 @@ pub async fn upsert_credentials(
     Ok(())
 }
 
+/// Removes the stored credential row for `community_did`. Returns the number
+/// of rows deleted (0 if none was stored). Called when a community is deleted
+/// so the AppView stops holding credentials it no longer needs.
+pub async fn delete_credentials(
+    db: &DatabaseConnection,
+    community_did: &str,
+) -> Result<u64, DbErr> {
+    let res = Credentials::delete_many()
+        .filter(community_credentials::Column::CommunityDid.eq(community_did))
+        .exec(db)
+        .await?;
+    Ok(res.rows_affected)
+}
+
 /// Loads and decrypts the credentials for a given community DID. Returns
 /// `Ok(None)` if no row exists.
 pub async fn load_credentials(

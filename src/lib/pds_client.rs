@@ -343,6 +343,43 @@ pub async fn create_account(
     handle_response::<CreatedAccount>(resp).await
 }
 
+/// Calls `com.atproto.admin.deleteAccount`, tearing down the account (and its
+/// entire repo) for `did`. Used when an AppView-managed community is deleted.
+///
+/// `admin_password` authenticates as the PDS administrator via an
+/// `Authorization: Basic admin:<password>` header — the same admin identity
+/// used to mint accounts in [`create_account`]. Only works against a PDS the
+/// AppView administers; BYO communities on external PDSs cannot be torn down
+/// this way.
+pub async fn admin_delete_account(
+    pds_endpoint: &str,
+    admin_password: &str,
+    did: &str,
+) -> Result<(), PdsError> {
+    #[derive(Serialize)]
+    struct DeleteAccountBody<'a> {
+        did: &'a str,
+    }
+
+    let url = format!(
+        "{}/xrpc/com.atproto.admin.deleteAccount",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = DeleteAccountBody { did };
+
+    let resp = reqwest::Client::new()
+        .post(url)
+        .basic_auth("admin", Some(admin_password))
+        .json(&body)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    Err(error_from_response(resp).await)
+}
+
 /// Generates a long random password suitable for AppView-minted accounts.
 /// The AppView stores it encrypted; humans never need to type it.
 pub fn generate_strong_password() -> String {

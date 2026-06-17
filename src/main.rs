@@ -164,6 +164,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::community::create_category,
                 xrpc::social::colibri::community::create_invitation,
                 xrpc::social::colibri::community::delete_category,
+                xrpc::social::colibri::community::delete_community,
                 xrpc::social::colibri::community::delete_invitation,
                 xrpc::social::colibri::community::get_data,
                 xrpc::social::colibri::community::get_invitation,
