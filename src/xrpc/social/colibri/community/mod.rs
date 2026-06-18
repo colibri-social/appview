@@ -29,6 +29,6 @@ pub use reads::{get_data, list_categories, list_channels, list_members, list_rol
 pub use register_credentials_handler::register_credentials;
 pub use update_handler::update_community;
 pub use writes::{
-    create_category, delete_category, reorder_categories, reorder_channels, set_member_roles,
-    update_category,
+    create_category, create_role, delete_category, delete_role, reorder_categories,
+    reorder_channels, set_member_roles, update_category, update_role,
 };

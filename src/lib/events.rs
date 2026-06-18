@@ -59,6 +59,10 @@ pub struct MemberEventData {
     pub membership: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub member: Option<MemberEventMember>,
+    /// DID of the member who left — present only on `leave` events so
+    /// remaining clients can remove the right entry from their member list.
+    #[serde(rename = "memberDid", skip_serializing_if = "Option::is_none")]
+    pub member_did: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -138,6 +142,26 @@ pub struct MessageEventData {
     pub attachments: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<MessageEventAuthor>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RoleEventData {
+    pub event: String,
+    pub uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hoisted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentionable: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -223,6 +247,7 @@ pub enum ColibriServerEventData {
     Member(MemberEventData),
     Category(CategoryEventData),
     Channel(ChannelEventData),
+    Role(RoleEventData),
     Message(MessageEventData),
     Reaction(ReactionEventData),
     User(UserEventData),

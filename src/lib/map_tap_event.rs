@@ -5,13 +5,14 @@ use serde::de::{DeserializeOwned, Error};
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
-    ColibriMembership, ColibriMessage, ColibriReaction,
+    ColibriMembership, ColibriMessage, ColibriModeration, ColibriReaction, ColibriRole,
 };
 use crate::lib::events::{
     CategoryEventData, ChannelEventData, ColibriServerEvent, ColibriServerEventData,
     CommunityEventData, MemberEventData, MemberEventMember, MemberEventMemberData,
     MemberEventMemberStatus, MessageEventAuthor, MessageEventAuthorData, MessageEventAuthorStatus,
-    MessageEventData, ReactionEventData, UserEventData, UserEventProfile, UserEventStatus,
+    MessageEventData, ReactionEventData, RoleEventData, UserEventData, UserEventProfile,
+    UserEventStatus,
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::get_state::get_state;
@@ -283,6 +284,7 @@ async fn map_tap_event_with(
                         community: community_uri,
                         membership: record_data.from_membership,
                         member: Some(member),
+                        member_did: None,
                     })),
                     is_relevant: true,
                 });
@@ -308,14 +310,16 @@ async fn map_tap_event_with(
                         community: community_uri,
                         membership: None,
                         member: Some(member),
+                        member_did: None,
                     })),
                     is_relevant: true,
                 });
             }
 
-            // Delete → community delete to the subject. Look up the prior
-            // member record from cache (still present at this point) to
-            // identify which user the revoke targeted.
+            // Delete → the removed user gets a `community_event { delete }` so
+            // they immediately clear the community from their view. All other
+            // connected clients get a `member_event { leave }` so they can
+            // remove the entry from their member list without a full reload.
             let old_record = fetch_record_fn(
                 event_record.did.clone(),
                 event_record.collection.clone(),
@@ -324,19 +328,29 @@ async fn map_tap_event_with(
             )
             .await?;
             let safe_record = serde_json::from_value::<ColibriMember>(old_record)?;
-            if safe_record.subject != user_did {
-                return Ok(irrelevant_event());
-            }
             let community_uri = format!("at://{}/social.colibri.community/self", event_record.did);
+            if safe_record.subject == user_did {
+                return Ok(ColibriServerEvent {
+                    event_type: String::from("community_event"),
+                    data: Some(ColibriServerEventData::Community(CommunityEventData {
+                        event: String::from("delete"),
+                        uri: community_uri,
+                        category_order: None,
+                        description: None,
+                        name: None,
+                        picture: None,
+                    })),
+                    is_relevant: true,
+                });
+            }
             Ok(ColibriServerEvent {
-                event_type: String::from("community_event"),
-                data: Some(ColibriServerEventData::Community(CommunityEventData {
-                    event: String::from("delete"),
-                    uri: community_uri,
-                    category_order: None,
-                    description: None,
-                    name: None,
-                    picture: None,
+                event_type: String::from("member_event"),
+                data: Some(ColibriServerEventData::Member(MemberEventData {
+                    event: String::from("leave"),
+                    community: community_uri,
+                    membership: None,
+                    member: None,
+                    member_did: Some(safe_record.subject),
                 })),
                 is_relevant: true,
             })
@@ -608,6 +622,76 @@ async fn map_tap_event_with(
                 })),
                 is_relevant: true,
             })
+        }
+        "social.colibri.role" => {
+            let community_uri =
+                format!("at://{}/social.colibri.community/self", event_record.did);
+            if event_record.action != "delete" {
+                let record_data = parse_payload::<ColibriRole>(event_record)?;
+                Ok(ColibriServerEvent {
+                    event_type: String::from("role_event"),
+                    data: Some(ColibriServerEventData::Role(RoleEventData {
+                        event: String::from("upsert"),
+                        uri,
+                        community: Some(community_uri),
+                        name: Some(record_data.name),
+                        color: record_data.color,
+                        permissions: Some(record_data.permissions),
+                        position: Some(record_data.position),
+                        hoisted: record_data.hoisted,
+                        mentionable: record_data.mentionable,
+                    })),
+                    is_relevant: true,
+                })
+            } else {
+                Ok(ColibriServerEvent {
+                    event_type: String::from("role_event"),
+                    data: Some(ColibriServerEventData::Role(RoleEventData {
+                        event: String::from("delete"),
+                        uri,
+                        community: None,
+                        name: None,
+                        color: None,
+                        permissions: None,
+                        position: None,
+                        hoisted: None,
+                        mentionable: None,
+                    })),
+                    is_relevant: true,
+                })
+            }
+        }
+        "social.colibri.moderation" => {
+            // Only `hideMessage` actions need a client-side event: the message
+            // record itself is never deleted, so TAP won't fire a message-delete
+            // event. Emit one here so connected clients remove the hidden message.
+            // All other moderation actions (ban, unban, kick) manifest as member
+            // record changes which are already handled above.
+            let record_data = parse_payload::<ColibriModeration>(event_record)?;
+            if record_data.action == "hideMessage" {
+                let message_uri = record_data
+                    .subject
+                    .uri
+                    .ok_or_else(|| serde_json::Error::custom("hideMessage missing subject.uri"))?;
+                Ok(ColibriServerEvent {
+                    event_type: String::from("message_event"),
+                    data: Some(ColibriServerEventData::Message(MessageEventData {
+                        event: String::from("delete"),
+                        uri: message_uri,
+                        attachments: None,
+                        channel: None,
+                        created_at: None,
+                        edited: None,
+                        facets: None,
+                        parent: None,
+                        text: None,
+                        author: None,
+                    })),
+                    is_relevant: true,
+                })
+            } else {
+                Ok(irrelevant_event())
+            }
         }
         "social.colibri.approval" => Ok(irrelevant_event()),
         "social.colibri.richtext.facet" => Err(serde_json::Error::custom("Facet")),
