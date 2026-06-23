@@ -12,6 +12,7 @@ use crate::lib::handler::{
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
 use crate::lib::responses::ErrorResponse;
+use crate::xrpc::social::colibri::community::reads::list_roles_handler::fetch_role_records;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
@@ -23,6 +24,51 @@ pub struct RoleUriResponse {
 }
 
 // ---- role.create -----------------------------------------------------------
+
+/// Makes room for a new role at `target_position` by bumping any existing
+/// role that already occupies it (and cascading further up as needed) by
+/// the minimum amount required to keep every role's position unique —
+/// including the protected Owner role (conventionally `100`), which isn't
+/// exempt: if a community ever has 100+ roles, it has to move too.
+async fn resolve_position_conflicts(
+    db: &DatabaseConnection,
+    community_did: &str,
+    target_position: i64,
+) -> Result<(), sea_orm::DbErr> {
+    let records = fetch_role_records(db, community_did).await?;
+
+    let mut roles: Vec<(String, ColibriRole)> = records
+        .into_iter()
+        .filter_map(|r| {
+            let role: ColibriRole = serde_json::from_value(r.data).ok()?;
+            Some((r.rkey, role))
+        })
+        .filter(|(_, role)| role.position >= target_position)
+        .collect();
+    // Stable order across same-position roles (a pre-existing duplicate-position
+    // case this very fix is meant to clean up) so the cascade is deterministic.
+    roles.sort_by(|(rkey_a, role_a), (rkey_b, role_b)| {
+        role_a
+            .position
+            .cmp(&role_b.position)
+            .then_with(|| rkey_a.cmp(rkey_b))
+    });
+
+    let mut next_free = target_position + 1;
+    for (rkey, mut role) in roles {
+        if role.position < next_free {
+            role.position = next_free;
+            let data = serde_json::to_value(&role)
+                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            community_write::put_record(db, community_did, ROLE_NSID, &rkey, data).await?;
+            next_free += 1;
+        } else {
+            next_free = role.position + 1;
+        }
+    }
+
+    Ok(())
+}
 
 async fn create_role_with(
     community_uri: String,
@@ -48,6 +94,8 @@ async fn create_role_with(
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let role_rkey = generate_tid();
+
+            resolve_position_conflicts(&db, community_did, position).await?;
 
             let role = ColibriRole {
                 record_type: Some(ROLE_NSID.to_string()),

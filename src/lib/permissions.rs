@@ -8,7 +8,7 @@
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Permission {
-    CommunityUpdate,
+    CommunityManage,
     CommunityDelete,
     CategoryCreate,
     CategoryUpdate,
@@ -30,7 +30,7 @@ pub enum Permission {
 impl Permission {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Permission::CommunityUpdate => "community.update",
+            Permission::CommunityManage => "community.manage",
             Permission::CommunityDelete => "community.delete",
             Permission::CategoryCreate => "category.create",
             Permission::CategoryUpdate => "category.update",
@@ -54,7 +54,7 @@ impl Permission {
     /// initial "owner" role on a freshly-created community.
     pub fn all() -> &'static [Permission] {
         &[
-            Permission::CommunityUpdate,
+            Permission::CommunityManage,
             Permission::CommunityDelete,
             Permission::CategoryCreate,
             Permission::CategoryUpdate,
@@ -90,7 +90,7 @@ mod tests {
         use std::collections::HashSet;
 
         let all = [
-            Permission::CommunityUpdate,
+            Permission::CommunityManage,
             Permission::CommunityDelete,
             Permission::CategoryCreate,
             Permission::CategoryUpdate,

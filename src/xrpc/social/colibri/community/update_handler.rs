@@ -41,7 +41,7 @@ async fn update_community_with(
         auth,
         "social.colibri.community.update",
         community_uri.clone(),
-        Some(Permission::CommunityUpdate),
+        Some(Permission::CommunityManage),
         db,
         verify_auth_fn,
         load_authz_fn,
