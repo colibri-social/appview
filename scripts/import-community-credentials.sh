@@ -209,10 +209,7 @@ if [[ "$ASSUME_YES" -ne 1 ]]; then
 fi
 
 # ---- build the INSERT (encrypt with node, secrets passed via env) ----------
-SQL="$(
-	CRED_KEY="$KEY" CRED_DID="$DID" CRED_PDS="$PDS" CRED_IDENT="$IDENTIFIER" \
-	CRED_PASSWORD="$PASSWORD" CRED_SOURCE="$SOURCE" \
-	node <<'JS'
+read -r -d '' NODE_ENCRYPT <<'JS' || true
 const crypto = require("crypto");
 
 const key = Buffer.from((process.env.CRED_KEY || "").trim(), "base64");
@@ -248,6 +245,11 @@ ON CONFLICT (community_did) DO UPDATE SET
   source=EXCLUDED.source, created_at=EXCLUDED.created_at;\n`
 );
 JS
+
+SQL="$(
+	CRED_KEY="$KEY" CRED_DID="$DID" CRED_PDS="$PDS" CRED_IDENT="$IDENTIFIER" \
+	CRED_PASSWORD="$PASSWORD" CRED_SOURCE="$SOURCE" \
+	node -e "$NODE_ENCRYPT"
 )"
 
 # Run psql inside the container. PGPASSWORD is forwarded via -e (value stays in
