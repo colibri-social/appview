@@ -317,6 +317,27 @@ pub struct MuteEvent {
     pub data: MuteEventData,
 }
 
+/// Client-facing payload of a `community_creation_progress` event — a coarse,
+/// best-effort hint emitted while a (BYO) community is bootstrapped on the
+/// user's PDS. `step` is a stable identifier (`connecting`, `creating`,
+/// `registering`) the client maps to a label. The recipient DID lives on the
+/// broadcast envelope, not here — this event is delivered only to the creating
+/// user's own connections.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommunityCreationProgressData {
+    pub step: String,
+}
+
+/// Broadcast envelope for a `community_creation_progress` event. Carries the
+/// target DID so the subscribe handler delivers it only to that user's own
+/// connections, mirroring `SeenEvent`/`MuteEvent`. Emitted by
+/// `community.create` while bootstrapping a BYO community.
+#[derive(Debug, Clone)]
+pub struct CommunityCreationProgressEvent {
+    pub recipient_did: String,
+    pub data: CommunityCreationProgressData,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum ColibriServerEventData {
@@ -333,6 +354,7 @@ pub enum ColibriServerEventData {
     Notification(NotificationEventData),
     Seen(SeenEventData),
     Mute(MuteEventData),
+    CommunityCreationProgress(CommunityCreationProgressData),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -341,8 +363,6 @@ pub struct ColibriServerEvent {
     pub event_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<ColibriServerEventData>,
-    #[serde(skip_serializing)]
-    pub is_relevant: bool,
 }
 
 impl ColibriServerEvent {

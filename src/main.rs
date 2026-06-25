@@ -6,7 +6,7 @@ use crate::lib::crypto;
 use crate::lib::db::init_db;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::sentry::init_sentry;
-use crate::lib::tap::{self, CommsBridge, TapMessageRecord, TapStream, run_connection};
+use crate::lib::tap::{self, CommsBridge, TapStream, run_connection};
 use migration::{Migrator, MigratorTrait};
 use rocket::fairing::AdHoc;
 use rocket::http::Method;
@@ -110,7 +110,8 @@ async fn rocket() -> _ {
     let safe_cors = cors.to_cors().unwrap();
 
     let (to_tap, from_tap_channel) = mpsc::channel::<String>(128);
-    let (from_tap_broadcast, _) = broadcast::channel::<TapMessageRecord>(128);
+    let (from_tap_broadcast, _) =
+        broadcast::channel::<crate::lib::event_scope::SharedScopedEvent>(128);
 
     let c2c_broadcast_channel = broadcast::channel::<EventNotification>(128);
 
@@ -123,6 +124,9 @@ async fn rocket() -> _ {
 
     let (mute_broadcast, _) = broadcast::channel::<crate::lib::events::MuteEvent>(128);
 
+    let (progress_broadcast, _) =
+        broadcast::channel::<crate::lib::events::CommunityCreationProgressEvent>(128);
+
     let tap_bridge = CommsBridge {
         channel: to_tap.clone(),
         broadcast: from_tap_broadcast.clone(),
@@ -130,6 +134,7 @@ async fn rocket() -> _ {
         applications: application_broadcast,
         seen: seen_broadcast.clone(),
         mute: mute_broadcast.clone(),
+        progress: progress_broadcast.clone(),
     };
 
     let db = match init_db().await {

@@ -1,20 +1,22 @@
+use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
 use crate::lib::get_atproto_record::get_atproto_record;
+use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::tap::TapMessageRecord;
 use crate::models::user_states::{self, ActiveModel as UserStatesModel, Entity as UserStates};
 use rocket::tokio::sync::broadcast::Sender;
 use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
 use serde_json::Value;
+use std::sync::Arc;
 
 /// Broadcasts the user's current online state to every connected client by
-/// synthesizing an `actor.data` update and pushing it onto the shared tap
-/// fan-out. Each subscriber maps it through `map_tap_event`, which enriches it
-/// with the state we just persisted, and forwards a `user_event` to the clients
-/// that know the user — i.e. those viewing a community the user is part of. This
-/// is the same path real profile/status updates travel, so the user themselves
-/// and everyone who shares a community with them stay in sync after a state
-/// change (connect/disconnect or an explicit `setState`).
+/// synthesizing an `actor.data` update, mapping it once through
+/// `map_tap_event` (which enriches it with the state we just persisted), and
+/// pushing the resulting `user_event` onto the shared fan-out. `user_event`s
+/// are `Global`-scoped, so the user themselves and everyone else stay in sync
+/// after a state change (connect/disconnect or an explicit `setState`). This is
+/// the same mapping path real profile/status updates travel.
 pub async fn broadcast_state_change(
-    broadcast: &Sender<TapMessageRecord>,
+    broadcast: &Sender<SharedScopedEvent>,
     did: &str,
     db: &DatabaseConnection,
 ) {
@@ -45,7 +47,23 @@ pub async fn broadcast_state_change(
         cid: None,
     };
 
-    let _ = broadcast.send(record);
+    // The actor.data arm yields a single `Global` `user_event` and never
+    // consults the resolver, so a throwaway empty one is fine here.
+    let resolver = CommunityResolver::new();
+    match map_tap_event(&record, db, &resolver).await {
+        Ok(events) => {
+            for (event, scope) in events {
+                let scoped = Arc::new(ScopedEvent {
+                    scope,
+                    payload: event.serialize(),
+                });
+                let _ = broadcast.send(scoped);
+            }
+        }
+        Err(e) => {
+            log::error!("Unable to map state change for {did}: {e}");
+        }
+    }
 }
 
 pub async fn join_vc(did: String, vc: String, community: String, db: &DatabaseConnection) {

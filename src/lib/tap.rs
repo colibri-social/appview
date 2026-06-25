@@ -3,7 +3,11 @@ use crate::lib::colibri::{
     ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
 };
 use crate::lib::community_record::fetch_community_record;
-use crate::lib::events::{MuteEvent, MuteEventData, SeenEvent, SeenEventData};
+use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
+use crate::lib::events::{
+    CommunityCreationProgressEvent, MuteEvent, MuteEventData, SeenEvent, SeenEventData,
+};
+use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::lib::time::current_iso8601_utc;
@@ -192,9 +196,13 @@ pub struct CommsBridge {
     /// Kept around for symmetry; not all handlers consume it.
     #[allow(dead_code)]
     pub channel: mpsc::Sender<String>,
-    /// Fan-out of every record received from tap. Each WS subscriber holds
-    /// its own `Receiver` and decides what to do per-record.
-    pub broadcast: broadcast::Sender<TapMessageRecord>,
+    /// Fan-out of pre-mapped, scope-tagged server events derived from tap
+    /// records. Each record is mapped and enriched exactly once in
+    /// `run_connection`; every WS subscriber holds its own `Receiver` and
+    /// forwards only the events whose [`EventScope`] matches its user.
+    ///
+    /// [`EventScope`]: crate::lib::event_scope::EventScope
+    pub broadcast: broadcast::Sender<SharedScopedEvent>,
     /// Fan-out of notifications indexed inside the tap pipeline. Each WS
     /// subscriber filters by recipient DID.
     pub notifications: broadcast::Sender<IndexedNotification>,
@@ -218,6 +226,11 @@ pub struct CommsBridge {
     /// `recipient_did`). Emitted from the tap loop when a
     /// `social.colibri.actor.mute` record is created or deleted.
     pub mute: broadcast::Sender<MuteEvent>,
+    /// Fan-out of `community_creation_progress` events — per-user progress
+    /// hints pushed to the creating user's own connections (each subscriber
+    /// filters by `recipient_did`). Emitted by `community.create` while
+    /// bootstrapping a BYO community on a (possibly slow) external PDS.
+    pub progress: broadcast::Sender<CommunityCreationProgressEvent>,
 }
 
 /// Runs the tap-connection event loop:
@@ -237,12 +250,16 @@ pub async fn run_connection(
     db: DatabaseConnection,
     mut socket: TapStream,
     mut rx_outbound: mpsc::Receiver<String>,
-    tx_inbound: broadcast::Sender<TapMessageRecord>,
+    tx_inbound: broadcast::Sender<SharedScopedEvent>,
     mut to_tap: mpsc::Sender<String>,
     notifications_tx: broadcast::Sender<IndexedNotification>,
     seen_tx: broadcast::Sender<SeenEvent>,
     mute_tx: broadcast::Sender<MuteEvent>,
 ) {
+    // Caches channel/message -> community DID across the connection's lifetime
+    // so per-event community resolution rarely touches the database.
+    let resolver = CommunityResolver::new();
+
     loop {
         rocket::tokio::select! {
             // Message from an S2C client -> send to Remote Server
@@ -409,7 +426,32 @@ pub async fn run_connection(
                         }
                     }
 
-                    let _ = tx_inbound.send(record);
+                    // Map the record into scope-tagged events and fan them out
+                    // exactly once — every connected subscriber then only
+                    // filters by scope rather than re-mapping/enriching. This
+                    // runs BEFORE `ack_tap_msg`, which deletes the cached row
+                    // for delete actions that the mapper still needs to read
+                    // (member/reaction deletes, message community resolution).
+                    match map_tap_event(&record, &db, &resolver).await {
+                        Ok(events) => {
+                            for (event, scope) in events {
+                                let scoped = std::sync::Arc::new(ScopedEvent {
+                                    scope,
+                                    payload: event.serialize(),
+                                });
+                                let _ = tx_inbound.send(scoped);
+                            }
+                        }
+                        Err(e) => {
+                            let msg = e.to_string();
+                            // `Facet` is an expected, intentionally-unhandled
+                            // collection; don't spam the log for it.
+                            if msg != "Facet" {
+                                log::error!("Unable to map tap record {:?}: {}", record, msg);
+                            }
+                        }
+                    }
+
                     ack_tap_msg(&db, &mut to_tap, text.to_string(), true).await;
                 }
             }

@@ -242,7 +242,6 @@ async fn approve_membership_with(
                         created_at: None,
                         data: None,
                     })),
-                    is_relevant: true,
                 });
             }
 

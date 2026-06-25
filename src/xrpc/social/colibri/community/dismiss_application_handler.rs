@@ -89,7 +89,6 @@ fn application_event(
             created_at: None,
             data: None,
         })),
-        is_relevant: true,
     }
 }
 

@@ -1,14 +1,15 @@
 use crate::EventNotification;
+use crate::lib::at_uri::AtUri;
+use crate::lib::event_scope::{EventScope, SharedScopedEvent};
 use crate::lib::events::{
-    ColibriClientEventData, ColibriServerEventData, MuteEvent, NotificationEventData,
-    NotificationEventMessage, SeenEvent, TypingEventData,
+    ColibriClientEventData, ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent,
+    NotificationEventData, NotificationEventMessage, SeenEvent, TypingEventData,
 };
 use crate::lib::get_state::get_did_states;
-use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, view_channel};
 use crate::lib::tap::CommsBridge;
-use crate::lib::tap::TapMessageRecord;
+use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
 use crate::{
     lib::{
         events::{ColibriClientEvent, ColibriServerEvent},
@@ -25,6 +26,7 @@ use rocket::tokio::sync::broadcast::{Receiver, Sender};
 use rocket::{State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
+use std::collections::HashSet;
 
 type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
@@ -47,7 +49,6 @@ async fn parse_client_event(
             let ack_res = ColibriServerEvent {
                 event_type: String::from("ack"),
                 data: None,
-                is_relevant: true,
             };
 
             Some(serde_json::to_string(&ack_res).unwrap())
@@ -140,57 +141,75 @@ async fn serialize_typing_broadcast(
             did: msg_did,
             event: String::from("start"),
         })),
-        is_relevant: true,
     };
 
     Some(event.serialize())
 }
 
+/// Loads the set of community DIDs the user belongs to. Events scoped to a
+/// community are only forwarded to connections whose set contains it. Returns an
+/// empty set (and logs) on failure — degraded, but never leaks other
+/// communities' events.
+async fn community_set(db: &DatabaseConnection, did: &str) -> HashSet<String> {
+    match get_authorized_communities(db, did).await {
+        Ok(list) => list.into_iter().map(|c| c.community.did).collect(),
+        Err(e) => {
+            log::error!("failed to load community set for {did}: {e}");
+            HashSet::new()
+        }
+    }
+}
+
+/// Whether an event with the given scope should be delivered to the connection
+/// for `did` whose communities are `communities`.
+fn scope_matches(scope: &EventScope, did: &str, communities: &HashSet<String>) -> bool {
+    match scope {
+        EventScope::Global => true,
+        EventScope::User(target) => target == did,
+        EventScope::Community(community) => communities.contains(community),
+    }
+}
+
+/// Forwards a pre-mapped, scope-tagged event to this connection iff the
+/// connected user is in its audience. The heavy mapping/enrichment already
+/// happened once in the tap loop, so this is a cheap in-memory check plus the
+/// socket write — no per-client database work.
+///
 /// Returns false if the client has disconnected.
-async fn forward_to_client(
+async fn forward_scoped_event(
     ws_sink: &mut WsSink,
-    record: TapMessageRecord,
-    did: String,
+    event: SharedScopedEvent,
+    did: &str,
+    communities: &mut HashSet<String>,
     db: &DatabaseConnection,
 ) -> bool {
-    let mapped_tap_event = map_tap_event(&record, &did, db).await;
-
-    if let Err(mapped_event_error) = mapped_tap_event {
-        let err = mapped_event_error.to_string();
-
-        if err != "Facet" {
-            log::error!("Unable to handle tap message {:?}: {}", record, err);
-        }
+    if !scope_matches(&event.scope, did, communities) {
         return true;
     }
 
-    let safe_event = mapped_tap_event.unwrap();
-
-    if !safe_event.is_relevant {
-        // The mapper has determined that an event is not needed for this client
-        return true;
+    // A delivered `User`-scoped event is always one of this user's own
+    // membership changes (their join, leave, or kick), so refresh the cached
+    // community set to keep subsequent community-scoped routing correct.
+    if matches!(event.scope, EventScope::User(_)) {
+        *communities = community_set(db, did).await;
     }
 
-    if ws_sink
-        .send(WsMessage::Text(safe_event.serialize()))
+    ws_sink
+        .send(WsMessage::Text(event.payload.clone()))
         .await
-        .is_err()
-    {
-        return false;
-    }
-
-    true
+        .is_ok()
 }
 
 /// Returns false if the tap stream has closed or errored.
 async fn handle_tap_message(
     ws_sink: &mut WsSink,
-    record: Result<TapMessageRecord, RecvError>,
-    did: String,
+    event: Result<SharedScopedEvent, RecvError>,
+    did: &str,
+    communities: &mut HashSet<String>,
     db: &DatabaseConnection,
 ) -> bool {
-    match record {
-        Ok(msg) => forward_to_client(ws_sink, msg, did, db).await,
+    match event {
+        Ok(ev) => forward_scoped_event(ws_sink, ev, did, communities, db).await,
         Err(e) => {
             eprintln!("Tap stream error: {e}");
             false
@@ -268,7 +287,6 @@ fn serialize_notification_for(indexed: IndexedNotification, did: &str) -> Option
                 },
             },
         )),
-        is_relevant: true,
     };
     Some(event.serialize())
 }
@@ -292,17 +310,39 @@ async fn handle_notification_msg(
     }
 }
 
-/// Forwards a handler-originated `application_event` as-is — these are
-/// already fully built by the handler that emitted them (see
-/// `CommsBridge::applications`), so there's nothing to enrich or filter
-/// here. Broadcast to every connected client; they scope by `community`.
+/// The community DID an `application_event` targets, parsed from its
+/// `ApplicationEventData.community` AT-URI. `None` for non-application events
+/// or a malformed URI.
+fn application_community_did(event: &ColibriServerEvent) -> Option<String> {
+    match &event.data {
+        Some(ColibriServerEventData::Application(data)) => {
+            AtUri::parse(&data.community).map(|uri| uri.authority)
+        }
+        _ => None,
+    }
+}
+
+/// Forwards a handler-originated `application_event` (see
+/// `CommsBridge::applications`) to this connection iff the user is a member of
+/// the target community. A moderator is always a member, so member-scoping is a
+/// safe superset of the moderators who can act on the application — and it
+/// keeps pending-application traffic off connections in other communities.
 async fn handle_application_msg(
     ws_sink: &mut WsSink,
     msg: Result<ColibriServerEvent, RecvError>,
+    communities: &HashSet<String>,
 ) -> bool {
     match msg {
         Ok(event) => {
-            let _ = ws_sink.send(WsMessage::Text(event.serialize())).await;
+            match application_community_did(&event) {
+                Some(community_did) if communities.contains(&community_did) => {
+                    let _ = ws_sink.send(WsMessage::Text(event.serialize())).await;
+                }
+                Some(_) => {} // application for a community this user isn't in
+                None => {
+                    log::warn!("dropping application_event with unparseable community");
+                }
+            }
             true
         }
         Err(e) => {
@@ -322,7 +362,6 @@ fn serialize_seen_for(seen: SeenEvent, did: &str) -> Option<String> {
     let event = ColibriServerEvent {
         event_type: String::from("seen_event"),
         data: Some(ColibriServerEventData::Seen(seen.data)),
-        is_relevant: true,
     };
     Some(event.serialize())
 }
@@ -356,7 +395,6 @@ fn serialize_mute_for(mute: MuteEvent, did: &str) -> Option<String> {
     let event = ColibriServerEvent {
         event_type: String::from("mute_event"),
         data: Some(ColibriServerEventData::Mute(mute.data)),
-        is_relevant: true,
     };
     Some(event.serialize())
 }
@@ -380,12 +418,48 @@ async fn handle_mute_msg(
     }
 }
 
+/// Builds the `community_creation_progress` payload for a subscriber, or `None`
+/// if the event belongs to a different user — progress is delivered only to the
+/// creating user's own connections, so other clients never learn that a
+/// community is being created.
+fn serialize_progress_for(event: CommunityCreationProgressEvent, did: &str) -> Option<String> {
+    if event.recipient_did != did {
+        return None;
+    }
+    let server_event = ColibriServerEvent {
+        event_type: String::from("community_creation_progress"),
+        data: Some(ColibriServerEventData::CommunityCreationProgress(
+            event.data,
+        )),
+    };
+    Some(server_event.serialize())
+}
+
+async fn handle_progress_msg(
+    ws_sink: &mut WsSink,
+    msg: Result<CommunityCreationProgressEvent, RecvError>,
+    did: &str,
+) -> bool {
+    match msg {
+        Ok(event) => {
+            if let Some(payload) = serialize_progress_for(event, did) {
+                let _ = ws_sink.send(WsMessage::Text(payload)).await;
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Progress broadcast error: {e}");
+            false
+        }
+    }
+}
+
 /// Handles the event loop and allows both messages from Tap and the Client to get processed.
 #[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
     io: DuplexStream,
-    from_tap: Receiver<TapMessageRecord>,
-    to_tap_broadcast: Sender<TapMessageRecord>,
+    from_tap: Receiver<SharedScopedEvent>,
+    to_tap_broadcast: Sender<SharedScopedEvent>,
     did: String,
     db: DatabaseConnection,
     to_c2c_broadcast: Sender<EventNotification>,
@@ -394,6 +468,7 @@ async fn run_event_loop(
     from_applications: Receiver<ColibriServerEvent>,
     from_seen: Receiver<SeenEvent>,
     from_mute: Receiver<MuteEvent>,
+    from_progress: Receiver<CommunityCreationProgressEvent>,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
     let mut from_tap = from_tap;
@@ -402,20 +477,27 @@ async fn run_event_loop(
     let mut from_applications = from_applications;
     let mut from_seen = from_seen;
     let mut from_mute = from_mute;
+    let mut from_progress = from_progress;
 
     save_state(&db, did.clone(), String::from("online")).await;
     register_dids(vec![did.clone()]).await;
     broadcast_state_change(&to_tap_broadcast, &did, &db).await;
 
+    // The communities this user belongs to, used to route `Community`-scoped
+    // events. Refreshed whenever the user's own membership changes (see
+    // `forward_scoped_event`).
+    let mut communities = community_set(&db, &did).await;
+
     loop {
         let connected = tokio::select! {
-            msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, did.clone(), &db).await,
+            msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, &did, &mut communities, &db).await,
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &db).await,
             msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
             msg = from_notifications.recv() => handle_notification_msg(&mut ws_sink, msg, &did).await,
-            msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg).await,
+            msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg, &communities).await,
             msg = from_seen.recv() => handle_seen_msg(&mut ws_sink, msg, &did).await,
             msg = from_mute.recv() => handle_mute_msg(&mut ws_sink, msg, &did).await,
+            msg = from_progress.recv() => handle_progress_msg(&mut ws_sink, msg, &did).await,
         };
 
         if !connected {
@@ -454,6 +536,7 @@ pub async fn subscribe_events(
     let from_applications = bridge.applications.subscribe();
     let from_seen = bridge.seen.subscribe();
     let from_mute = bridge.mute.subscribe();
+    let from_progress = bridge.progress.subscribe();
 
     let to_c2c_broadcast = c2c_broadcast_channel.0.clone();
     let from_c2c_broadcast = to_c2c_broadcast.subscribe();
@@ -472,6 +555,7 @@ pub async fn subscribe_events(
                 from_applications,
                 from_seen,
                 from_mute,
+                from_progress,
             )
             .await;
             Ok(())
@@ -481,13 +565,72 @@ pub async fn subscribe_events(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_client_event, serialize_typing_broadcast};
+    use super::{
+        application_community_did, parse_client_event, scope_matches, serialize_typing_broadcast,
+    };
     use crate::EventNotification;
+    use crate::lib::event_scope::EventScope;
+    use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
     use crate::lib::test_fixtures::mock_db;
     use crate::models::user_states;
     use rocket::tokio;
     use rocket::tokio::sync::broadcast;
     use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::collections::HashSet;
+
+    #[test]
+    fn scope_matches_routes_each_scope() {
+        let did = "did:plc:me";
+        let communities: HashSet<String> =
+            [String::from("did:plc:community-a")].into_iter().collect();
+
+        // Global → everyone.
+        assert!(scope_matches(&EventScope::Global, did, &communities));
+
+        // User → only the targeted DID.
+        assert!(scope_matches(
+            &EventScope::User(String::from("did:plc:me")),
+            did,
+            &communities
+        ));
+        assert!(!scope_matches(
+            &EventScope::User(String::from("did:plc:other")),
+            did,
+            &communities
+        ));
+
+        // Community → only members of that community.
+        assert!(scope_matches(
+            &EventScope::Community(String::from("did:plc:community-a")),
+            did,
+            &communities
+        ));
+        assert!(!scope_matches(
+            &EventScope::Community(String::from("did:plc:community-b")),
+            did,
+            &communities
+        ));
+    }
+
+    #[test]
+    fn application_community_did_extracts_authority() {
+        let event = ColibriServerEvent {
+            event_type: String::from("application_event"),
+            data: Some(ColibriServerEventData::Application(ApplicationEventData {
+                event: String::from("create"),
+                community: String::from("at://did:plc:owner/social.colibri.community/self"),
+                membership: String::from("at://did:plc:abc/social.colibri.membership/r1"),
+                did: Some(String::from("did:plc:abc")),
+                handle: None,
+                created_at: None,
+                data: None,
+            })),
+        };
+        assert_eq!(
+            application_community_did(&event),
+            Some(String::from("did:plc:owner"))
+        );
+    }
 
     #[tokio::test]
     async fn creates_ack_for_heartbeat_event() {

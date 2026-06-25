@@ -1,9 +1,10 @@
 use std::fmt;
 
+use crate::lib::event_scope::SharedScopedEvent;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth;
 use crate::lib::state::broadcast_state_change;
-use crate::lib::tap::{CommsBridge, TapMessageRecord};
+use crate::lib::tap::CommsBridge;
 use crate::lib::validate_state::validate_state_str;
 use crate::models::user_states::{self, ActiveModel as UserStatesModel, Entity as UserStates};
 use futures::future::BoxFuture;
@@ -72,7 +73,7 @@ async fn set_state_with<VA, SV>(
     state: String,
     auth: String,
     db: DatabaseConnection,
-    to_tap_broadcast: Sender<TapMessageRecord>,
+    to_tap_broadcast: Sender<SharedScopedEvent>,
     verify_auth_fn: VA,
     save_state_fn: SV,
 ) -> Result<Json<SetStateResponse>, ErrorResponse>

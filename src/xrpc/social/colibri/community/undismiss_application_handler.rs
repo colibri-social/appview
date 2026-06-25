@@ -54,7 +54,6 @@ fn application_event(community: String, app: Application) -> ColibriServerEvent 
             created_at: None,
             data: None,
         })),
-        is_relevant: true,
     }
 }
 

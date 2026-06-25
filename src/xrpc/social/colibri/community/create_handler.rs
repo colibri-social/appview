@@ -25,16 +25,20 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use rocket::tokio::sync::broadcast;
+
 use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember, ColibriRole,
 };
-use crate::lib::community_credentials::{self, SOURCE_APPVIEW_MANAGED};
+use crate::lib::community_credentials::{self, SOURCE_APPVIEW_MANAGED, SOURCE_BYO};
 use crate::lib::crypto;
+use crate::lib::events::{CommunityCreationProgressData, CommunityCreationProgressEvent};
 use crate::lib::moderation::generate_tid;
-use crate::lib::pds_client::{self, CreatedAccount, PdsError, RecordRef};
+use crate::lib::pds_client::{self, CreatedAccount, PdsError, PdsSession, RecordRef};
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
+use crate::lib::tap::CommsBridge;
 use crate::lib::time::current_iso8601_utc;
 
 #[derive(Serialize, Debug)]
@@ -88,6 +92,18 @@ pub struct AdminCredentials {
     pub password: String,
 }
 
+/// Credentials for a "bring your own PDS" community: the host plus an
+/// identifier + app password that authenticate as the community DID. Unlike
+/// the managed flow, the AppView never mints or administers this account — it
+/// only borrows the credentials to write the bootstrap records and stores them
+/// (source=byo) for later moderation writes.
+#[derive(Debug, Clone)]
+pub struct ByoCredentials {
+    pub pds: String,
+    pub identifier: String,
+    pub password: String,
+}
+
 type VerifyAuthFn =
     dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
 type CreateAccountFn = dyn Fn(
@@ -101,6 +117,11 @@ type CreateAccountFn = dyn Fn(
     + Sync;
 type CreateSessionFn =
     dyn Fn(String, String, String) -> BoxFuture<'static, Result<String, PdsError>> + Send + Sync;
+/// Like `CreateSessionFn` but surfaces the whole session — the BYO flow needs
+/// the resolved DID (the community DID) in addition to the access JWT.
+type CreateByoSessionFn = dyn Fn(String, String, String) -> BoxFuture<'static, Result<PdsSession, PdsError>>
+    + Send
+    + Sync;
 type CreateRecordFn = dyn Fn(
         String,
         String,
@@ -198,6 +219,36 @@ async fn create_with(
             pds_error(format!("createSession failed: {e}"))
         })?;
 
+    bootstrap_community(
+        create_record_fn,
+        upload_blob_fn,
+        pds_endpoint,
+        access_jwt,
+        community_did,
+        caller_did,
+        input,
+    )
+    .await
+}
+
+/// Writes the six records that make up a community onto its repo, returning the
+/// assembled `CreateCommunityResponse`. Shared by the AppView-managed
+/// (`create_with`) and BYO (`create_byo_with`) flows — both end up with an
+/// identically-shaped community and differ only in how the repo and its
+/// credentials are obtained beforehand.
+///
+/// `caller_did` becomes the owner member's `subject`, so the human who issued
+/// the request (not the community account) holds the Owner role.
+#[allow(clippy::too_many_arguments)]
+async fn bootstrap_community(
+    create_record_fn: &CreateRecordFn,
+    upload_blob_fn: &UploadBlobFn,
+    pds_endpoint: String,
+    access_jwt: String,
+    community_did: String,
+    caller_did: String,
+    input: CreateCommunityInput,
+) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
     // Pre-generate rkeys for all bootstrap records up front so each record
     // can embed references to the others before any PDS round-trip.
     let category_rkey = generate_tid();
@@ -419,6 +470,100 @@ async fn create_with(
     }))
 }
 
+/// BYO ("bring your own PDS") community creation.
+///
+/// Unlike `create_with`, no account is minted: the supplied credentials must
+/// already authenticate as the community DID. We prove control with a
+/// `createSession` against the user's PDS (its resolved DID is the community
+/// DID), store the credentials as `source=byo`, and bootstrap the same six
+/// records onto that repo. Because the DID is the user's own identity, the
+/// delete flow later removes only the records — never the account.
+///
+/// `progress_tx`, when present, receives coarse `community_creation_progress`
+/// events that the subscribe-events fan-out delivers to the caller's clients;
+/// the BYO flow talks to a (possibly slow) external PDS, so the live steps give
+/// the UI something to show.
+#[allow(clippy::too_many_arguments)]
+async fn create_byo_with(
+    auth: String,
+    input: CreateCommunityInput,
+    byo: ByoCredentials,
+    progress_tx: Option<broadcast::Sender<CommunityCreationProgressEvent>>,
+    verify_auth_fn: &VerifyAuthFn,
+    create_session_fn: &CreateByoSessionFn,
+    create_record_fn: &CreateRecordFn,
+    upsert_credentials_fn: &UpsertCredentialsFn,
+    upload_blob_fn: &UploadBlobFn,
+) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
+    let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.create"))
+        .await
+        .map_err(auth_error)?;
+
+    log::info!("community.create (byo) requested by {caller_did}");
+
+    // Best-effort progress hint to the caller's own clients; never fatal.
+    let emit = |step: &str| {
+        if let Some(tx) = progress_tx.as_ref() {
+            let _ = tx.send(progress_event(&caller_did, step));
+        }
+    };
+
+    // 1. Prove control of the BYO repo. A successful session confirms the
+    //    credentials are valid, and the session's DID is the community DID we
+    //    write onto.
+    emit("connecting");
+    let session = create_session_fn(byo.pds.clone(), byo.identifier.clone(), byo.password.clone())
+        .await
+        .map_err(|e| {
+            log::error!("community.create (byo): createSession failed: {e}");
+            pds_error(format!("createSession failed: {e}"))
+        })?;
+    let community_did = session.did.clone();
+    log::info!("community.create (byo): verified control of {community_did}");
+
+    // 2. Persist the credentials (source=byo) before bootstrapping so a
+    //    partial failure below is recoverable via a follow-up call.
+    upsert_credentials_fn(
+        community_did.clone(),
+        byo.pds.clone(),
+        byo.identifier.clone(),
+        byo.password.clone(),
+    )
+    .await
+    .map_err(|e| {
+        log::error!("community.create (byo): failed to persist credentials for {community_did}: {e}");
+        internal_error(format!("failed to persist credentials: {e}"))
+    })?;
+
+    // 3. Bootstrap the records on the user's own repo.
+    emit("creating");
+    let response = bootstrap_community(
+        create_record_fn,
+        upload_blob_fn,
+        byo.pds,
+        session.access_jwt,
+        community_did,
+        caller_did.clone(),
+        input,
+    )
+    .await?;
+
+    emit("registering");
+    Ok(response)
+}
+
+/// Builds a `community_creation_progress` broadcast envelope addressed to
+/// `did`. The subscribe-events fan-out delivers it only to that user's own
+/// connections (filtered by `recipient_did`), so other clients never see it.
+fn progress_event(did: &str, step: &str) -> CommunityCreationProgressEvent {
+    CommunityCreationProgressEvent {
+        recipient_did: did.to_string(),
+        data: CommunityCreationProgressData {
+            step: step.to_string(),
+        },
+    }
+}
+
 /// Wraps `write_record` with bootstrap-flow logging: a `debug` line before the
 /// call and an `error` line if the upstream write fails. Kept separate from
 /// `write_record` so the underlying helper stays generic.
@@ -557,6 +702,16 @@ fn create_session_boxed(
     })
 }
 
+/// Like `create_session_boxed` but returns the whole `PdsSession` — the BYO
+/// flow reads `did` off it to learn the community DID.
+fn create_byo_session_boxed(
+    pds_endpoint: String,
+    identifier: String,
+    password: String,
+) -> BoxFuture<'static, Result<PdsSession, PdsError>> {
+    Box::pin(async move { pds_client::create_session(&pds_endpoint, &identifier, &password).await })
+}
+
 fn create_record_boxed(
     pds_endpoint: String,
     access_jwt: String,
@@ -590,12 +745,19 @@ fn upload_blob_boxed(
 }
 
 #[post(
-    "/xrpc/social.colibri.community.create?<name>&<description>&<requiresApprovalToJoin>&<auth>&<mimeType>",
+    "/xrpc/social.colibri.community.create?<name>&<description>&<requiresApprovalToJoin>&<auth>&<mimeType>&<pds>&<identifier>&<password>",
     data = "<picture>"
 )]
-/// Mints a new community DID on the AppView's PDS and bootstraps it. The
-/// optional community picture is sent as the raw request body — large images
-/// can't fit in a query string — with its MIME type declared via the
+/// Creates a community and bootstraps its records. Two modes:
+///
+/// - **Managed** (default): mints a fresh DID on the AppView's PDS.
+/// - **BYO**: when `pds` + `identifier` + `password` are all supplied, the
+///   community is bootstrapped on the user's own PDS under the DID those
+///   credentials resolve to. The account is never minted or administered by
+///   the AppView, so deleting the community later removes only its records.
+///
+/// The optional community picture is sent as the raw request body — large
+/// images can't fit in a query string — with its MIME type declared via the
 /// `mimeType` query parameter. An empty body means "no picture".
 #[allow(non_snake_case)]
 pub async fn create(
@@ -604,8 +766,12 @@ pub async fn create(
     requiresApprovalToJoin: Option<bool>,
     mimeType: Option<&str>,
     auth: &str,
+    pds: Option<&str>,
+    identifier: Option<&str>,
+    password: Option<&str>,
     picture: Data<'_>,
     db: &State<DatabaseConnection>,
+    bridge: &State<CommsBridge>,
 ) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
     // Read the (optional) picture bytes from the request body. An empty body
     // means "no picture"; anything else is treated as raw image bytes.
@@ -640,53 +806,105 @@ pub async fn create(
         mime_type: mimeType.map(|s| s.to_string()),
     };
 
-    let pds_endpoint = std::env::var("PDS_LOC")
-        .map_err(|_| internal_error(String::from("PDS_LOC env var not set")))?;
-    let handle_domain = std::env::var("APPVIEW_HANDLE_DOMAIN")
-        .map_err(|_| internal_error(String::from("APPVIEW_HANDLE_DOMAIN env var not set")))?;
-    let admin_credentials = AdminCredentials {
-        password: std::env::var("PDS_ADMIN_PASS")
-            .map_err(|_| internal_error(String::from("PDS_ADMIN_PASS env var not set")))?,
+    // A complete (pds, identifier, password) triple selects the BYO path; any
+    // gap falls through to AppView-managed creation.
+    let byo = match (pds, identifier, password) {
+        (Some(p), Some(i), Some(pw)) if !p.is_empty() && !i.is_empty() && !pw.is_empty() => {
+            Some(ByoCredentials {
+                pds: p.to_string(),
+                identifier: i.to_string(),
+                password: pw.to_string(),
+            })
+        }
+        _ => None,
     };
 
     // The credential upsert closure has to bind to the live DB connection;
     // build it inline rather than reusing the (DB-free) boxed helper above.
     let db_for_upsert = db.inner().clone();
-    let upsert = move |community_did: String,
-                       pds_endpoint: String,
-                       identifier: String,
-                       password: String|
-          -> BoxFuture<'static, Result<(), String>> {
-        let db = db_for_upsert.clone();
-        Box::pin(async move {
-            community_credentials::upsert_credentials(
-                &db,
-                crypto::master_key(),
-                &community_did,
-                &pds_endpoint,
-                &identifier,
-                &password,
-                SOURCE_APPVIEW_MANAGED,
-            )
-            .await
-            .map_err(|e| e.to_string())
-        })
-    };
 
-    let response = create_with(
-        auth.to_string(),
-        input,
-        handle_domain,
-        pds_endpoint,
-        admin_credentials,
-        &verify_auth_boxed,
-        &create_account_boxed,
-        &create_session_boxed,
-        &create_record_boxed,
-        &upsert,
-        &upload_blob_boxed,
-    )
-    .await?;
+    let response = if let Some(byo) = byo {
+        // BYO: store the supplied credentials as source=byo. No account mint.
+        let upsert = move |community_did: String,
+                           pds_endpoint: String,
+                           identifier: String,
+                           password: String|
+              -> BoxFuture<'static, Result<(), String>> {
+            let db = db_for_upsert.clone();
+            Box::pin(async move {
+                community_credentials::upsert_credentials(
+                    &db,
+                    crypto::master_key(),
+                    &community_did,
+                    &pds_endpoint,
+                    &identifier,
+                    &password,
+                    SOURCE_BYO,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            })
+        };
+
+        create_byo_with(
+            auth.to_string(),
+            input,
+            byo,
+            Some(bridge.progress.clone()),
+            &verify_auth_boxed,
+            &create_byo_session_boxed,
+            &create_record_boxed,
+            &upsert,
+            &upload_blob_boxed,
+        )
+        .await?
+    } else {
+        // Managed: mint a fresh account on the AppView's own PDS.
+        let pds_endpoint = std::env::var("PDS_LOC")
+            .map_err(|_| internal_error(String::from("PDS_LOC env var not set")))?;
+        let handle_domain = std::env::var("APPVIEW_HANDLE_DOMAIN")
+            .map_err(|_| internal_error(String::from("APPVIEW_HANDLE_DOMAIN env var not set")))?;
+        let admin_credentials = AdminCredentials {
+            password: std::env::var("PDS_ADMIN_PASS")
+                .map_err(|_| internal_error(String::from("PDS_ADMIN_PASS env var not set")))?,
+        };
+
+        let upsert = move |community_did: String,
+                           pds_endpoint: String,
+                           identifier: String,
+                           password: String|
+              -> BoxFuture<'static, Result<(), String>> {
+            let db = db_for_upsert.clone();
+            Box::pin(async move {
+                community_credentials::upsert_credentials(
+                    &db,
+                    crypto::master_key(),
+                    &community_did,
+                    &pds_endpoint,
+                    &identifier,
+                    &password,
+                    SOURCE_APPVIEW_MANAGED,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            })
+        };
+
+        create_with(
+            auth.to_string(),
+            input,
+            handle_domain,
+            pds_endpoint,
+            admin_credentials,
+            &verify_auth_boxed,
+            &create_account_boxed,
+            &create_session_boxed,
+            &create_record_boxed,
+            &upsert,
+            &upload_blob_boxed,
+        )
+        .await?
+    };
 
     // Register the freshly-minted community DID with Tap so the firehose
     // starts delivering its records into `record_data`. Without this, the
@@ -722,6 +940,114 @@ mod tests {
         AdminCredentials {
             password: String::from("admin-pass"),
         }
+    }
+
+    #[tokio::test]
+    async fn byo_bootstraps_on_supplied_did_without_minting() {
+        let created_records: Arc<Mutex<Vec<(String, Option<String>, Value)>>> =
+            Arc::new(Mutex::new(vec![]));
+        let credentials_captured: Arc<Mutex<Option<(String, String, String, String)>>> =
+            Arc::new(Mutex::new(None));
+        let session_args: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
+        let cr = created_records.clone();
+        let cc = credentials_captured.clone();
+        let sa = session_args.clone();
+
+        // The community DID comes from the session the supplied credentials
+        // open — never from a mint.
+        let create_session = move |pds: String,
+                                   identifier: String,
+                                   password: String|
+              -> BoxFuture<'static, Result<PdsSession, PdsError>> {
+            let sa = sa.clone();
+            Box::pin(async move {
+                *sa.lock().unwrap() = Some((pds, identifier, password));
+                Ok(PdsSession {
+                    access_jwt: String::from("byo-jwt"),
+                    did: String::from("did:plc:byocomm"),
+                    handle: Some(String::from("byo.example")),
+                })
+            })
+        };
+        let create_record = move |_: String,
+                                  _: String,
+                                  _: String,
+                                  collection: String,
+                                  rkey: Option<String>,
+                                  record: Value|
+              -> BoxFuture<'static, Result<RecordRef, PdsError>> {
+            let cr = cr.clone();
+            Box::pin(async move {
+                cr.lock()
+                    .unwrap()
+                    .push((collection.clone(), rkey.clone(), record));
+                let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                Ok(RecordRef {
+                    uri: format!("at://did:plc:byocomm/{collection}/{assigned_rkey}"),
+                    cid: String::from("cid"),
+                })
+            })
+        };
+        let upsert = move |did: String,
+                           endpoint: String,
+                           identifier: String,
+                           password: String|
+              -> BoxFuture<'static, Result<(), String>> {
+            let cc = cc.clone();
+            Box::pin(async move {
+                *cc.lock().unwrap() = Some((did, endpoint, identifier, password));
+                Ok(())
+            })
+        };
+
+        let result = create_byo_with(
+            String::from("token"),
+            input(),
+            ByoCredentials {
+                pds: String::from("https://user.pds.example"),
+                identifier: String::from("alice.example"),
+                password: String::from("app-password"),
+            },
+            None, // no progress channel in unit tests
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &create_session,
+            &create_record,
+            &upsert,
+            &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
+        )
+        .await
+        .unwrap();
+
+        // DID + community URI are anchored on the BYO repo.
+        assert_eq!(result.did, "did:plc:byocomm");
+        assert_eq!(
+            result.community,
+            "at://did:plc:byocomm/social.colibri.community/self"
+        );
+
+        // The session was opened against the user's PDS with their credentials.
+        let (pds, identifier, password) = session_args.lock().unwrap().take().unwrap();
+        assert_eq!(pds, "https://user.pds.example");
+        assert_eq!(identifier, "alice.example");
+        assert_eq!(password, "app-password");
+
+        // All six bootstrap records were written, and the owner member's
+        // subject is the caller (not the community DID).
+        let records = created_records.lock().unwrap();
+        assert_eq!(records.len(), 6, "bootstrap writes 6 records");
+        let by_collection: std::collections::HashMap<_, _> = records
+            .iter()
+            .map(|(c, rkey, v)| (c.as_str(), (rkey, v)))
+            .collect();
+        let (_, member_value) = by_collection.get("social.colibri.member").unwrap();
+        assert_eq!(member_value["subject"], "did:plc:caller");
+
+        // Credentials were persisted for the resolved community DID.
+        let creds = credentials_captured.lock().unwrap();
+        let saved = creds.as_ref().unwrap();
+        assert_eq!(saved.0, "did:plc:byocomm");
+        assert_eq!(saved.1, "https://user.pds.example");
+        assert_eq!(saved.3, "app-password");
     }
 
     #[tokio::test]

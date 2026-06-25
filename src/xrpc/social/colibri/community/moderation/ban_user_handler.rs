@@ -273,7 +273,6 @@ async fn resurface_as_application_if_pending(
                         },
                     }),
                 })),
-                is_relevant: true,
             });
         }
         Ok(None) => {}
