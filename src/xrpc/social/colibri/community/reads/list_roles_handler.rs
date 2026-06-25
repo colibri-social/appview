@@ -145,7 +145,7 @@ mod tests {
                         rkey: String::from("owner"),
                         data: serde_json::json!({
                             "name": "Owner",
-                            "permissions": ["member.ban", "message.delete"],
+                            "permissions": ["member.ban", "message.hide"],
                             "position": 100,
                             "protected": true,
                             "channelOverrides": []
@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(result.roles[0].protected, Some(true));
         assert_eq!(
             result.roles[0].permissions,
-            vec!["member.ban", "message.delete"]
+            vec!["member.ban", "message.hide"]
         );
     }
 
@@ -190,7 +190,7 @@ mod tests {
                             "permissions": [],
                             "position": 50,
                             "channelOverrides": [
-                                { "channel": "chan-a", "allow": ["message.delete"], "deny": [] }
+                                { "channel": "chan-a", "allow": ["message.hide"], "deny": [] }
                             ]
                         }),
                         indexed_at: String::from(""),

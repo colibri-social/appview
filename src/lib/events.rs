@@ -3,7 +3,7 @@ use serde_json::Value;
 
 // -- Server -> Client
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CommunityEventData {
     pub event: String,
     pub uri: String,
@@ -15,16 +15,21 @@ pub struct CommunityEventData {
     pub picture: Option<Value>,
     #[serde(rename = "categoryOrder", skip_serializing_if = "Option::is_none")]
     pub category_order: Option<Vec<String>>,
+    #[serde(
+        rename = "requiresApprovalToJoin",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub requires_approval_to_join: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MemberEventMemberStatus {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MemberEventMemberData {
     #[serde(rename = "displayName")]
     pub display_name: String,
@@ -39,7 +44,7 @@ pub struct MemberEventMemberData {
     pub status: MemberEventMemberStatus,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MemberEventMember {
     pub did: String,
     pub handle: String,
@@ -51,7 +56,7 @@ pub struct MemberEventMember {
     pub data: MemberEventMemberData,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MemberEventData {
     pub event: String,
     pub community: String,
@@ -65,7 +70,32 @@ pub struct MemberEventData {
     pub member_did: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// Sent for changes to the moderator-facing pending-applications queue for a
+/// `requiresApprovalToJoin` community. Broadcast to all clients; scope by
+/// `community`.
+///
+/// | `event` | When | `did`/`handle`/`createdAt`/`data` |
+/// |---|---|---|
+/// | `create` | A new (or re-surfaced — e.g. a kicked member whose original `social.colibri.membership` is still on file) pending application | Always present |
+/// | `resolve` | The application was admitted (`approveMembership`) | Absent |
+/// | `dismiss` | A moderator hid the application from the active queue (AppView-only, off-protocol) | Absent |
+/// | `undismiss` | A dismissed application was restored to the active queue | Absent |
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ApplicationEventData {
+    pub event: String,
+    pub community: String,
+    pub membership: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<MemberEventMemberData>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CategoryEventData {
     pub event: String,
     pub uri: String,
@@ -77,7 +107,7 @@ pub struct CategoryEventData {
     pub channel_order: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ChannelEventData {
     pub event: String,
     pub uri: String,
@@ -93,14 +123,14 @@ pub struct ChannelEventData {
     pub channel_type: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageEventAuthorStatus {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageEventAuthorData {
     #[serde(rename = "displayName")]
     pub display_name: String,
@@ -115,14 +145,14 @@ pub struct MessageEventAuthorData {
     pub status: MessageEventAuthorStatus,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageEventAuthor {
     pub did: String,
     pub handle: String,
     pub data: MessageEventAuthorData,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageEventData {
     pub event: String,
     pub uri: String,
@@ -144,7 +174,7 @@ pub struct MessageEventData {
     pub author: Option<MessageEventAuthor>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RoleEventData {
     pub event: String,
     pub uri: String,
@@ -164,7 +194,7 @@ pub struct RoleEventData {
     pub mentionable: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ReactionEventData {
     pub event: String,
     pub uri: String,
@@ -174,7 +204,7 @@ pub struct ReactionEventData {
     pub target: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserEventStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
@@ -182,7 +212,7 @@ pub struct UserEventStatus {
     pub state: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserEventProfile {
     #[serde(rename = "displayName", skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -195,7 +225,7 @@ pub struct UserEventProfile {
     pub handle: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UserEventData {
     pub did: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,14 +233,14 @@ pub struct UserEventData {
     pub profile: UserEventProfile,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TypingEventData {
     pub event: String,
     pub channel: String,
     pub did: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NotificationEventMessage {
     pub text: String,
     #[serde(default)]
@@ -225,7 +255,7 @@ pub struct NotificationEventMessage {
     pub edited: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NotificationEventData {
     pub id: i64,
     pub kind: String,
@@ -240,11 +270,59 @@ pub struct NotificationEventData {
     pub message: NotificationEventMessage,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+/// Payload of a `seen_event` — a per-user signal that the caller's own read
+/// state changed on one device, pushed to their other connected clients so
+/// unread badges update live. `event` is `"channel_read"` (the read cursor
+/// advanced; clients clear the channel's white dot) or `"message_seen"` (a
+/// message's ping was cleared; clients decrement the channel's ping count by
+/// `cleared`).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SeenEventData {
+    pub event: String,
+    #[serde(rename = "channelUri")]
+    pub channel_uri: String,
+    #[serde(rename = "messageUri", skip_serializing_if = "Option::is_none")]
+    pub message_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleared: Option<u64>,
+}
+
+/// Broadcast envelope for a `seen_event`. Carries the target DID so the
+/// subscribe handler can deliver it only to that user's own connections,
+/// mirroring how `IndexedNotification` carries `recipient_did`.
+#[derive(Debug, Clone)]
+pub struct SeenEvent {
+    pub recipient_did: String,
+    pub data: SeenEventData,
+}
+
+/// Payload of a `mute_event` — a per-user signal that the caller muted or
+/// unmuted a channel or community on one device, pushed to their other
+/// connected clients so the mute set stays in sync without a reload. `event`
+/// is `"muted"` (a `social.colibri.actor.mute` record was created) or
+/// `"unmuted"` (the record was deleted); `subject` is the muted channel or
+/// community AT-URI.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MuteEventData {
+    pub event: String,
+    pub subject: String,
+}
+
+/// Broadcast envelope for a `mute_event`. Carries the target DID so the
+/// subscribe handler can deliver it only to that user's own connections,
+/// mirroring `SeenEvent`.
+#[derive(Debug, Clone)]
+pub struct MuteEvent {
+    pub recipient_did: String,
+    pub data: MuteEventData,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum ColibriServerEventData {
     Community(CommunityEventData),
     Member(MemberEventData),
+    Application(ApplicationEventData),
     Category(CategoryEventData),
     Channel(ChannelEventData),
     Role(RoleEventData),
@@ -253,9 +331,11 @@ pub enum ColibriServerEventData {
     User(UserEventData),
     Typing(TypingEventData),
     Notification(NotificationEventData),
+    Seen(SeenEventData),
+    Mute(MuteEventData),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ColibriServerEvent {
     #[serde(rename = "type")]
     pub event_type: String,
@@ -273,23 +353,23 @@ impl ColibriServerEvent {
 
 // -- Client -> Server
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VoiceChannelData {
     pub channel: String,
     pub community: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ViewData {
     pub channel: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TypingMessageData {
     pub channel: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum ColibriClientEventData {
     TypingMessage(TypingMessageData),
@@ -297,7 +377,7 @@ pub enum ColibriClientEventData {
     VoiceChannel(VoiceChannelData),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ColibriClientEvent {
     #[serde(rename = "type")]
     pub event_type: String,

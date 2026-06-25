@@ -17,9 +17,8 @@
 //! Rkeys for the four non-singleton records are pre-generated locally so each
 //! record can reference the others before any PDS round-trip.
 
-use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use futures::future::BoxFuture;
+use rocket::data::{Data, ToByteUnit};
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::DatabaseConnection;
@@ -59,36 +58,10 @@ const COMMUNITY_RKEY: &str = "self";
 /// keep in sync.
 const ALLOWED_PICTURE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif"];
 
-/// Decodes a base64-encoded picture and validates its declared MIME type.
-///
-/// Rejects with `InvalidRequest` if `mime_type` isn't in
-/// [`ALLOWED_PICTURE_MIME_TYPES`], or if neither URL-safe nor standard
-/// base64 decoding succeeds against the input. (Query-string base64 most
-/// commonly arrives URL-safe; some clients still send the standard
-/// alphabet, so we accept both.)
-fn decode_picture(picture_b64: &str, mime_type: &str) -> Result<Vec<u8>, ErrorResponse> {
-    if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime_type) {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: format!(
-                    "Unsupported picture mime_type `{mime_type}`. Accepted: {}.",
-                    ALLOWED_PICTURE_MIME_TYPES.join(", ")
-                ),
-            }),
-        });
-    }
-
-    if let Ok(bytes) = URL_SAFE_NO_PAD.decode(picture_b64) {
-        return Ok(bytes);
-    }
-    STANDARD.decode(picture_b64).map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: format!("Invalid base64 in `image`: {e}"),
-        }),
-    })
-}
+/// Upper bound (in mebibytes) on the picture bytes accepted in the request
+/// body. Generous enough for community avatars while still capping abusive
+/// uploads.
+const MAX_PICTURE_MEBIBYTES: i64 = 10;
 
 #[derive(Deserialize, Debug)]
 pub struct CreateCommunityInput {
@@ -98,7 +71,7 @@ pub struct CreateCommunityInput {
     #[serde(rename = "requiresApprovalToJoin", default = "default_true")]
     pub requires_approval_to_join: bool,
     #[serde(default)]
-    pub picture: Option<String>,
+    pub picture: Option<Vec<u8>>,
     #[serde(default)]
     pub mime_type: Option<String>,
 }
@@ -234,21 +207,31 @@ async fn create_with(
 
     // Upload the optional community picture before writing the community
     // record so the record can embed the resulting blob ref. Picture bytes
-    // come in as base64 on the query string; the PDS reads the MIME type
-    // off the `Content-Type` header in `upload_blob`.
+    // arrive as the raw request body (base64 in a query string fails for
+    // large images); the MIME type is declared via the `mimeType` query
+    // param and validated against the lexicon's allow-list here.
     let picture_blob = match (input.picture.as_deref(), input.mime_type.as_deref()) {
-        (Some(b64), Some(mime)) => {
-            let bytes = decode_picture(b64, mime).inspect_err(|_e| {
+        (Some(bytes), Some(mime)) => {
+            if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime) {
                 log::warn!(
                     "community.create: rejecting picture for {community_did} (mime={mime}, \
                      account already minted)"
                 );
-            })?;
+                return Err(ErrorResponse {
+                    body: Json(ErrorBody {
+                        error: String::from("InvalidRequest"),
+                        message: format!(
+                            "Unsupported picture mimeType `{mime}`. Accepted: {}.",
+                            ALLOWED_PICTURE_MIME_TYPES.join(", ")
+                        ),
+                    }),
+                });
+            }
             let byte_len = bytes.len();
             let blob = upload_blob_fn(
                 pds_endpoint.clone(),
                 access_jwt.clone(),
-                bytes,
+                bytes.to_vec(),
                 mime.to_string(),
             )
             .await
@@ -261,13 +244,15 @@ async fn create_with(
         }
         (Some(_), None) => {
             log::warn!(
-                "community.create: rejecting picture for {community_did}: mime_type missing \
+                "community.create: rejecting picture for {community_did}: mimeType missing \
                  (account already minted)"
             );
             return Err(ErrorResponse {
                 body: Json(ErrorBody {
                     error: String::from("InvalidRequest"),
-                    message: String::from("`mime_type` is required when `image` is supplied."),
+                    message: String::from(
+                        "`mimeType` is required when a picture body is supplied.",
+                    ),
                 }),
             });
         }
@@ -605,24 +590,54 @@ fn upload_blob_boxed(
 }
 
 #[post(
-    "/xrpc/social.colibri.community.create?<name>&<description>&<requires_approval_to_join>&<auth>&<image>&<mime_type>"
+    "/xrpc/social.colibri.community.create?<name>&<description>&<requiresApprovalToJoin>&<auth>&<mimeType>",
+    data = "<picture>"
 )]
-/// Mints a new community DID on the AppView's PDS and bootstraps it.
+/// Mints a new community DID on the AppView's PDS and bootstraps it. The
+/// optional community picture is sent as the raw request body — large images
+/// can't fit in a query string — with its MIME type declared via the
+/// `mimeType` query parameter. An empty body means "no picture".
+#[allow(non_snake_case)]
 pub async fn create(
     name: &str,
     description: Option<&str>,
-    requires_approval_to_join: Option<bool>,
-    image: Option<&str>,
-    mime_type: Option<&str>,
+    requiresApprovalToJoin: Option<bool>,
+    mimeType: Option<&str>,
     auth: &str,
+    picture: Data<'_>,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
+    // Read the (optional) picture bytes from the request body. An empty body
+    // means "no picture"; anything else is treated as raw image bytes.
+    let capped = picture
+        .open(MAX_PICTURE_MEBIBYTES.mebibytes())
+        .into_bytes()
+        .await
+        .map_err(|e| ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("InvalidRequest"),
+                message: format!("Failed to read picture body: {e}"),
+            }),
+        })?;
+    if !capped.is_complete() {
+        return Err(ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("InvalidRequest"),
+                message: format!(
+                    "picture exceeds the maximum allowed size of {MAX_PICTURE_MEBIBYTES} MiB."
+                ),
+            }),
+        });
+    }
+    let bytes = capped.into_inner();
+    let picture = if bytes.is_empty() { None } else { Some(bytes) };
+
     let input = CreateCommunityInput {
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
-        requires_approval_to_join: requires_approval_to_join.unwrap_or(true),
-        picture: image.map(|s| s.to_string()),
-        mime_type: mime_type.map(|s| s.to_string()),
+        requires_approval_to_join: requiresApprovalToJoin.unwrap_or(true),
+        picture,
+        mime_type: mimeType.map(|s| s.to_string()),
     };
 
     let pds_endpoint = std::env::var("PDS_LOC")
@@ -956,11 +971,17 @@ mod tests {
             })
         };
 
+        // The handler now receives raw bytes (the request body), so decode the
+        // base64 fixture up front and feed the decoded bytes in directly.
+        use base64::Engine as _;
+        let png_bytes = base64::engine::general_purpose::STANDARD
+            .decode(TINY_PNG_BASE64)
+            .expect("valid base64 fixture");
         let input_with_picture = CreateCommunityInput {
             name: String::from("Pictured"),
             description: Some(String::from("has a picture")),
             requires_approval_to_join: false,
-            picture: Some(String::from(TINY_PNG_BASE64)),
+            picture: Some(png_bytes),
             mime_type: Some(String::from("image/png")),
         };
 
@@ -995,8 +1016,7 @@ mod tests {
         let captured = upload_captured.lock().unwrap();
         let (bytes, mime) = captured.as_ref().unwrap();
         assert_eq!(mime, "image/png");
-        // PNG magic bytes — confirms we decoded base64, not passed the string
-        // through verbatim.
+        // PNG magic bytes — confirms the raw body bytes reach uploadBlob intact.
         assert_eq!(
             &bytes[..8],
             &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]
@@ -1021,7 +1041,7 @@ mod tests {
             name: String::from("NoMime"),
             description: None,
             requires_approval_to_join: false,
-            picture: Some(String::from(TINY_PNG_BASE64)),
+            picture: Some(vec![0x89, b'P', b'N', b'G']),
             mime_type: None,
         };
 
@@ -1050,7 +1070,7 @@ mod tests {
 
         let body = result.err().unwrap().body.into_inner();
         assert_eq!(body.error, "InvalidRequest");
-        assert!(body.message.contains("mime_type"));
+        assert!(body.message.contains("mimeType"));
     }
 
     #[tokio::test]
@@ -1059,7 +1079,7 @@ mod tests {
             name: String::from("BadMime"),
             description: None,
             requires_approval_to_join: false,
-            picture: Some(String::from(TINY_PNG_BASE64)),
+            picture: Some(vec![0x89, b'P', b'N', b'G']),
             mime_type: Some(String::from("image/webp")),
         };
 

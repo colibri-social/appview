@@ -353,6 +353,77 @@ pub async fn unseen_count(db: &DatabaseConnection, recipient_did: &str) -> Resul
         .await
 }
 
+/// Counts unseen notifications for a recipient within a single channel.
+pub async fn unseen_count_for_channel(
+    db: &DatabaseConnection,
+    recipient_did: &str,
+    channel_uri: &str,
+) -> Result<u64, DbErr> {
+    notifications::Entity::find()
+        .filter(notifications::Column::RecipientDid.eq(recipient_did))
+        .filter(notifications::Column::ChannelUri.eq(channel_uri))
+        .filter(notifications::Column::SeenAt.is_null())
+        .count(db)
+        .await
+}
+
+/// Lists the unseen notifications for a recipient within a single channel,
+/// newest first. Used by clients to learn which messages still owe a ping so
+/// they can clear each one as its message scrolls into view.
+pub async fn list_unseen_for_channel(
+    db: &DatabaseConnection,
+    recipient_did: &str,
+    channel_uri: &str,
+) -> Result<Vec<notifications::Model>, DbErr> {
+    notifications::Entity::find()
+        .filter(notifications::Column::RecipientDid.eq(recipient_did))
+        .filter(notifications::Column::ChannelUri.eq(channel_uri))
+        .filter(notifications::Column::SeenAt.is_null())
+        .order_by_desc(notifications::Column::Id)
+        .all(db)
+        .await
+}
+
+/// Returns the channel URI of any notification for the given recipient and
+/// message, regardless of seen state. Used by `updateSeenForMessage` to learn
+/// which channel's badge a `seen_event` should target (the rows persist after
+/// being marked seen, so this works before or after the update).
+pub async fn channel_for_message_notification(
+    db: &DatabaseConnection,
+    recipient_did: &str,
+    message_uri: &str,
+) -> Result<Option<String>, DbErr> {
+    let row = notifications::Entity::find()
+        .filter(notifications::Column::RecipientDid.eq(recipient_did))
+        .filter(notifications::Column::MessageUri.eq(message_uri))
+        .one(db)
+        .await?;
+    Ok(row.map(|r| r.channel_uri))
+}
+
+/// Marks every unseen notification for the recipient that points at a specific
+/// message as seen at `seen_at`. Returns the number of rows updated. Used for
+/// per-message ping clearing (a single message may carry both a mention and a
+/// reply notification for the same recipient).
+pub async fn mark_seen_for_message(
+    db: &DatabaseConnection,
+    recipient_did: &str,
+    message_uri: &str,
+    seen_at: &str,
+) -> Result<u64, DbErr> {
+    let res = notifications::Entity::update_many()
+        .col_expr(
+            notifications::Column::SeenAt,
+            sea_query::Expr::value(seen_at),
+        )
+        .filter(notifications::Column::RecipientDid.eq(recipient_did))
+        .filter(notifications::Column::MessageUri.eq(message_uri))
+        .filter(notifications::Column::SeenAt.is_null())
+        .exec(db)
+        .await?;
+    Ok(res.rows_affected)
+}
+
 /// Marks every unseen notification for the recipient with `indexed_at <= now`
 /// as seen at `seen_at`. Returns the number of rows updated.
 pub async fn mark_seen_up_to(

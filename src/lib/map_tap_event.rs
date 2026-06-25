@@ -2,20 +2,22 @@ use futures::future::BoxFuture;
 use sea_orm::DatabaseConnection;
 use serde::de::{DeserializeOwned, Error};
 
+use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
     ColibriMembership, ColibriMessage, ColibriModeration, ColibriReaction, ColibriRole,
 };
 use crate::lib::events::{
-    CategoryEventData, ChannelEventData, ColibriServerEvent, ColibriServerEventData,
-    CommunityEventData, MemberEventData, MemberEventMember, MemberEventMemberData,
-    MemberEventMemberStatus, MessageEventAuthor, MessageEventAuthorData, MessageEventAuthorStatus,
-    MessageEventData, ReactionEventData, RoleEventData, UserEventData, UserEventProfile,
-    UserEventStatus,
+    ApplicationEventData, CategoryEventData, ChannelEventData, ColibriServerEvent,
+    ColibriServerEventData, CommunityEventData, MemberEventData, MemberEventMember,
+    MemberEventMemberData, MemberEventMemberStatus, MessageEventAuthor, MessageEventAuthorData,
+    MessageEventAuthorStatus, MessageEventData, ReactionEventData, RoleEventData, UserEventData,
+    UserEventProfile, UserEventStatus,
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::get_state::get_state;
+use crate::lib::moderation;
 use crate::lib::pds_client;
 use crate::lib::tap::TapMessageRecord;
 use crate::xrpc::com::atproto::identity::resolve_did;
@@ -114,17 +116,18 @@ async fn get_user_state(did: String, db: DatabaseConnection) -> Result<String, s
         .map_err(|e| serde_json::Error::custom(e.to_string()))
 }
 
-/// Builds a fully-enriched [`MemberEventMember`] for the given subject, using
-/// best-effort profile/state lookups. Individual fetch failures fall back to
-/// safe defaults so a missing profile never drops the event.
-async fn build_member_event_member(
+/// Resolves the handle and builds the enriched [`MemberEventMemberData`] for
+/// the given subject, using best-effort profile/state lookups. Individual
+/// fetch failures fall back to safe defaults so a missing profile never drops
+/// the event. Shared by `member_event` (an admitted member) and
+/// `application_event` (a pending applicant) construction below.
+async fn build_actor_handle_and_data(
     subject_did: &str,
-    member: &ColibriMember,
     db: DatabaseConnection,
     fetch_record_fn: &FetchRecordFn,
     resolve_handle_fn: &ResolveHandleFn,
     get_state_fn: &GetStateFn,
-) -> MemberEventMember {
+) -> (String, MemberEventMemberData) {
     let handle = resolve_handle_fn(subject_did.to_string())
         .await
         .unwrap_or_else(|_| subject_did.to_string());
@@ -153,29 +156,64 @@ async fn build_member_event_member(
     .ok()
     .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
 
+    let data = MemberEventMemberData {
+        display_name: profile
+            .as_ref()
+            .and_then(|p| p.display_name.clone())
+            .unwrap_or_default(),
+        avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
+        banner: profile.as_ref().and_then(|p| p.banner.clone()),
+        description: profile.as_ref().and_then(|p| p.description.clone()),
+        online_state: state,
+        status: MemberEventMemberStatus {
+            text: actor_data
+                .as_ref()
+                .map(|d| d.status.clone().unwrap_or(String::from("")))
+                .unwrap_or_default(),
+            emoji: actor_data.as_ref().and_then(|d| d.emoji.clone()),
+        },
+    };
+
+    (handle, data)
+}
+
+/// Builds a fully-enriched [`MemberEventMember`] for the given subject, using
+/// best-effort profile/state lookups. Individual fetch failures fall back to
+/// safe defaults so a missing profile never drops the event.
+async fn build_member_event_member(
+    subject_did: &str,
+    member: &ColibriMember,
+    community_authority: &str,
+    db: DatabaseConnection,
+    fetch_record_fn: &FetchRecordFn,
+    resolve_handle_fn: &ResolveHandleFn,
+    get_state_fn: &GetStateFn,
+) -> MemberEventMember {
+    let (handle, data) = build_actor_handle_and_data(
+        subject_did,
+        db,
+        fetch_record_fn,
+        resolve_handle_fn,
+        get_state_fn,
+    )
+    .await;
+
+    // `member.roles` holds bare rkeys (the on-record storage format); clients
+    // compare roles by full AT-URI (see `list_members_handler::build_member`,
+    // which expands the same way), so this event must match.
+    let roles = member
+        .roles
+        .iter()
+        .map(|rkey| format!("at://{community_authority}/social.colibri.role/{rkey}"))
+        .collect();
+
     MemberEventMember {
         did: subject_did.to_string(),
         handle,
-        roles: member.roles.clone(),
+        roles,
         joined_at: member.joined_at.clone(),
         nickname: member.nickname.clone(),
-        data: MemberEventMemberData {
-            display_name: profile
-                .as_ref()
-                .and_then(|p| p.display_name.clone())
-                .unwrap_or_default(),
-            avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
-            banner: profile.as_ref().and_then(|p| p.banner.clone()),
-            description: profile.as_ref().and_then(|p| p.description.clone()),
-            online_state: state,
-            status: MemberEventMemberStatus {
-                text: actor_data
-                    .as_ref()
-                    .map(|d| d.status.clone().unwrap_or(String::from("")))
-                    .unwrap_or_default(),
-                emoji: actor_data.as_ref().and_then(|d| d.emoji.clone()),
-            },
-        },
+        data,
     }
 }
 
@@ -202,6 +240,7 @@ async fn map_tap_event_with(
                         description: Some(record_data.description),
                         name: Some(record_data.name),
                         picture: record_data.picture,
+                        requires_approval_to_join: Some(record_data.requires_approval_to_join),
                     })),
                     is_relevant: true,
                 })
@@ -215,18 +254,23 @@ async fn map_tap_event_with(
                         description: None,
                         name: None,
                         picture: None,
+                        requires_approval_to_join: None,
                     })),
                     is_relevant: true,
                 })
             }
         }
         "social.colibri.membership" => {
-            // Membership is intent recorded on the user's own repo. It does
-            // NOT broadcast: the authoritative "you're now in" / "you're now
-            // out" signal is the community-side `social.colibri.member`
-            // record, handled below.
+            // Membership is intent recorded on the user's own repo. For open
+            // communities it does NOT broadcast on its own: the authoritative
+            // "you're now in" signal is the community-side
+            // `social.colibri.member` record, handled below — auto-admit
+            // writes that record almost immediately. For closed
+            // (`requiresApprovalToJoin`) communities, though, a create here
+            // *is* the moderator-facing signal: it's a new entry in the
+            // pending-applications queue, broadcast as `application_event`.
             //
-            // The one exception is membership-delete for the caller — we
+            // The other exception is membership-delete for the caller — we
             // emit a community-delete event immediately so the user gets
             // instant UX feedback on self-leave, without waiting for the
             // AppView's downstream member-record revoke to round-trip
@@ -251,12 +295,84 @@ async fn map_tap_event_with(
                         description: None,
                         name: None,
                         picture: None,
+                        requires_approval_to_join: None,
                     })),
                     is_relevant: true,
                 });
             }
 
-            Ok(irrelevant_event())
+            if event_record.action == "delete" {
+                // A non-self membership delete (e.g. an applicant withdrew,
+                // or the row was pruned). Nothing pending to resolve client-side
+                // beyond what `member_event`/`community_event` already cover.
+                return Ok(irrelevant_event());
+            }
+
+            // Create: only relevant if it's a *pending* application — i.e. a
+            // closed community that hasn't already auto-admitted it.
+            let record_data = parse_payload::<ColibriMembership>(event_record)?;
+            let Some(community_at_uri) = AtUri::parse(&record_data.community) else {
+                return Ok(irrelevant_event());
+            };
+            // Legacy communities (rkey != "self") have no AppView-held
+            // credentials and are never auto- or manually-admitted — see
+            // `process_membership_create`.
+            if community_at_uri.rkey != "self" {
+                return Ok(irrelevant_event());
+            }
+
+            let Ok(community_json) = fetch_record_fn(
+                community_at_uri.authority.clone(),
+                String::from("social.colibri.community"),
+                String::from("self"),
+                db.clone(),
+            )
+            .await
+            else {
+                return Ok(irrelevant_event());
+            };
+            let Ok(community) = serde_json::from_value::<ColibriCommunity>(community_json) else {
+                return Ok(irrelevant_event());
+            };
+
+            if !community.requires_approval_to_join {
+                // Open community — auto-admit fires a `member_event` separately.
+                return Ok(irrelevant_event());
+            }
+
+            let banned =
+                moderation::is_user_banned(&db, &community_at_uri.authority, &event_record.did)
+                    .await
+                    .unwrap_or(false);
+            if banned {
+                // `process_membership_create` refuses to admit banned users and
+                // writes a `blockedJoin` audit entry instead — surfacing this as
+                // a pending application would let a moderator try to approve it.
+                return Ok(irrelevant_event());
+            }
+
+            let (handle, member_data) = build_actor_handle_and_data(
+                &event_record.did,
+                db.clone(),
+                fetch_record_fn,
+                resolve_handle_fn,
+                get_state_fn,
+            )
+            .await;
+
+            Ok(ColibriServerEvent {
+                event_type: String::from("application_event"),
+                data: Some(ColibriServerEventData::Application(ApplicationEventData {
+                    event: String::from("create"),
+                    community: record_data.community.clone(),
+                    did: Some(event_record.did.clone()),
+                    handle: Some(handle),
+                    membership: uri,
+                    created_at: Some(record_data.created_at.clone()),
+                    data: Some(member_data),
+                })),
+                is_relevant: true,
+            })
         }
         "social.colibri.member" => {
             // `member` is the source of truth for community membership.
@@ -271,6 +387,7 @@ async fn map_tap_event_with(
                 let member = build_member_event_member(
                     &record_data.subject.clone(),
                     &record_data,
+                    &event_record.did,
                     db.clone(),
                     fetch_record_fn,
                     resolve_handle_fn,
@@ -297,6 +414,7 @@ async fn map_tap_event_with(
                 let member = build_member_event_member(
                     &record_data.subject.clone(),
                     &record_data,
+                    &event_record.did,
                     db.clone(),
                     fetch_record_fn,
                     resolve_handle_fn,
@@ -339,6 +457,7 @@ async fn map_tap_event_with(
                         description: None,
                         name: None,
                         picture: None,
+                        requires_approval_to_join: None,
                     })),
                     is_relevant: true,
                 });
@@ -624,8 +743,7 @@ async fn map_tap_event_with(
             })
         }
         "social.colibri.role" => {
-            let community_uri =
-                format!("at://{}/social.colibri.community/self", event_record.did);
+            let community_uri = format!("at://{}/social.colibri.community/self", event_record.did);
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriRole>(event_record)?;
                 Ok(ColibriServerEvent {
@@ -781,6 +899,15 @@ mod tests {
 
         assert_eq!(event.event_type, "community_event");
         assert!(event.is_relevant);
+
+        // The upsert event must forward `requiresApprovalToJoin` so clients can
+        // react to the setting changing without a full refetch.
+        if let Some(ColibriServerEventData::Community(data)) = event.data {
+            assert_eq!(data.event, "upsert");
+            assert_eq!(data.requires_approval_to_join, Some(false));
+        } else {
+            panic!("expected a community event payload");
+        }
     }
 
     #[tokio::test]
@@ -819,22 +946,56 @@ mod tests {
         }
     }
 
+    fn closed_community_json() -> serde_json::Value {
+        json!({
+            "$type": "social.colibri.community",
+            "name": "Closed Club",
+            "description": "desc",
+            "categoryOrder": [],
+            "requiresApprovalToJoin": true
+        })
+    }
+
+    fn open_community_json() -> serde_json::Value {
+        json!({
+            "$type": "social.colibri.community",
+            "name": "Open Club",
+            "description": "desc",
+            "categoryOrder": [],
+            "requiresApprovalToJoin": false
+        })
+    }
+
+    fn membership_record() -> TapMessageRecord {
+        record(
+            "social.colibri.membership",
+            "create",
+            json!({
+                "$type":"social.colibri.membership",
+                "community":"at://did:plc:owner/social.colibri.community/self",
+                "createdAt":"2026-01-01T00:00:00Z"
+            }),
+        )
+    }
+
     #[tokio::test]
-    async fn membership_create_is_irrelevant_in_new_model() {
-        // Intent-only — broadcasts moved to `social.colibri.member` creates.
+    async fn membership_create_for_open_community_is_irrelevant() {
+        // Open communities auto-admit — the broadcast-worthy signal is the
+        // resulting `social.colibri.member` create, handled separately.
         let event = map_tap_event_with(
-            &record(
-                "social.colibri.membership",
-                "create",
-                json!({
-                    "$type":"social.colibri.membership",
-                    "community":"at://did:plc:owner/social.colibri.community/self",
-                    "createdAt":"2026-01-01T00:00:00Z"
-                }),
-            ),
+            &membership_record(),
             "did:plc:abc",
             mock_db(),
-            &no_fetch,
+            &|_, nsid, _, _| {
+                let nsid = nsid.clone();
+                Box::pin(async move {
+                    if nsid == "social.colibri.community" {
+                        Ok(open_community_json())
+                    } else {
+                        Err(serde_json::Error::custom("unexpected nsid"))
+                    }
+                })
+            },
             &no_resolve,
             &no_state,
         )
@@ -843,6 +1004,114 @@ mod tests {
 
         assert_eq!(event.event_type, "empty");
         assert!(!event.is_relevant);
+    }
+
+    #[tokio::test]
+    async fn membership_create_for_banned_user_is_irrelevant() {
+        use crate::models::record_data;
+
+        let banned_record = record_data::Model {
+            id: 1,
+            did: String::from("did:plc:owner"),
+            nsid: String::from("social.colibri.moderation"),
+            rkey: String::from("mod-1"),
+            data: json!({
+                "$type": "social.colibri.moderation",
+                "action": "ban",
+                "subject": { "did": "did:plc:abc" },
+                "createdBy": "did:plc:owner",
+                "createdAt": "2026-01-01T00:00:00Z"
+            }),
+            indexed_at: String::from("2026-01-01T00:00:00Z"),
+        };
+        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+            .append_query_results([vec![banned_record]])
+            .into_connection();
+
+        let event = map_tap_event_with(
+            &membership_record(),
+            "did:plc:abc",
+            db,
+            &|_, nsid, _, _| {
+                let nsid = nsid.clone();
+                Box::pin(async move {
+                    if nsid == "social.colibri.community" {
+                        Ok(closed_community_json())
+                    } else {
+                        Err(serde_json::Error::custom("unexpected nsid"))
+                    }
+                })
+            },
+            &no_resolve,
+            &no_state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(event.event_type, "empty");
+        assert!(!event.is_relevant);
+    }
+
+    #[tokio::test]
+    async fn membership_create_for_closed_community_emits_application_event() {
+        use crate::models::record_data;
+
+        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .into_connection();
+
+        let event = map_tap_event_with(
+            &membership_record(),
+            "did:plc:abc",
+            db,
+            &|_, nsid, _, _| {
+                let nsid = nsid.clone();
+                Box::pin(async move {
+                    match nsid.as_str() {
+                        "social.colibri.community" => Ok(closed_community_json()),
+                        "app.bsky.actor.profile" => Ok(json!({
+                            "displayName": "Alice",
+                            "avatar": { "ref": "blob1" }
+                        })),
+                        "social.colibri.actor.data" => Ok(json!({
+                            "$type": "social.colibri.actor.data",
+                            "status": "Excited",
+                            "emoji": "🎉",
+                            "communities": []
+                        })),
+                        _ => Err(serde_json::Error::custom("unexpected nsid")),
+                    }
+                })
+            },
+            &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+            &|_, _| Box::pin(async { Ok(String::from("online")) }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(event.event_type, "application_event");
+        assert!(event.is_relevant);
+        if let Some(ColibriServerEventData::Application(data)) = event.data {
+            assert_eq!(data.event, "create");
+            assert_eq!(
+                data.community,
+                "at://did:plc:owner/social.colibri.community/self"
+            );
+            assert_eq!(data.did.as_deref(), Some("did:plc:abc"));
+            assert_eq!(data.handle.as_deref(), Some("alice.test"));
+            assert_eq!(
+                data.membership,
+                "at://did:plc:abc/social.colibri.membership/r1"
+            );
+            assert_eq!(data.created_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+            let member_data = data.data.expect("data should be present on create");
+            assert_eq!(member_data.display_name, "Alice");
+            assert_eq!(member_data.online_state, "online");
+            assert_eq!(member_data.status.text, "Excited");
+            assert_eq!(member_data.status.emoji.as_deref(), Some("🎉"));
+        } else {
+            panic!("expected application_event payload");
+        }
     }
 
     #[tokio::test]
@@ -903,7 +1172,10 @@ mod tests {
             let member = data.member.expect("member should be present");
             assert_eq!(member.did, "did:plc:abc");
             assert_eq!(member.handle, "alice.test");
-            assert_eq!(member.roles, vec!["owner-role"]);
+            assert_eq!(
+                member.roles,
+                vec!["at://did:plc:community/social.colibri.role/owner-role"]
+            );
             assert_eq!(member.joined_at, "2026-01-01T00:00:00Z");
             assert_eq!(member.data.display_name, "Alice");
             assert_eq!(member.data.online_state, "online");
@@ -1003,7 +1275,13 @@ mod tests {
             let member = data.member.expect("member should be present");
             assert_eq!(member.did, "did:plc:alice");
             assert_eq!(member.handle, "alice.test");
-            assert_eq!(member.roles, vec!["mod-role", "vip-role"]);
+            assert_eq!(
+                member.roles,
+                vec![
+                    "at://did:plc:community/social.colibri.role/mod-role",
+                    "at://did:plc:community/social.colibri.role/vip-role"
+                ]
+            );
             assert_eq!(member.data.online_state, "online");
         } else {
             panic!("expected member event for roles_updated");

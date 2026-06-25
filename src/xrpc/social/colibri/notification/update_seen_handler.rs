@@ -53,17 +53,18 @@ fn mark_seen_boxed(
     Box::pin(async move { notifications::mark_seen_up_to(&db, &did, &seen_at, &cutoff).await })
 }
 
-#[post("/xrpc/social.colibri.notification.updateSeen?<seen_at>&<auth>")]
+#[post("/xrpc/social.colibri.notification.updateSeen?<seenAt>&<auth>")]
 /// Marks every unseen notification for the authenticated user with
-/// `indexed_at <= seen_at` as seen. Defaults to `now` when `seen_at` is omitted.
+/// `indexed_at <= seenAt` as seen. Defaults to `now` when `seenAt` is omitted.
+#[allow(non_snake_case)]
 pub async fn update_seen(
-    seen_at: Option<&str>,
+    seenAt: Option<&str>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<UpdateSeenResponse>, ErrorResponse> {
     update_seen_with(
         auth.to_string(),
-        seen_at.map(|s| s.to_string()),
+        seenAt.map(|s| s.to_string()),
         db.inner().clone(),
         &verify_auth_boxed,
         &mark_seen_boxed,

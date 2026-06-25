@@ -63,8 +63,6 @@ pub const MODERATION_NSID: &str = "social.colibri.moderation";
 pub const ACTION_BAN: &str = "ban";
 pub const ACTION_UNBAN: &str = "unban";
 pub const ACTION_HIDE_MESSAGE: &str = "hideMessage";
-/// Placeholder for an `unhideMessage` endpoint that isn't wired up yet.
-#[allow(dead_code)]
 pub const ACTION_UNHIDE_MESSAGE: &str = "unhideMessage";
 pub const ACTION_KICK: &str = "kick";
 /// System-issued audit entry recorded when a currently-banned user writes a
@@ -203,12 +201,23 @@ fn pds_error_to_db_err(e: PdsError) -> DbErr {
     DbErr::Custom(format!("pds write failed: {e}"))
 }
 
-/// Computes the set of DIDs currently banned in a community by replaying every
-/// `ban`/`unban` moderation event in createdAt order.
-pub async fn currently_banned_dids(
+/// The effective moderation state of a community, derived by replaying its
+/// `social.colibri.moderation` log: which user DIDs are currently banned and
+/// which message AT-URIs are currently hidden.
+#[derive(Debug, Default)]
+pub struct ModerationState {
+    pub banned_dids: HashSet<String>,
+    pub hidden_message_uris: HashSet<String>,
+}
+
+/// Replays every moderation event for a community in rkey (≈ createdAt) order
+/// and folds it into the effective [`ModerationState`]. A single table scan
+/// covers both ban/unban and hideMessage/unhideMessage so callers needing both
+/// don't pay for two queries.
+pub async fn community_moderation_state(
     db: &DatabaseConnection,
     community_did: &str,
-) -> Result<Vec<String>, DbErr> {
+) -> Result<ModerationState, DbErr> {
     let records = record_data::Entity::find()
         .filter(record_data::Column::Did.eq(community_did))
         .filter(record_data::Column::Nsid.eq(MODERATION_NSID))
@@ -216,25 +225,49 @@ pub async fn currently_banned_dids(
         .all(db)
         .await?;
 
-    let mut banned: HashSet<String> = HashSet::new();
+    let mut state = ModerationState::default();
     for record in records {
         let Ok(mod_record) = serde_json::from_value::<ColibriModeration>(record.data) else {
             continue;
         };
-        let Some(did) = mod_record.subject.did else {
-            continue;
-        };
         match mod_record.action.as_str() {
             ACTION_BAN => {
-                banned.insert(did);
+                if let Some(did) = mod_record.subject.did {
+                    state.banned_dids.insert(did);
+                }
             }
             ACTION_UNBAN => {
-                banned.remove(&did);
+                if let Some(did) = mod_record.subject.did {
+                    state.banned_dids.remove(&did);
+                }
+            }
+            ACTION_HIDE_MESSAGE => {
+                if let Some(uri) = mod_record.subject.uri {
+                    state.hidden_message_uris.insert(uri);
+                }
+            }
+            ACTION_UNHIDE_MESSAGE => {
+                if let Some(uri) = mod_record.subject.uri {
+                    state.hidden_message_uris.remove(&uri);
+                }
             }
             _ => {}
         }
     }
-    let mut result: Vec<String> = banned.into_iter().collect();
+    Ok(state)
+}
+
+/// Computes the set of DIDs currently banned in a community by replaying every
+/// `ban`/`unban` moderation event in createdAt order.
+pub async fn currently_banned_dids(
+    db: &DatabaseConnection,
+    community_did: &str,
+) -> Result<Vec<String>, DbErr> {
+    let mut result: Vec<String> = community_moderation_state(db, community_did)
+        .await?
+        .banned_dids
+        .into_iter()
+        .collect();
     result.sort();
     Ok(result)
 }
@@ -473,6 +506,7 @@ pub fn latest_action_for_did(records: &[ColibriModeration], did: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::tokio;
 
     fn record(action: &str, did: &str) -> ColibriModeration {
         ColibriModeration {
@@ -497,6 +531,81 @@ mod tests {
         assert_eq!(
             latest_action_for_did(&log, "did:plc:alice"),
             Some(String::from("unban"))
+        );
+    }
+
+    /// Builds a `record_data::Model` row wrapping the given moderation payload,
+    /// as it would be returned by the mock DB.
+    fn mod_row(
+        rkey: &str,
+        action: &str,
+        did: Option<&str>,
+        uri: Option<&str>,
+    ) -> record_data::Model {
+        let payload = ColibriModeration {
+            record_type: Some(MODERATION_NSID.to_string()),
+            action: action.to_string(),
+            subject: ColibriModerationSubject {
+                did: did.map(String::from),
+                uri: uri.map(String::from),
+            },
+            reason: None,
+            created_by: String::from("did:plc:owner"),
+            created_at: String::from("2026-05-13T00:00:00Z"),
+        };
+        record_data::Model {
+            id: 0,
+            did: String::from("did:plc:owner"),
+            nsid: MODERATION_NSID.to_string(),
+            rkey: rkey.to_string(),
+            data: serde_json::to_value(payload).unwrap(),
+            indexed_at: String::from("2026-05-13T00:00:00.000Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn moderation_state_folds_bans_and_hidden_messages() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+
+        let rows = vec![
+            mod_row("r1", ACTION_BAN, Some("did:plc:alice"), None),
+            mod_row(
+                "r2",
+                ACTION_HIDE_MESSAGE,
+                None,
+                Some("at://did:plc:bob/social.colibri.message/m1"),
+            ),
+            mod_row("r3", ACTION_UNBAN, Some("did:plc:alice"), None),
+            mod_row(
+                "r4",
+                ACTION_HIDE_MESSAGE,
+                None,
+                Some("at://did:plc:carol/social.colibri.message/m2"),
+            ),
+            // Unhide reverses the earlier hide of m1.
+            mod_row(
+                "r5",
+                ACTION_UNHIDE_MESSAGE,
+                None,
+                Some("at://did:plc:bob/social.colibri.message/m1"),
+            ),
+        ];
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([rows])
+            .into_connection();
+
+        let state = community_moderation_state(&db, "did:plc:owner")
+            .await
+            .unwrap();
+
+        // alice was banned then unbanned -> not banned.
+        assert!(state.banned_dids.is_empty());
+        // m1 was hidden then unhidden; only m2 remains hidden.
+        assert_eq!(state.hidden_message_uris.len(), 1);
+        assert!(
+            state
+                .hidden_message_uris
+                .contains("at://did:plc:carol/social.colibri.message/m2")
         );
     }
 

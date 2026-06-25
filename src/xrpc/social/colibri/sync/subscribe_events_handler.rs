@@ -1,7 +1,7 @@
 use crate::EventNotification;
 use crate::lib::events::{
-    ColibriClientEventData, ColibriServerEventData, NotificationEventData,
-    NotificationEventMessage, TypingEventData,
+    ColibriClientEventData, ColibriServerEventData, MuteEvent, NotificationEventData,
+    NotificationEventMessage, SeenEvent, TypingEventData,
 };
 use crate::lib::get_state::get_did_states;
 use crate::lib::map_tap_event::map_tap_event;
@@ -292,6 +292,94 @@ async fn handle_notification_msg(
     }
 }
 
+/// Forwards a handler-originated `application_event` as-is — these are
+/// already fully built by the handler that emitted them (see
+/// `CommsBridge::applications`), so there's nothing to enrich or filter
+/// here. Broadcast to every connected client; they scope by `community`.
+async fn handle_application_msg(
+    ws_sink: &mut WsSink,
+    msg: Result<ColibriServerEvent, RecvError>,
+) -> bool {
+    match msg {
+        Ok(event) => {
+            let _ = ws_sink.send(WsMessage::Text(event.serialize())).await;
+            true
+        }
+        Err(e) => {
+            eprintln!("Application broadcast error: {e}");
+            false
+        }
+    }
+}
+
+/// Builds the `seen_event` payload for a subscriber, or `None` if the event
+/// belongs to a different user — a `seen_event` is delivered only to the
+/// originating user's own connections (cross-device read-state sync).
+fn serialize_seen_for(seen: SeenEvent, did: &str) -> Option<String> {
+    if seen.recipient_did != did {
+        return None;
+    }
+    let event = ColibriServerEvent {
+        event_type: String::from("seen_event"),
+        data: Some(ColibriServerEventData::Seen(seen.data)),
+        is_relevant: true,
+    };
+    Some(event.serialize())
+}
+
+async fn handle_seen_msg(
+    ws_sink: &mut WsSink,
+    msg: Result<SeenEvent, RecvError>,
+    did: &str,
+) -> bool {
+    match msg {
+        Ok(seen) => {
+            if let Some(payload) = serialize_seen_for(seen, did) {
+                let _ = ws_sink.send(WsMessage::Text(payload)).await;
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Seen broadcast error: {e}");
+            false
+        }
+    }
+}
+
+/// Builds the `mute_event` payload for a subscriber, or `None` if the event
+/// belongs to a different user — a `mute_event` is delivered only to the
+/// originating user's own connections (cross-device mute sync).
+fn serialize_mute_for(mute: MuteEvent, did: &str) -> Option<String> {
+    if mute.recipient_did != did {
+        return None;
+    }
+    let event = ColibriServerEvent {
+        event_type: String::from("mute_event"),
+        data: Some(ColibriServerEventData::Mute(mute.data)),
+        is_relevant: true,
+    };
+    Some(event.serialize())
+}
+
+async fn handle_mute_msg(
+    ws_sink: &mut WsSink,
+    msg: Result<MuteEvent, RecvError>,
+    did: &str,
+) -> bool {
+    match msg {
+        Ok(mute) => {
+            if let Some(payload) = serialize_mute_for(mute, did) {
+                let _ = ws_sink.send(WsMessage::Text(payload)).await;
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("Mute broadcast error: {e}");
+            false
+        }
+    }
+}
+
 /// Handles the event loop and allows both messages from Tap and the Client to get processed.
 #[allow(clippy::too_many_arguments)]
 async fn run_event_loop(
@@ -303,11 +391,17 @@ async fn run_event_loop(
     to_c2c_broadcast: Sender<EventNotification>,
     from_c2c_broadcast: Receiver<EventNotification>,
     from_notifications: Receiver<IndexedNotification>,
+    from_applications: Receiver<ColibriServerEvent>,
+    from_seen: Receiver<SeenEvent>,
+    from_mute: Receiver<MuteEvent>,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
     let mut from_tap = from_tap;
     let mut from_c2c_broadcast = from_c2c_broadcast;
     let mut from_notifications = from_notifications;
+    let mut from_applications = from_applications;
+    let mut from_seen = from_seen;
+    let mut from_mute = from_mute;
 
     save_state(&db, did.clone(), String::from("online")).await;
     register_dids(vec![did.clone()]).await;
@@ -319,6 +413,9 @@ async fn run_event_loop(
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &db).await,
             msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
             msg = from_notifications.recv() => handle_notification_msg(&mut ws_sink, msg, &did).await,
+            msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg).await,
+            msg = from_seen.recv() => handle_seen_msg(&mut ws_sink, msg, &did).await,
+            msg = from_mute.recv() => handle_mute_msg(&mut ws_sink, msg, &did).await,
         };
 
         if !connected {
@@ -354,6 +451,9 @@ pub async fn subscribe_events(
     let from_tap = bridge.broadcast.subscribe();
     let to_tap_broadcast = bridge.broadcast.clone();
     let from_notifications = bridge.notifications.subscribe();
+    let from_applications = bridge.applications.subscribe();
+    let from_seen = bridge.seen.subscribe();
+    let from_mute = bridge.mute.subscribe();
 
     let to_c2c_broadcast = c2c_broadcast_channel.0.clone();
     let from_c2c_broadcast = to_c2c_broadcast.subscribe();
@@ -369,6 +469,9 @@ pub async fn subscribe_events(
                 to_c2c_broadcast,
                 from_c2c_broadcast,
                 from_notifications,
+                from_applications,
+                from_seen,
+                from_mute,
             )
             .await;
             Ok(())

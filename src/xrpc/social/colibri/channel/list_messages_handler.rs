@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::ColibriActorData;
-use crate::lib::moderation::currently_banned_dids;
+use crate::lib::moderation::community_moderation_state;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::{record_data, repos, user_states};
@@ -216,6 +216,11 @@ async fn fetch_legacy_parent_records(
     Ok(parents.into_iter().map(|p| (p.rkey.clone(), p)).collect())
 }
 
+/// Canonical AT-URI `"at://{did}/{nsid}/{rkey}"` for a stored record.
+fn record_uri(record: &record_data::Model) -> String {
+    format!("at://{}/{}/{}", record.did, record.nsid, record.rkey)
+}
+
 fn build_author(
     did: String,
     handle: Option<String>,
@@ -302,6 +307,7 @@ pub async fn assemble_message_page(
     channel: &AtUri,
     limit: u64,
     cursor: Option<&str>,
+    include_hidden: bool,
 ) -> Result<MessagePage, DbErr> {
     let channel_record = fetch_channel_record(db, &channel.authority, &channel.rkey).await?;
     let community_uri = channel_record
@@ -314,10 +320,13 @@ pub async fn assemble_message_page(
         })
         .unwrap_or_default();
 
-    let banned: HashSet<String> = currently_banned_dids(db, &channel.authority)
-        .await?
-        .into_iter()
-        .collect();
+    // Single scan of the moderation log yields both banned authors and hidden
+    // message URIs. Banned authors are always filtered; hidden messages are
+    // filtered unless the caller explicitly asks to include them.
+    let moderation = community_moderation_state(db, &channel.authority).await?;
+    let banned = &moderation.banned_dids;
+    let hidden = &moderation.hidden_message_uris;
+    let is_hidden = |r: &record_data::Model| !include_hidden && hidden.contains(&record_uri(r));
 
     let channel_uri = format!(
         "at://{}/{}/{}",
@@ -326,7 +335,7 @@ pub async fn assemble_message_page(
     let raw_records = fetch_message_page(db, &channel_uri, &channel.rkey, limit, cursor).await?;
     let records: Vec<record_data::Model> = raw_records
         .into_iter()
-        .filter(|r| !banned.contains(&r.did))
+        .filter(|r| !banned.contains(&r.did) && !is_hidden(r))
         .collect();
 
     // Split parent values: full AT-URIs (new) vs bare rkeys (legacy).
@@ -348,14 +357,14 @@ pub async fn assemble_message_page(
         fetch_parent_records(db, &parent_uris)
             .await?
             .into_iter()
-            .filter(|(_, r)| !banned.contains(&r.did))
+            .filter(|(_, r)| !banned.contains(&r.did) && !is_hidden(r))
             .collect();
 
     let legacy_records =
         fetch_legacy_parent_records(db, &channel_uri, &channel.rkey, &legacy_parent_rkeys)
             .await?
             .into_iter()
-            .filter(|(_, r)| !banned.contains(&r.did));
+            .filter(|(_, r)| !banned.contains(&r.did) && !is_hidden(r));
     parent_records.extend(legacy_records);
 
     // Fetch reactions for page messages and their parents in one round-trip.
@@ -365,7 +374,7 @@ pub async fn assemble_message_page(
         .chain(parent_records.values().map(|r| r.rkey.clone()))
         .collect();
     let reactions =
-        strip_banned_reactors(group_reactions_for_messages(db, &all_rkeys).await?, &banned);
+        strip_banned_reactors(group_reactions_for_messages(db, &all_rkeys).await?, banned);
 
     // Collect unique author DIDs from page messages and their parents.
     let mut author_dids: Vec<String> = records
@@ -476,6 +485,7 @@ type AssemblePageFn = dyn Fn(
         AtUri,
         u64,
         Option<String>,
+        bool,
     ) -> BoxFuture<'static, Result<MessagePage, DbErr>>
     + Send
     + Sync;
@@ -484,6 +494,7 @@ async fn list_messages_with(
     channel_uri: String,
     limit: Option<u64>,
     cursor: Option<String>,
+    include_hidden: bool,
     db: DatabaseConnection,
     assemble_fn: &AssemblePageFn,
 ) -> Result<Json<MessageList>, ErrorResponse> {
@@ -495,7 +506,7 @@ async fn list_messages_with(
     })?;
 
     let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
-    let page = assemble_fn(db, channel, effective_limit, cursor).await?;
+    let page = assemble_fn(db, channel, effective_limit, cursor, include_hidden).await?;
 
     let next_cursor = if (page.records.len() as u64) == effective_limit {
         page.records.last().map(|r| r.rkey.clone())
@@ -566,15 +577,18 @@ fn assemble_message_page_boxed(
     channel: AtUri,
     limit: u64,
     cursor: Option<String>,
+    include_hidden: bool,
 ) -> BoxFuture<'static, Result<MessagePage, DbErr>> {
-    Box::pin(async move { assemble_message_page(&db, &channel, limit, cursor.as_deref()).await })
+    Box::pin(async move {
+        assemble_message_page(&db, &channel, limit, cursor.as_deref(), include_hidden).await
+    })
 }
 
 #[get("/xrpc/social.colibri.channel.listMessages?<channel>&<limit>&<cursor>&<all>")]
 /// Returns a paginated list of messages for a channel, newest first.
 ///
-/// The `all` parameter is accepted to match the spec but is reserved for
-/// future filtering (e.g. including blocked messages).
+/// Messages hidden by a `hideMessage` moderation action are filtered out by
+/// default. Passing `all=true` includes them (e.g. for moderator views).
 pub async fn list_messages(
     channel: &str,
     limit: Option<u64>,
@@ -582,11 +596,11 @@ pub async fn list_messages(
     all: Option<bool>,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<MessageList>, ErrorResponse> {
-    let _ = all;
     list_messages_with(
         channel.to_string(),
         limit,
         cursor.map(|c| c.to_string()),
+        all.unwrap_or(false),
         db.inner().clone(),
         &assemble_message_page_boxed,
     )
@@ -631,8 +645,9 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             Some(2),
             None,
+            false,
             db,
-            &|_, _, _, _| {
+            &|_, _, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
                         records: vec![
@@ -715,8 +730,9 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             Some(10),
             None,
+            false,
             db,
-            &|_, _, _, _| {
+            &|_, _, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
                         records: vec![message_record("msg-1", "did:plc:alice", "hello", None)],
@@ -770,11 +786,15 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_channel_uri() {
         let db = mock_db();
-        let result =
-            list_messages_with(String::from("not-a-uri"), None, None, db, &|_, _, _, _| {
-                Box::pin(async { panic!("should not assemble when uri is invalid") })
-            })
-            .await;
+        let result = list_messages_with(
+            String::from("not-a-uri"),
+            None,
+            None,
+            false,
+            db,
+            &|_, _, _, _, _| Box::pin(async { panic!("should not assemble when uri is invalid") }),
+        )
+        .await;
 
         assert!(result.is_err());
         assert_eq!(

@@ -32,6 +32,7 @@ use crate::lib::colibri::{ColibriActorData, ColibriMembership};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
+use crate::lib::moderation::currently_banned_dids;
 use crate::lib::permissions::Permission;
 use crate::lib::responses::ErrorResponse;
 use crate::models::{record_data, repos, user_states};
@@ -55,6 +56,12 @@ pub struct Application {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ApplicationList {
     pub applications: Vec<Application>,
+    /// Applications a moderator has hidden from the active queue via
+    /// `dismissApplication`. Off-protocol bookkeeping only — surfaced here so
+    /// a moderator UI can show/restore them without losing track of who
+    /// applied. Still pending as far as the protocol is concerned.
+    #[serde(rename = "dismissedApplications")]
+    pub dismissed_applications: Vec<Application>,
 }
 
 /// A pending applicant: the membership record that's awaiting approval, keyed
@@ -110,10 +117,17 @@ pub async fn fetch_application_aggregate(
         })
         .collect();
 
+    // Banned users shouldn't surface as pending applicants — a moderator can't
+    // act on them here, and approving one would be contradicted by the ban.
+    let banned: std::collections::HashSet<String> = currently_banned_dids(db, community_authority)
+        .await?
+        .into_iter()
+        .collect();
+
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut applicants: Vec<PendingApplicant> = Vec::new();
     for row in memberships {
-        if admitted.contains(&row.did) {
+        if admitted.contains(&row.did) || banned.contains(&row.did) {
             continue;
         }
         // One application per applicant — keep the first indexed membership if a
@@ -278,6 +292,24 @@ pub fn fetch_aggregate_boxed(
     )
 }
 
+/// Trait-object seam for fetching the set of dismissed applicant DIDs for a
+/// community. Args are `(db, community_authority)`.
+pub type DismissedDidsFn = dyn Fn(
+        DatabaseConnection,
+        String,
+    ) -> BoxFuture<'static, Result<std::collections::HashSet<String>, DbErr>>
+    + Send
+    + Sync;
+
+pub fn dismissed_dids_boxed(
+    db: DatabaseConnection,
+    community_authority: String,
+) -> BoxFuture<'static, Result<std::collections::HashSet<String>, DbErr>> {
+    Box::pin(async move {
+        crate::lib::dismissed_applications::dismissed_dids(&db, &community_authority).await
+    })
+}
+
 async fn list_applications_with(
     community_uri: String,
     auth: String,
@@ -285,6 +317,7 @@ async fn list_applications_with(
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
     fetch_aggregate_fn: &FetchAggregateFn,
+    dismissed_dids_fn: &DismissedDidsFn,
 ) -> Result<Json<ApplicationList>, ErrorResponse> {
     with_community_authz(
         auth,
@@ -296,13 +329,21 @@ async fn list_applications_with(
         load_authz_fn,
         move |ctx, db| async move {
             let aggregate = fetch_aggregate_fn(
-                db,
+                db.clone(),
                 ctx.community.authority.clone(),
                 ctx.community_uri.clone(),
             )
             .await?;
+            let dismissed = dismissed_dids_fn(db, ctx.community.authority.clone()).await?;
+
+            let (dismissed_applications, applications): (Vec<Application>, Vec<Application>) =
+                build_applications(aggregate)
+                    .into_iter()
+                    .partition(|app| dismissed.contains(&app.did));
+
             Ok(Json(ApplicationList {
-                applications: build_applications(aggregate),
+                applications,
+                dismissed_applications,
             }))
         },
     )
@@ -311,7 +352,8 @@ async fn list_applications_with(
 
 #[get("/xrpc/social.colibri.community.listApplications?<community>&<auth>")]
 /// Lists the pending join applications for a community awaiting moderator
-/// approval. Requires the caller to hold the `approval.manage` permission.
+/// approval, split into the active queue and the moderator-dismissed set.
+/// Requires the caller to hold the `approval.manage` permission.
 pub async fn list_applications(
     community: &str,
     auth: &str,
@@ -324,8 +366,29 @@ pub async fn list_applications(
         &verify_auth_boxed,
         &load_authz_boxed,
         &fetch_aggregate_boxed,
+        &dismissed_dids_boxed,
     )
     .await
+}
+
+/// Finds a single applicant's pending application by DID, if one exists
+/// (not admitted, not banned — see `fetch_application_aggregate`). Used by
+/// the kick handler to re-surface a kicked member as a pending application
+/// when their original `social.colibri.membership` is still on file.
+///
+/// Reuses the full aggregate fetch rather than a narrower single-applicant
+/// query — community sizes here are modest, and this keeps the "what counts
+/// as pending" logic in exactly one place.
+pub async fn find_application_for_did(
+    db: &DatabaseConnection,
+    community_authority: &str,
+    community_uri: &str,
+    did: &str,
+) -> Result<Option<Application>, DbErr> {
+    let aggregate = fetch_application_aggregate(db, community_authority, community_uri).await?;
+    Ok(build_applications(aggregate)
+        .into_iter()
+        .find(|app| app.did == did))
 }
 
 #[cfg(test)]
@@ -446,6 +509,7 @@ mod tests {
                     }]))
                 })
             },
+            &|_, _| Box::pin(async { Ok(std::collections::HashSet::new()) }),
         )
         .await
         .unwrap();
@@ -456,6 +520,61 @@ mod tests {
             result.applications[0].membership,
             "at://did:plc:applicant/social.colibri.membership/m1"
         );
+        assert!(result.dismissed_applications.is_empty());
+    }
+
+    #[tokio::test]
+    async fn splits_dismissed_applicants_out_of_the_active_queue() {
+        let db = mock_db();
+        let result = list_applications_with(
+            String::from("at://did:plc:community/social.colibri.community/self"),
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_, _, _| {
+                Box::pin(async {
+                    Ok(ActorAuthz {
+                        is_owner: false,
+                        member: Some(member("did:plc:mod", vec!["r1"])),
+                        roles: vec![role("Moderator", 10, vec![Permission::ApprovalManage])],
+                    })
+                })
+            },
+            &|_, _, _| {
+                Box::pin(async {
+                    Ok(empty_aggregate(vec![
+                        PendingApplicant {
+                            did: String::from("did:plc:active"),
+                            membership_uri: String::from(
+                                "at://did:plc:active/social.colibri.membership/m1",
+                            ),
+                            created_at: String::from("2026-03-03T00:00:00Z"),
+                        },
+                        PendingApplicant {
+                            did: String::from("did:plc:dismissed"),
+                            membership_uri: String::from(
+                                "at://did:plc:dismissed/social.colibri.membership/m2",
+                            ),
+                            created_at: String::from("2026-03-04T00:00:00Z"),
+                        },
+                    ]))
+                })
+            },
+            &|_, _| {
+                Box::pin(async {
+                    Ok(std::collections::HashSet::from([String::from(
+                        "did:plc:dismissed",
+                    )]))
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.applications.len(), 1);
+        assert_eq!(result.applications[0].did, "did:plc:active");
+        assert_eq!(result.dismissed_applications.len(), 1);
+        assert_eq!(result.dismissed_applications[0].did, "did:plc:dismissed");
     }
 
     #[tokio::test]
@@ -476,6 +595,7 @@ mod tests {
                 })
             },
             &|_, _, _| Box::pin(async { panic!("should not fetch applications") }),
+            &|_, _| Box::pin(async { panic!("should not fetch dismissed dids") }),
         )
         .await;
 
@@ -492,6 +612,7 @@ mod tests {
             &|_, _| Box::pin(async { panic!("should not authenticate") }),
             &|_, _, _| Box::pin(async { panic!("should not load authz") }),
             &|_, _, _| Box::pin(async { panic!("should not fetch applications") }),
+            &|_, _| Box::pin(async { panic!("should not fetch dismissed dids") }),
         )
         .await;
 

@@ -86,6 +86,17 @@ async fn rocket() -> _ {
         .expect("CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key");
     crypto::install_master_key(master_key).expect("master key already installed");
 
+    // Web Push is optional. Surface at boot whether it's configured so a
+    // missing keypair (→ no background push) is obvious in the logs rather
+    // than a silent no-op per notification.
+    if lib::vapid_config::is_configured() {
+        log::info!("Web Push enabled (VAPID keypair configured).");
+    } else {
+        log::warn!(
+            "Web Push disabled: set VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY to enable background push."
+        );
+    }
+
     let cors = CorsOptions::default()
         .allowed_origins(AllowedOrigins::all())
         .allowed_methods(
@@ -105,10 +116,20 @@ async fn rocket() -> _ {
 
     let (notification_broadcast, _) = broadcast::channel::<IndexedNotification>(128);
 
+    let (application_broadcast, _) =
+        broadcast::channel::<crate::lib::events::ColibriServerEvent>(128);
+
+    let (seen_broadcast, _) = broadcast::channel::<crate::lib::events::SeenEvent>(128);
+
+    let (mute_broadcast, _) = broadcast::channel::<crate::lib::events::MuteEvent>(128);
+
     let tap_bridge = CommsBridge {
         channel: to_tap.clone(),
         broadcast: from_tap_broadcast.clone(),
         notifications: notification_broadcast.clone(),
+        applications: application_broadcast,
+        seen: seen_broadcast.clone(),
+        mute: mute_broadcast.clone(),
     };
 
     let db = match init_db().await {
@@ -134,6 +155,8 @@ async fn rocket() -> _ {
         from_tap_broadcast,
         to_tap,
         notification_broadcast,
+        seen_broadcast,
+        mute_broadcast,
     ));
 
     rocket::build()
@@ -150,28 +173,33 @@ async fn rocket() -> _ {
                 xrpc::com::atproto::sync::list_records,
                 xrpc::social::colibri::actor::get_data,
                 xrpc::social::colibri::actor::list_communities,
+                xrpc::social::colibri::actor::list_mutes,
                 xrpc::social::colibri::actor::set_state,
                 xrpc::social::colibri::channel::create_channel,
                 xrpc::social::colibri::channel::delete_channel,
                 xrpc::social::colibri::channel::get_read_cursor,
                 xrpc::social::colibri::channel::list_messages,
                 xrpc::social::colibri::channel::list_reactions,
+                xrpc::social::colibri::channel::list_unread_status,
                 xrpc::social::colibri::channel::update_channel,
+                xrpc::social::colibri::embed::get_metadata,
+                xrpc::social::colibri::embed::get_image,
                 xrpc::social::colibri::community::approve_membership,
+                xrpc::social::colibri::community::ban_user,
                 xrpc::social::colibri::community::block_message,
-                xrpc::social::colibri::community::block_user,
                 xrpc::social::colibri::community::create,
                 xrpc::social::colibri::community::create_category,
                 xrpc::social::colibri::community::create_invitation,
                 xrpc::social::colibri::community::delete_category,
                 xrpc::social::colibri::community::delete_community,
                 xrpc::social::colibri::community::delete_invitation,
+                xrpc::social::colibri::community::dismiss_application,
                 xrpc::social::colibri::community::get_data,
                 xrpc::social::colibri::community::get_invitation,
                 xrpc::social::colibri::community::kick,
                 xrpc::social::colibri::community::kick_user,
                 xrpc::social::colibri::community::list_applications,
-                xrpc::social::colibri::community::list_blocked_users,
+                xrpc::social::colibri::community::list_banned_users,
                 xrpc::social::colibri::community::list_categories,
                 xrpc::social::colibri::community::list_channels,
                 xrpc::social::colibri::community::list_invitations,
@@ -183,13 +211,18 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::community::reorder_categories,
                 xrpc::social::colibri::community::reorder_channels,
                 xrpc::social::colibri::community::set_member_roles,
-                xrpc::social::colibri::community::unblock_user,
+                xrpc::social::colibri::community::unban_user,
+                xrpc::social::colibri::community::undismiss_application,
                 xrpc::social::colibri::community::update_category,
                 xrpc::social::colibri::community::update_community,
                 xrpc::social::colibri::community::update_role,
                 xrpc::social::colibri::notification::get_unread_count,
+                xrpc::social::colibri::notification::get_unseen,
                 xrpc::social::colibri::notification::list_notifications,
+                xrpc::social::colibri::notification::register_push,
+                xrpc::social::colibri::notification::unregister_push,
                 xrpc::social::colibri::notification::update_seen,
+                xrpc::social::colibri::notification::update_seen_for_message,
                 xrpc::social::colibri::sync::subscribe_events,
             ],
         )
@@ -198,5 +231,6 @@ async fn rocket() -> _ {
         .attach(init_seaorm(db))
         .manage(tap_bridge)
         .manage(c2c_broadcast_channel)
+        .manage(crate::lib::embed_cache::EmbedCache::default())
         .manage(safe_cors)
 }

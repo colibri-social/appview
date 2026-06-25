@@ -38,7 +38,7 @@ impl Permission {
             Permission::ChannelCreate => "channel.create",
             Permission::ChannelUpdate => "channel.update",
             Permission::ChannelDelete => "channel.delete",
-            Permission::MessageDelete => "message.delete",
+            Permission::MessageDelete => "message.hide",
             Permission::MemberKick => "member.kick",
             Permission::MemberBan => "member.ban",
             Permission::MemberUnban => "member.unban",

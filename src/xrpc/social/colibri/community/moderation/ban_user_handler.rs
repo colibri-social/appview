@@ -1,10 +1,12 @@
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
 use crate::lib::colibri::ColibriModerationSubject;
+use crate::lib::community_record::fetch_community_record;
+use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -14,10 +16,14 @@ use crate::lib::moderation::{
 };
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::tap::CommsBridge;
 use crate::xrpc::com::atproto::identity::resolve_identity;
+use crate::xrpc::social::colibri::community::list_applications_handler::{
+    Application, find_application_for_did,
+};
 
 #[derive(Serialize, Debug)]
-pub struct BlockUserResponse {
+pub struct BanUserResponse {
     pub did: String,
     pub handle: String,
 }
@@ -38,8 +44,54 @@ pub async fn resolve_did_and_handle(identifier: &str) -> Result<(String, String)
 type ResolveFn =
     dyn Fn(String) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> + Send + Sync;
 
-/// Common moderation handler entry point used by both blockUser and
-/// unblockUser. `action` toggles between writing a `ban` or `unban` record.
+/// Trait-object seam for checking whether a community currently requires
+/// approval to join. Args are `(db, community_authority)`.
+type RequiresApprovalFn =
+    dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<bool, DbErr>> + Send + Sync;
+
+/// Trait-object seam for finding a kicked member's still-pending application
+/// (i.e. their original `social.colibri.membership` is still on file). Args
+/// are `(db, community_authority, community_uri, did)`.
+type FindApplicationFn = dyn Fn(
+        DatabaseConnection,
+        String,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<Option<Application>, DbErr>>
+    + Send
+    + Sync;
+
+/// Trait-object seam for the broadcast side effect — synchronous, since
+/// `broadcast::Sender::send` doesn't need to await anything.
+type BroadcastFn = dyn Fn(ColibriServerEvent) + Send + Sync;
+
+fn requires_approval_boxed(
+    db: DatabaseConnection,
+    community_authority: String,
+) -> BoxFuture<'static, Result<bool, DbErr>> {
+    Box::pin(async move {
+        let community = fetch_community_record(&db, &community_authority, "self")
+            .await
+            .map_err(|e| DbErr::Custom(e.to_string()))?;
+        Ok(community
+            .map(|c| c.requires_approval_to_join)
+            .unwrap_or(false))
+    })
+}
+
+fn find_application_boxed(
+    db: DatabaseConnection,
+    community_authority: String,
+    community_uri: String,
+    did: String,
+) -> BoxFuture<'static, Result<Option<Application>, DbErr>> {
+    Box::pin(async move {
+        find_application_for_did(&db, &community_authority, &community_uri, &did).await
+    })
+}
+
+/// Common moderation handler entry point used by both banUser and
+/// unbanUser. `action` toggles between writing a `ban` or `unban` record.
 ///
 /// The shared authz prelude (parse URI → verify auth → load authz → check
 /// permission) goes through [`with_community_authz`]. The hierarchy guard
@@ -59,7 +111,10 @@ async fn moderate_user_with(
     load_authz_fn: &LoadAuthzFn,
     write_record_fn: &WriteRecordFn,
     revoke_member_fn: &RevokeMemberFn,
-) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    requires_approval_fn: &RequiresApprovalFn,
+    find_application_fn: &FindApplicationFn,
+    broadcast_fn: &BroadcastFn,
+) -> Result<Json<BanUserResponse>, ErrorResponse> {
     let (target_did, target_handle) = resolve_fn(identifier).await?;
     let target_did_for_body = target_did.clone();
 
@@ -95,6 +150,7 @@ async fn moderate_user_with(
             }
 
             let community_did_for_revoke = ctx.community.authority.clone();
+            let community_uri_for_resurface = ctx.community_uri.clone();
             moderation::issue_action(
                 write_record_fn,
                 db.clone(),
@@ -113,17 +169,45 @@ async fn moderate_user_with(
             // record. The moderation event is the source of truth for ban
             // state; if the PDS write fails the record stays put but the
             // user is already filtered out at read time.
-            if (action == ACTION_BAN || action == ACTION_KICK)
-                && let Err(e) =
-                    revoke_member_fn(db, community_did_for_revoke, target_did_for_body.clone())
-                        .await
-            {
-                log::warn!(
-                    "member-record revoke failed for {target_did_for_body} after {action}: {e}"
-                );
+            if action == ACTION_BAN || action == ACTION_KICK {
+                let revoked = revoke_member_fn(
+                    db.clone(),
+                    community_did_for_revoke.clone(),
+                    target_did_for_body.clone(),
+                )
+                .await;
+
+                match revoked {
+                    Ok(_) if action == ACTION_KICK => {
+                        // Unlike a ban, a kick doesn't touch the kicked user's
+                        // original `social.colibri.membership` intent record —
+                        // it's still on file. If this community currently
+                        // requires approval, that means the kick just turned
+                        // them back into a pending applicant (the same
+                        // `listApplications` query would already surface them
+                        // on next load); broadcast it live so moderator clients
+                        // don't need a refresh to see it.
+                        resurface_as_application_if_pending(
+                            db,
+                            community_did_for_revoke,
+                            community_uri_for_resurface,
+                            target_did_for_body.clone(),
+                            requires_approval_fn,
+                            find_application_fn,
+                            broadcast_fn,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "member-record revoke failed for {target_did_for_body} after {action}: {e}"
+                        );
+                    }
+                    _ => {}
+                }
             }
 
-            Ok(Json(BlockUserResponse {
+            Ok(Json(BanUserResponse {
                 did: target_did,
                 handle: target_handle,
             }))
@@ -132,58 +216,139 @@ async fn moderate_user_with(
     .await
 }
 
+/// Best-effort: checks whether the kicked member's original application is
+/// still pending (closed community, membership record on file, not banned)
+/// and, if so, broadcasts an `application_event { create }` re-surfacing it.
+/// Failures are logged and swallowed — the next `listApplications` poll would
+/// catch this anyway, so this is purely a live-UX nicety.
+#[allow(clippy::too_many_arguments)]
+async fn resurface_as_application_if_pending(
+    db: DatabaseConnection,
+    community_authority: String,
+    community_uri: String,
+    target_did: String,
+    requires_approval_fn: &RequiresApprovalFn,
+    find_application_fn: &FindApplicationFn,
+    broadcast_fn: &BroadcastFn,
+) {
+    let requires_approval =
+        match requires_approval_fn(db.clone(), community_authority.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("post-kick approval check failed for {target_did}: {e}");
+                return;
+            }
+        };
+    if !requires_approval {
+        return;
+    }
+
+    match find_application_fn(
+        db,
+        community_authority,
+        community_uri.clone(),
+        target_did.clone(),
+    )
+    .await
+    {
+        Ok(Some(app)) => {
+            broadcast_fn(ColibriServerEvent {
+                event_type: String::from("application_event"),
+                data: Some(ColibriServerEventData::Application(ApplicationEventData {
+                    event: String::from("create"),
+                    community: community_uri,
+                    membership: app.membership,
+                    did: Some(app.did),
+                    handle: Some(app.handle),
+                    created_at: Some(app.created_at),
+                    data: Some(crate::lib::events::MemberEventMemberData {
+                        display_name: app.data.display_name,
+                        avatar: app.data.avatar,
+                        banner: app.data.banner,
+                        description: app.data.description,
+                        online_state: app.data.online_state,
+                        status: crate::lib::events::MemberEventMemberStatus {
+                            text: app.data.status.text,
+                            emoji: app.data.status.emoji,
+                        },
+                    }),
+                })),
+                is_relevant: true,
+            });
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log::warn!("post-kick application lookup failed for {target_did}: {e}");
+        }
+    }
+}
+
 fn resolve_boxed(
     identifier: String,
 ) -> BoxFuture<'static, Result<(String, String), ErrorResponse>> {
     Box::pin(async move { resolve_did_and_handle(&identifier).await })
 }
 
-#[post("/xrpc/social.colibri.community.blockUser?<community>&<identifier>&<auth>")]
+#[post("/xrpc/social.colibri.community.banUser?<community>&<identifier>&<auth>")]
 /// Bans a user from a community by writing a `ban` moderation record.
-pub async fn block_user(
+pub async fn ban_user(
     community: &str,
     identifier: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
-) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    bridge: &State<CommsBridge>,
+) -> Result<Json<BanUserResponse>, ErrorResponse> {
+    let sender = bridge.applications.clone();
     moderate_user_with(
         ACTION_BAN,
         community.to_string(),
         identifier.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        "social.colibri.community.blockUser",
+        "social.colibri.community.banUser",
         Permission::MemberBan,
         &verify_auth_boxed,
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
         &revoke_member_boxed,
+        &requires_approval_boxed,
+        &find_application_boxed,
+        &move |event| {
+            let _ = sender.send(event);
+        },
     )
     .await
 }
 
-#[post("/xrpc/social.colibri.community.unblockUser?<community>&<identifier>&<auth>")]
+#[post("/xrpc/social.colibri.community.unbanUser?<community>&<identifier>&<auth>")]
 /// Unbans a user from a community by writing an `unban` moderation record.
-pub async fn unblock_user(
+pub async fn unban_user(
     community: &str,
     identifier: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
-) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    bridge: &State<CommsBridge>,
+) -> Result<Json<BanUserResponse>, ErrorResponse> {
+    let sender = bridge.applications.clone();
     moderate_user_with(
         ACTION_UNBAN,
         community.to_string(),
         identifier.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        "social.colibri.community.unblockUser",
+        "social.colibri.community.unbanUser",
         Permission::MemberUnban,
         &verify_auth_boxed,
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
         &revoke_member_boxed,
+        &requires_approval_boxed,
+        &find_application_boxed,
+        &move |event| {
+            let _ = sender.send(event);
+        },
     )
     .await
 }
@@ -199,7 +364,9 @@ pub async fn kick_user(
     identifier: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
-) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    bridge: &State<CommsBridge>,
+) -> Result<Json<BanUserResponse>, ErrorResponse> {
+    let sender = bridge.applications.clone();
     moderate_user_with(
         ACTION_KICK,
         community.to_string(),
@@ -213,6 +380,11 @@ pub async fn kick_user(
         &load_authz_boxed,
         &write_moderation_boxed,
         &revoke_member_boxed,
+        &requires_approval_boxed,
+        &find_application_boxed,
+        &move |event| {
+            let _ = sender.send(event);
+        },
     )
     .await
 }
@@ -226,7 +398,9 @@ pub async fn kick(
     member: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
-) -> Result<Json<BlockUserResponse>, ErrorResponse> {
+    bridge: &State<CommsBridge>,
+) -> Result<Json<BanUserResponse>, ErrorResponse> {
+    let sender = bridge.applications.clone();
     moderate_user_with(
         ACTION_KICK,
         community.to_string(),
@@ -240,6 +414,11 @@ pub async fn kick(
         &load_authz_boxed,
         &write_moderation_boxed,
         &revoke_member_boxed,
+        &requires_approval_boxed,
+        &find_application_boxed,
+        &move |event| {
+            let _ = sender.send(event);
+        },
     )
     .await
 }
@@ -257,7 +436,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
-    async fn block_user_writes_ban_record_when_owner() {
+    async fn ban_user_writes_ban_record_when_owner() {
         let db = mock_db();
         let captured: Arc<Mutex<Option<ColibriModeration>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
@@ -297,7 +476,7 @@ mod tests {
             String::from("did:plc:target"),
             String::from("token"),
             db,
-            "social.colibri.community.blockUser",
+            "social.colibri.community.banUser",
             Permission::MemberBan,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
             &|_| {
@@ -316,6 +495,9 @@ mod tests {
             },
             &write_record,
             &revoke_fn,
+            &|_, _| Box::pin(async { panic!("ban should not check approval requirement") }),
+            &|_, _, _, _| Box::pin(async { panic!("ban should not look up an application") }),
+            &|_| panic!("ban should not broadcast an application event"),
         )
         .await
         .unwrap();
@@ -333,7 +515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_user_rejects_when_caller_lacks_permission() {
+    async fn ban_user_rejects_when_caller_lacks_permission() {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
@@ -341,7 +523,7 @@ mod tests {
             String::from("did:plc:target"),
             String::from("token"),
             db,
-            "social.colibri.community.blockUser",
+            "social.colibri.community.banUser",
             Permission::MemberBan,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
             &|_| {
@@ -360,6 +542,11 @@ mod tests {
             },
             &|_, _, _| Box::pin(async { panic!("should not write when permission missing") }),
             &|_, _, _| Box::pin(async { panic!("should not revoke when permission missing") }),
+            &|_, _| Box::pin(async { panic!("should not check approval when permission missing") }),
+            &|_, _, _, _| {
+                Box::pin(async { panic!("should not look up application when permission missing") })
+            },
+            &|_| panic!("should not broadcast when permission missing"),
         )
         .await;
 
@@ -368,7 +555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_user_rejects_when_hierarchy_blocks() {
+    async fn ban_user_rejects_when_hierarchy_blocks() {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
@@ -376,7 +563,7 @@ mod tests {
             String::from("did:plc:target"),
             String::from("token"),
             db,
-            "social.colibri.community.blockUser",
+            "social.colibri.community.banUser",
             Permission::MemberBan,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
             &|_| {
@@ -403,6 +590,11 @@ mod tests {
             },
             &|_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
             &|_, _, _| Box::pin(async { panic!("should not revoke when hierarchy blocks") }),
+            &|_, _| Box::pin(async { panic!("should not check approval when hierarchy blocks") }),
+            &|_, _, _, _| {
+                Box::pin(async { panic!("should not look up application when hierarchy blocks") })
+            },
+            &|_| panic!("should not broadcast when hierarchy blocks"),
         )
         .await;
 
@@ -469,6 +661,11 @@ mod tests {
             },
             &write_record,
             &|_, _, _| Box::pin(async { Ok(true) }),
+            &|_, _| Box::pin(async { Ok(false) }),
+            &|_, _, _, _| {
+                Box::pin(async { panic!("should not look up application when community is open") })
+            },
+            &|_| panic!("should not broadcast when community is open"),
         )
         .await
         .unwrap();
@@ -478,6 +675,105 @@ mod tests {
         assert_eq!(written.action, "kick");
         assert_eq!(written.subject.did.as_deref(), Some("did:plc:target"));
         assert_eq!(written.created_by, "did:plc:mod");
+    }
+
+    #[tokio::test]
+    async fn kick_resurfaces_pending_application_when_community_requires_approval() {
+        let db = mock_db();
+        let broadcast_captured: Arc<Mutex<Option<ColibriServerEvent>>> = Arc::new(Mutex::new(None));
+        let broadcast_clone = broadcast_captured.clone();
+
+        let result = moderate_user_with(
+            ACTION_KICK,
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("did:plc:target"),
+            String::from("token"),
+            db,
+            "social.colibri.community.kickUser",
+            Permission::MemberKick,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_| {
+                Box::pin(async {
+                    Ok((String::from("did:plc:target"), String::from("target.test")))
+                })
+            },
+            &|_, _, did| {
+                Box::pin(async move {
+                    if did == "did:plc:mod" {
+                        Ok(ActorAuthz {
+                            is_owner: false,
+                            member: Some(member("did:plc:mod", vec!["r1"])),
+                            roles: vec![role("Moderator", 50, vec![Permission::MemberKick])],
+                        })
+                    } else {
+                        Ok(ActorAuthz {
+                            is_owner: false,
+                            member: Some(member("did:plc:target", vec!["r2"])),
+                            roles: vec![role("Member", 10, vec![])],
+                        })
+                    }
+                })
+            },
+            &|_, _, record| {
+                Box::pin(async move {
+                    Ok(record_data::Model {
+                        id: 1,
+                        did: String::from("did:plc:owner"),
+                        nsid: String::from("social.colibri.moderation"),
+                        rkey: String::from("mod-1"),
+                        data: serde_json::to_value(record).unwrap(),
+                        indexed_at: String::from(""),
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(true) }),
+            &|_, _| Box::pin(async { Ok(true) }),
+            &|_, _, _, did| {
+                assert_eq!(did, "did:plc:target");
+                Box::pin(async {
+                    Ok(Some(Application {
+                        did: String::from("did:plc:target"),
+                        handle: String::from("target.test"),
+                        membership: String::from(
+                            "at://did:plc:target/social.colibri.membership/m1",
+                        ),
+                        created_at: String::from("2026-01-01T00:00:00Z"),
+                        data: crate::xrpc::social::colibri::actor::get_data_handler::ActorData {
+                            display_name: String::from("Target"),
+                            avatar: None,
+                            banner: None,
+                            description: None,
+                            online_state: String::from("offline"),
+                            status:
+                                crate::xrpc::social::colibri::actor::get_data_handler::ActorStatus {
+                                    text: String::new(),
+                                    emoji: None,
+                                },
+                        },
+                    }))
+                })
+            },
+            &move |event| {
+                *broadcast_clone.lock().unwrap() = Some(event);
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.did, "did:plc:target");
+
+        let event = broadcast_captured.lock().unwrap().take().unwrap();
+        assert_eq!(event.event_type, "application_event");
+        if let Some(ColibriServerEventData::Application(data)) = event.data {
+            assert_eq!(data.event, "create");
+            assert_eq!(data.did.as_deref(), Some("did:plc:target"));
+            assert_eq!(
+                data.membership,
+                "at://did:plc:target/social.colibri.membership/m1"
+            );
+        } else {
+            panic!("expected application_event payload");
+        }
     }
 
     #[tokio::test]
@@ -516,6 +812,11 @@ mod tests {
             },
             &|_, _, _| Box::pin(async { panic!("should not write when hierarchy blocks") }),
             &|_, _, _| Box::pin(async { panic!("should not revoke when hierarchy blocks") }),
+            &|_, _| Box::pin(async { panic!("should not check approval when hierarchy blocks") }),
+            &|_, _, _, _| {
+                Box::pin(async { panic!("should not look up application when hierarchy blocks") })
+            },
+            &|_| panic!("should not broadcast when hierarchy blocks"),
         )
         .await;
 
@@ -526,7 +827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unblock_user_skips_hierarchy_check() {
+    async fn unban_user_skips_hierarchy_check() {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_UNBAN,
@@ -534,7 +835,7 @@ mod tests {
             String::from("did:plc:target"),
             String::from("token"),
             db,
-            "social.colibri.community.unblockUser",
+            "social.colibri.community.unbanUser",
             Permission::MemberUnban,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
             &|_| {
@@ -564,6 +865,9 @@ mod tests {
                 })
             },
             &|_, _, _| Box::pin(async { panic!("unblock should not revoke member record") }),
+            &|_, _| Box::pin(async { panic!("unban should not check approval requirement") }),
+            &|_, _, _, _| Box::pin(async { panic!("unban should not look up an application") }),
+            &|_| panic!("unban should not broadcast an application event"),
         )
         .await;
 

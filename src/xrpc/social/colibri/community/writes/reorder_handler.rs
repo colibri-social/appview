@@ -80,18 +80,19 @@ async fn reorder_channels_with(
     .await
 }
 
-#[post("/xrpc/social.colibri.community.reorderChannels?<category>&<channel_order>&<auth>")]
-/// Persists a new channel order within a category. `channel_order` is
+#[post("/xrpc/social.colibri.community.reorderChannels?<category>&<channelOrder>&<auth>")]
+/// Persists a new channel order within a category. `channelOrder` is
 /// provided as repeated query-string values.
+#[allow(non_snake_case)]
 pub async fn reorder_channels(
     category: &str,
-    channel_order: Vec<String>,
+    channelOrder: Vec<String>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
     reorder_channels_with(
         category.to_string(),
-        channel_order,
+        channelOrder,
         auth.to_string(),
         db.inner().clone(),
         &verify_auth_boxed,
@@ -158,18 +159,19 @@ async fn reorder_categories_with(
     .await
 }
 
-#[post("/xrpc/social.colibri.community.reorderCategories?<community>&<category_order>&<auth>")]
-/// Persists a new category order for the community sidebar. `category_order`
+#[post("/xrpc/social.colibri.community.reorderCategories?<community>&<categoryOrder>&<auth>")]
+/// Persists a new category order for the community sidebar. `categoryOrder`
 /// is provided as repeated query-string values.
+#[allow(non_snake_case)]
 pub async fn reorder_categories(
     community: &str,
-    category_order: Vec<String>,
+    categoryOrder: Vec<String>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
     reorder_categories_with(
         community.to_string(),
-        category_order,
+        categoryOrder,
         auth.to_string(),
         db.inner().clone(),
         &verify_auth_boxed,

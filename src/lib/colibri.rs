@@ -13,7 +13,11 @@ pub struct ColibriActorData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
 
-    pub communities: Vec<String>, // required, items are record-keys
+    // Required by the lexicon, but defaulted here so older actor.data records
+    // written before this field existed still deserialize. Community DIDs in
+    // the user's preferred sidebar order.
+    #[serde(default)]
+    pub communities: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -3,6 +3,7 @@ use crate::lib::colibri::{
     ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
 };
 use crate::lib::community_record::fetch_community_record;
+use crate::lib::events::{MuteEvent, MuteEventData, SeenEvent, SeenEventData};
 use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
 use crate::lib::time::current_iso8601_utc;
@@ -197,6 +198,26 @@ pub struct CommsBridge {
     /// Fan-out of notifications indexed inside the tap pipeline. Each WS
     /// subscriber filters by recipient DID.
     pub notifications: broadcast::Sender<IndexedNotification>,
+    /// Fan-out of `application_event`s emitted directly by REST handlers
+    /// (`approveMembership`, `kickUser`/`kick`, `dismissApplication`,
+    /// `undismissApplication`) rather than derived from a single tap record.
+    /// Bypasses `map_tap_event` entirely — the handler already has full
+    /// context (and, for `approveMembership`, has just performed the write),
+    /// so there's no need to round-trip through the firehose to know what
+    /// happened. Every WS subscriber forwards these as-is; clients scope by
+    /// `community`.
+    pub applications: broadcast::Sender<crate::lib::events::ColibriServerEvent>,
+    /// Fan-out of `seen_event`s — per-user read-state changes pushed to the
+    /// originating user's other connected clients (each subscriber filters by
+    /// `recipient_did`). `channel_read` events are emitted from the tap loop
+    /// when a `social.colibri.channel.read` record is indexed; `message_seen`
+    /// events are emitted by the `updateSeenForMessage` handler.
+    pub seen: broadcast::Sender<SeenEvent>,
+    /// Fan-out of `mute_event`s — per-user mute/unmute changes pushed to the
+    /// originating user's other connected clients (each subscriber filters by
+    /// `recipient_did`). Emitted from the tap loop when a
+    /// `social.colibri.actor.mute` record is created or deleted.
+    pub mute: broadcast::Sender<MuteEvent>,
 }
 
 /// Runs the tap-connection event loop:
@@ -219,6 +240,8 @@ pub async fn run_connection(
     tx_inbound: broadcast::Sender<TapMessageRecord>,
     mut to_tap: mpsc::Sender<String>,
     notifications_tx: broadcast::Sender<IndexedNotification>,
+    seen_tx: broadcast::Sender<SeenEvent>,
+    mute_tx: broadcast::Sender<MuteEvent>,
 ) {
     loop {
         rocket::tokio::select! {
@@ -275,6 +298,17 @@ pub async fn run_connection(
                         {
                             Ok(rows) => {
                                 for row in rows {
+                                    // Background Web Push (closed-app delivery)
+                                    // runs off-thread so its network I/O never
+                                    // stalls the tap loop. It applies its own
+                                    // DND + mute filtering. The live WS
+                                    // broadcast below is the foreground path.
+                                    let push_db = db.clone();
+                                    let push_row = row.clone();
+                                    rocket::tokio::spawn(async move {
+                                        crate::lib::push_send::deliver(push_db, push_row).await;
+                                    });
+
                                     let _ = notifications_tx.send(row);
                                 }
                             }
@@ -319,6 +353,60 @@ pub async fn run_connection(
                             record.rkey,
                             e
                         );
+                    }
+
+                    // Cross-device read-state sync: when a user's read cursor
+                    // advances (a `social.colibri.channel.read` record is
+                    // indexed), tell their other connected clients to clear that
+                    // channel's white "unread messages" dot.
+                    if record.collection == "social.colibri.channel.read"
+                        && record.action != "delete"
+                        && let Some(payload) = record.record.as_ref()
+                        && let Some(channel) =
+                            payload.get("channel").and_then(|c| c.as_str())
+                    {
+                        let _ = seen_tx.send(SeenEvent {
+                            recipient_did: record.did.clone(),
+                            data: SeenEventData {
+                                event: String::from("channel_read"),
+                                channel_uri: channel.to_string(),
+                                message_uri: None,
+                                cleared: None,
+                            },
+                        });
+                    }
+
+                    // Cross-device mute sync: when a user mutes or unmutes a
+                    // channel/community (a `social.colibri.actor.mute` record is
+                    // created or deleted), tell their other connected clients so
+                    // their mute set stays current without a reload. On delete
+                    // the record body is gone, so read the `subject` from the
+                    // cached row before `ack_tap_msg` removes it.
+                    if record.collection == "social.colibri.actor.mute" {
+                        let subject = match record.action.as_str() {
+                            "delete" => mute_subject_from_cache(&db, &record).await,
+                            _ => record
+                                .record
+                                .as_ref()
+                                .and_then(|p| p.get("subject"))
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.to_string()),
+                        };
+
+                        if let Some(subject) = subject {
+                            let event = if record.action == "delete" {
+                                "unmuted"
+                            } else {
+                                "muted"
+                            };
+                            let _ = mute_tx.send(MuteEvent {
+                                recipient_did: record.did.clone(),
+                                data: MuteEventData {
+                                    event: String::from(event),
+                                    subject,
+                                },
+                            });
+                        }
                     }
 
                     let _ = tx_inbound.send(record);
@@ -507,6 +595,27 @@ async fn revoke_member_for_leave(
 
     moderation::revoke_community_member(db, &community.authority, &record.did).await?;
     Ok(())
+}
+
+/// Reads the `subject` of a just-deleted `social.colibri.actor.mute` record from
+/// the local cache. The delete event carries no body, so the cached row (still
+/// present until `ack_tap_msg` removes it) is the only source of the subject.
+/// Returns `None` when the row is missing or malformed.
+async fn mute_subject_from_cache(
+    db: &DatabaseConnection,
+    record: &TapMessageRecord,
+) -> Option<String> {
+    let row = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&record.did))
+        .filter(record_data::Column::Nsid.eq("social.colibri.actor.mute"))
+        .filter(record_data::Column::Rkey.eq(&record.rkey))
+        .one(db)
+        .await
+        .ok()??;
+    row.data
+        .get("subject")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]

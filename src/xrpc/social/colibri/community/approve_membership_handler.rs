@@ -25,12 +25,15 @@ use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriMembership;
+use crate::lib::dismissed_applications;
+use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
 use crate::lib::moderation;
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::tap::CommsBridge;
 use crate::models::record_data;
 
 #[derive(Serialize, Debug)]
@@ -72,6 +75,18 @@ pub type WriteMemberFn = dyn Fn(
 pub type IsBannedFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<bool, DbErr>>
     + Send
     + Sync;
+
+/// Trait-object seam for clearing a stale dismissal row on approval, so a
+/// re-application after e.g. a kick doesn't inherit a dismissal from a
+/// previous, unrelated application cycle. Best-effort — wraps
+/// [`dismissed_applications::undismiss`].
+pub type ClearDismissalFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<(), DbErr>>
+    + Send
+    + Sync;
+
+/// Trait-object seam for the broadcast side effect — synchronous, since
+/// `broadcast::Sender::send` doesn't need to await anything.
+pub type BroadcastFn = dyn Fn(ColibriServerEvent) + Send + Sync;
 
 pub fn fetch_membership_boxed(
     db: DatabaseConnection,
@@ -120,6 +135,16 @@ pub fn is_banned_boxed(
     Box::pin(async move { moderation::is_user_banned(&db, &community_did, &subject_did).await })
 }
 
+pub fn clear_dismissal_boxed(
+    db: DatabaseConnection,
+    community_did: String,
+    subject_did: String,
+) -> BoxFuture<'static, Result<(), DbErr>> {
+    Box::pin(
+        async move { dismissed_applications::undismiss(&db, &community_did, &subject_did).await },
+    )
+}
+
 fn invalid_request(message: &str) -> ErrorResponse {
     ErrorResponse {
         body: Json(ErrorBody {
@@ -139,6 +164,8 @@ async fn approve_membership_with(
     fetch_membership_fn: &FetchMembershipFn,
     write_member_fn: &WriteMemberFn,
     is_banned_fn: &IsBannedFn,
+    clear_dismissal_fn: &ClearDismissalFn,
+    broadcast_fn: &BroadcastFn,
 ) -> Result<Json<ApproveMembershipResponse>, ErrorResponse> {
     let parsed_membership_uri = AtUri::parse(&membership_uri)
         .ok_or_else(|| invalid_request("Invalid membership AT-URI."))?;
@@ -181,16 +208,43 @@ async fn approve_membership_with(
             }
 
             let written = write_member_fn(
-                db,
+                db.clone(),
                 ctx.community.authority.clone(),
                 subject_did.clone(),
                 vec![],
-                Some(membership_uri),
+                Some(membership_uri.clone()),
             )
             .await?;
 
             let member_uri =
                 written.map(|row| format!("at://{}/{}/{}", row.did, row.nsid, row.rkey));
+
+            if member_uri.is_some() {
+                // A real admission happened (not the idempotent already-a-member
+                // skip) — resolve the pending application for every connected
+                // client, and clear any stale dismissal so a future
+                // re-application starts from a clean slate.
+                if let Err(e) =
+                    clear_dismissal_fn(db, ctx.community.authority.clone(), subject_did.clone())
+                        .await
+                {
+                    log::warn!("dismissal cleanup failed for {subject_did} after approval: {e}");
+                }
+
+                broadcast_fn(ColibriServerEvent {
+                    event_type: String::from("application_event"),
+                    data: Some(ColibriServerEventData::Application(ApplicationEventData {
+                        event: String::from("resolve"),
+                        community: ctx.community_uri.clone(),
+                        membership: membership_uri,
+                        did: Some(subject_did.clone()),
+                        handle: None,
+                        created_at: None,
+                        data: None,
+                    })),
+                    is_relevant: true,
+                });
+            }
 
             Ok(Json(ApproveMembershipResponse {
                 did: subject_did,
@@ -211,7 +265,9 @@ pub async fn approve_membership(
     membership: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
+    bridge: &State<CommsBridge>,
 ) -> Result<Json<ApproveMembershipResponse>, ErrorResponse> {
+    let sender = bridge.applications.clone();
     approve_membership_with(
         membership.to_string(),
         auth.to_string(),
@@ -221,6 +277,10 @@ pub async fn approve_membership(
         &fetch_membership_boxed,
         &write_member_boxed,
         &is_banned_boxed,
+        &clear_dismissal_boxed,
+        &move |event| {
+            let _ = sender.send(event);
+        },
     )
     .await
 }
@@ -247,6 +307,8 @@ mod tests {
         let captured: Arc<Mutex<Option<(String, String, Option<String>)>>> =
             Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
+        let broadcast_captured: Arc<Mutex<Option<ColibriServerEvent>>> = Arc::new(Mutex::new(None));
+        let broadcast_clone = broadcast_captured.clone();
 
         let write_member =
             move |_: DatabaseConnection,
@@ -287,6 +349,10 @@ mod tests {
             &|_, uri| Box::pin(async move { Ok(Some((uri.authority, sample_membership()))) }),
             &write_member,
             &|_, _, _| Box::pin(async { Ok(false) }),
+            &|_, _, _| Box::pin(async { Ok(()) }),
+            &move |event| {
+                *broadcast_clone.lock().unwrap() = Some(event);
+            },
         )
         .await
         .unwrap();
@@ -306,6 +372,19 @@ mod tests {
             from_membership.as_deref(),
             Some("at://did:plc:applicant/social.colibri.membership/m1")
         );
+
+        let event = broadcast_captured.lock().unwrap().take().unwrap();
+        assert_eq!(event.event_type, "application_event");
+        if let Some(ColibriServerEventData::Application(data)) = event.data {
+            assert_eq!(data.event, "resolve");
+            assert_eq!(data.did.as_deref(), Some("did:plc:applicant"));
+            assert_eq!(
+                data.membership,
+                "at://did:plc:applicant/social.colibri.membership/m1"
+            );
+        } else {
+            panic!("expected application_event payload");
+        }
     }
 
     #[tokio::test]
@@ -328,6 +407,8 @@ mod tests {
             &|_, uri| Box::pin(async move { Ok(Some((uri.authority, sample_membership()))) }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member") }),
             &|_, _, _| Box::pin(async { panic!("should not check ban before permission") }),
+            &|_, _, _| Box::pin(async { panic!("should not clear dismissal before permission") }),
+            &|_| panic!("should not broadcast before permission"),
         )
         .await;
         assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
@@ -353,6 +434,8 @@ mod tests {
             &|_, uri| Box::pin(async move { Ok(Some((uri.authority, sample_membership()))) }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member when banned") }),
             &|_, _, _| Box::pin(async { Ok(true) }),
+            &|_, _, _| Box::pin(async { panic!("should not clear dismissal when banned") }),
+            &|_| panic!("should not broadcast when banned"),
         )
         .await;
 
@@ -373,6 +456,8 @@ mod tests {
             &|_, _| Box::pin(async { Ok(None) }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member") }),
             &|_, _, _| Box::pin(async { panic!("should not check ban") }),
+            &|_, _, _| Box::pin(async { panic!("should not clear dismissal") }),
+            &|_| panic!("should not broadcast"),
         )
         .await;
 
@@ -393,6 +478,8 @@ mod tests {
             &|_, _| Box::pin(async { panic!("should not fetch") }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member") }),
             &|_, _, _| Box::pin(async { panic!("should not check ban") }),
+            &|_, _, _| Box::pin(async { panic!("should not clear dismissal") }),
+            &|_| panic!("should not broadcast"),
         )
         .await;
 

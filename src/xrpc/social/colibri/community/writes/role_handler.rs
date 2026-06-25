@@ -58,8 +58,8 @@ async fn resolve_position_conflicts(
     for (rkey, mut role) in roles {
         if role.position < next_free {
             role.position = next_free;
-            let data = serde_json::to_value(&role)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            let data =
+                serde_json::to_value(&role).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
             community_write::put_record(db, community_did, ROLE_NSID, &rkey, data).await?;
             next_free += 1;
         } else {
@@ -108,10 +108,16 @@ async fn create_role_with(
                 protected: None,
                 channel_overrides: vec![],
             };
-            let role_data = serde_json::to_value(&role)
-                .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
-            community_write::create_record(&db, community_did, ROLE_NSID, Some(&role_rkey), role_data)
-                .await?;
+            let role_data =
+                serde_json::to_value(&role).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+            community_write::create_record(
+                &db,
+                community_did,
+                ROLE_NSID,
+                Some(&role_rkey),
+                role_data,
+            )
+            .await?;
 
             Ok(Json(RoleUriResponse {
                 uri: format!("at://{}/{}/{}", community_did, ROLE_NSID, role_rkey),
@@ -121,7 +127,9 @@ async fn create_role_with(
     .await
 }
 
-#[post("/xrpc/social.colibri.role.create?<community>&<name>&<color>&<permissions>&<position>&<hoisted>&<mentionable>&<auth>")]
+#[post(
+    "/xrpc/social.colibri.role.create?<community>&<name>&<color>&<permissions>&<position>&<hoisted>&<mentionable>&<auth>"
+)]
 pub async fn create_role(
     community: &str,
     name: &str,
@@ -186,9 +194,8 @@ async fn update_role_with(
                 .await?
                 .ok_or_else(|| not_found_error("Role not found in AppView cache."))?;
 
-            let mut rec: ColibriRole = serde_json::from_value(current).map_err(|e| {
-                invalid_request(format!("Cached role record is malformed: {e}"))
-            })?;
+            let mut rec: ColibriRole = serde_json::from_value(current)
+                .map_err(|e| invalid_request(format!("Cached role record is malformed: {e}")))?;
 
             if rec.protected == Some(true) {
                 return Err(invalid_request("Cannot modify a protected role."));
@@ -224,7 +231,9 @@ async fn update_role_with(
     .await
 }
 
-#[post("/xrpc/social.colibri.role.update?<role>&<name>&<color>&<permissions>&<position>&<hoisted>&<mentionable>&<auth>")]
+#[post(
+    "/xrpc/social.colibri.role.update?<role>&<name>&<color>&<permissions>&<position>&<hoisted>&<mentionable>&<auth>"
+)]
 pub async fn update_role(
     role: &str,
     name: Option<&str>,
@@ -283,9 +292,8 @@ async fn delete_role_with(
                 .await?
                 .ok_or_else(|| not_found_error("Role not found in AppView cache."))?;
 
-            let rec: ColibriRole = serde_json::from_value(current).map_err(|e| {
-                invalid_request(format!("Cached role record is malformed: {e}"))
-            })?;
+            let rec: ColibriRole = serde_json::from_value(current)
+                .map_err(|e| invalid_request(format!("Cached role record is malformed: {e}")))?;
 
             if rec.protected == Some(true) {
                 return Err(invalid_request("Cannot delete a protected role."));

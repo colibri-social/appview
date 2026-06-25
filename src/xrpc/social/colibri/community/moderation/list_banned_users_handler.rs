@@ -13,7 +13,7 @@ use crate::xrpc::social::colibri::actor::get_data_handler::Actor;
 use crate::xrpc::social::colibri::community::invitations::hydrate_actors;
 
 #[derive(Serialize, Debug)]
-pub struct BlockedUsersResponse {
+pub struct BannedUsersResponse {
     /// Banned users hydrated into full profiles, ordered by DID. Banned users
     /// no longer hold a `social.colibri.member` record, so — unlike
     /// `listMembers` — these carry no `roles`.
@@ -27,12 +27,12 @@ type HydrateFn = fn(
     Vec<String>,
 ) -> BoxFuture<'static, Result<HashMap<String, Actor>, DbErr>>;
 
-async fn list_blocked_users_with(
+async fn list_banned_users_with(
     community_uri: String,
     db: DatabaseConnection,
     fetch_fn: FetchBannedFn,
     hydrate_fn: HydrateFn,
-) -> Result<Json<BlockedUsersResponse>, ErrorResponse> {
+) -> Result<Json<BannedUsersResponse>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("InvalidRequest"),
@@ -51,7 +51,7 @@ async fn list_blocked_users_with(
         .filter_map(|did| hydrated.remove(&did))
         .collect();
 
-    Ok(Json(BlockedUsersResponse { users }))
+    Ok(Json(BannedUsersResponse { users }))
 }
 
 fn fetch_banned_boxed(
@@ -68,15 +68,15 @@ fn hydrate_boxed(
     Box::pin(async move { hydrate_actors(&db, dids).await })
 }
 
-#[get("/xrpc/social.colibri.community.listBlockedUsers?<community>")]
+#[get("/xrpc/social.colibri.community.listBannedUsers?<community>")]
 /// Lists every user currently banned in the community (derived from the
 /// `social.colibri.moderation` event log on the community repo), each hydrated
 /// into their full profile.
-pub async fn list_blocked_users(
+pub async fn list_banned_users(
     community: &str,
     db: &State<DatabaseConnection>,
-) -> Result<Json<BlockedUsersResponse>, ErrorResponse> {
-    list_blocked_users_with(
+) -> Result<Json<BannedUsersResponse>, ErrorResponse> {
+    list_banned_users_with(
         community.to_string(),
         db.inner().clone(),
         fetch_banned_boxed,
@@ -113,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn returns_hydrated_banned_users_in_order() {
         let db = mock_db();
-        let result = list_blocked_users_with(
+        let result = list_banned_users_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
             |_, community| {
@@ -157,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn hydrates_full_profile_fields() {
         let db = mock_db();
-        let result = list_blocked_users_with(
+        let result = list_banned_users_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
             |_, _| Box::pin(async { Ok(vec![String::from("did:plc:alice")]) }),
@@ -187,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = mock_db();
-        let result = list_blocked_users_with(
+        let result = list_banned_users_with(
             String::from("not-a-uri"),
             db,
             |_, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
