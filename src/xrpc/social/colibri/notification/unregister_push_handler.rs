@@ -18,9 +18,8 @@ pub struct UnregisterPushResponse {
     pub unregistered: bool,
 }
 
-type UnregisterFn = dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<(), DbErr>>
-    + Send
-    + Sync;
+type UnregisterFn =
+    dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<(), DbErr>> + Send + Sync;
 
 async fn unregister_push_with(
     auth: String,
@@ -85,7 +84,7 @@ mod tests {
         let captured_clone = captured.clone();
 
         let unregister = move |_: DatabaseConnection,
-                              endpoint: String|
+                               endpoint: String|
               -> BoxFuture<'static, Result<(), DbErr>> {
             let captured = captured_clone.clone();
             Box::pin(async move {

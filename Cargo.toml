@@ -38,5 +38,7 @@ rand = "0.8"
 aes-gcm = "0.10"
 scraper = "0.20"
 web-push = { version = "0.11", default-features = false }
+bytes = "1"
+lru = "0.12"
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

@@ -37,8 +37,8 @@ fn env_non_empty(name: &str) -> Option<String> {
 fn load_from_env() -> Option<VapidConfig> {
     let private_key = env_non_empty("VAPID_PRIVATE_KEY")?;
     let public_key = env_non_empty("VAPID_PUBLIC_KEY")?;
-    let subject =
-        env_non_empty("VAPID_SUBJECT").unwrap_or_else(|| String::from("mailto:admin@colibri.social"));
+    let subject = env_non_empty("VAPID_SUBJECT")
+        .unwrap_or_else(|| String::from("mailto:admin@colibri.social"));
     Some(VapidConfig {
         private_key,
         public_key,

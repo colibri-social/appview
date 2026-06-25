@@ -75,9 +75,7 @@ fn verify_auth_boxed(
 }
 
 fn fetch_boxed(uri: String) -> BoxFuture<'static, Result<FetchedResource, FetchError>> {
-    Box::pin(async move {
-        crate::lib::embed_fetch::validate_and_fetch(&uri, MAX_HTML_BYTES).await
-    })
+    Box::pin(async move { crate::lib::embed_fetch::validate_and_fetch(&uri, MAX_HTML_BYTES).await })
 }
 
 #[get("/xrpc/social.colibri.embed.getMetadata?<uri>&<auth>")]
@@ -115,16 +113,15 @@ mod tests {
     use crate::lib::embed_fetch::EmbedImage;
     use rocket::tokio;
 
-    fn ok_auth() -> impl Fn(
-        String,
-        String,
-    ) -> BoxFuture<'static, Result<String, service_auth::ServiceAuthError>> {
+    fn ok_auth()
+    -> impl Fn(String, String) -> BoxFuture<'static, Result<String, service_auth::ServiceAuthError>>
+    {
         |_, _| Box::pin(async { Ok(String::from("did:plc:abc")) })
     }
 
-    fn html_resource(html: &'static str) -> impl Fn(
-        String,
-    ) -> BoxFuture<'static, Result<FetchedResource, FetchError>> {
+    fn html_resource(
+        html: &'static str,
+    ) -> impl Fn(String) -> BoxFuture<'static, Result<FetchedResource, FetchError>> {
         move |_| {
             Box::pin(async move {
                 Ok(FetchedResource {
@@ -143,9 +140,7 @@ mod tests {
             String::from("https://example.com"),
             String::from("bad"),
             &cache,
-            |_, _| {
-                Box::pin(async { Err(service_auth::ServiceAuthError::InvalidSignature) })
-            },
+            |_, _| Box::pin(async { Err(service_auth::ServiceAuthError::InvalidSignature) }),
             html_resource("<html></html>"),
         )
         .await;

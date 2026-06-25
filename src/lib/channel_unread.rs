@@ -218,7 +218,11 @@ mod tests {
     #[test]
     fn no_messages_is_never_unread() {
         assert!(!channel_has_unread(None, None, None));
-        assert!(!channel_has_unread(None, Some("aaa"), Some("2026-01-01T00:00:00.000Z")));
+        assert!(!channel_has_unread(
+            None,
+            Some("aaa"),
+            Some("2026-01-01T00:00:00.000Z")
+        ));
     }
 
     #[test]

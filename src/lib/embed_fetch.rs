@@ -17,8 +17,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum number of redirects we'll follow (each one is re-validated).
 const MAX_REDIRECTS: usize = 5;
 /// A browser-ish UA — many sites only emit OG tags for "real" user agents.
-const USER_AGENT: &str =
-    "Mozilla/5.0 (compatible; ColibriBot/1.0; +https://colibri.social)";
+const USER_AGENT: &str = "Mozilla/5.0 (compatible; ColibriBot/1.0; +https://colibri.social)";
 
 /// The embed metadata returned to the client. Field names are serialized to the
 /// camelCase shape the client expects.
@@ -162,7 +161,10 @@ async fn assert_host_allowed(url: &Url) -> Result<(), FetchError> {
 /// SSRF-safe GET: validates the host (and every redirect target) against the
 /// private-address blocklist, follows up to [`MAX_REDIRECTS`] redirects
 /// manually, and reads at most `max_bytes` of the body.
-pub async fn validate_and_fetch(raw_url: &str, max_bytes: usize) -> Result<FetchedResource, FetchError> {
+pub async fn validate_and_fetch(
+    raw_url: &str,
+    max_bytes: usize,
+) -> Result<FetchedResource, FetchError> {
     let mut current = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
 
     // Redirects are handled by hand so each hop can be re-validated.
@@ -266,7 +268,9 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
             .filter(|t| !t.is_empty())
     });
 
-    let title = get("og:title").or_else(|| get("twitter:title")).or(doc_title);
+    let title = get("og:title")
+        .or_else(|| get("twitter:title"))
+        .or(doc_title);
     let description = get("og:description")
         .or_else(|| get("twitter:description"))
         .or_else(|| get("description"));

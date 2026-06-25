@@ -152,8 +152,9 @@ async fn send_one(
 
     let subscription_info = SubscriptionInfo::new(&sub.endpoint, &sub.p256dh, &sub.auth);
 
-    let mut sig_builder = VapidSignatureBuilder::from_base64(&config.private_key, &subscription_info)
-        .map_err(|e| format!("vapid signature: {e}"))?;
+    let mut sig_builder =
+        VapidSignatureBuilder::from_base64(&config.private_key, &subscription_info)
+            .map_err(|e| format!("vapid signature: {e}"))?;
     sig_builder.add_claim("sub", config.subject.clone());
     let signature = sig_builder
         .build()
@@ -164,9 +165,7 @@ async fn send_one(
     builder.set_vapid_signature(signature);
     let message = builder.build().map_err(|e| format!("message build: {e}"))?;
 
-    let payload = message
-        .payload
-        .ok_or("web push message had no payload")?;
+    let payload = message.payload.ok_or("web push message had no payload")?;
 
     let content_encoding = match payload.content_encoding {
         ContentEncoding::Aes128Gcm => "aes128gcm",

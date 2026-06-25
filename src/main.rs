@@ -105,6 +105,19 @@ async fn rocket() -> _ {
                 .map(From::from)
                 .collect(),
         )
+        // Range responses are useless to the browser unless it can read these
+        // cross-origin (e.g. media seeking via `com.atproto.sync.getBlob`).
+        .expose_headers(
+            [
+                "Content-Range",
+                "Accept-Ranges",
+                "Content-Length",
+                "Content-Type",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::HashSet<_>>(),
+        )
         .allow_credentials(true);
 
     let safe_cors = cors.to_cors().unwrap();
@@ -237,5 +250,6 @@ async fn rocket() -> _ {
         .manage(tap_bridge)
         .manage(c2c_broadcast_channel)
         .manage(crate::lib::embed_cache::EmbedCache::default())
+        .manage(crate::lib::blob_cache::BlobCache::from_env())
         .manage(safe_cors)
 }

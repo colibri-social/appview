@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
-use rocket::{get, State};
+use rocket::{State, get};
 use sea_orm::prelude::Expr;
 use sea_orm::{
     ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult, QueryFilter,

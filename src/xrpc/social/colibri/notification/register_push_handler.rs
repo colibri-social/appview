@@ -122,8 +122,7 @@ mod tests {
               -> BoxFuture<'static, Result<(), DbErr>> {
             let captured = captured_clone.clone();
             Box::pin(async move {
-                *captured.lock().unwrap() =
-                    Some((did, input.endpoint, input.keys.p256dh));
+                *captured.lock().unwrap() = Some((did, input.endpoint, input.keys.p256dh));
                 Ok(())
             })
         };

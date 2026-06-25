@@ -512,12 +512,16 @@ async fn create_byo_with(
     //    credentials are valid, and the session's DID is the community DID we
     //    write onto.
     emit("connecting");
-    let session = create_session_fn(byo.pds.clone(), byo.identifier.clone(), byo.password.clone())
-        .await
-        .map_err(|e| {
-            log::error!("community.create (byo): createSession failed: {e}");
-            pds_error(format!("createSession failed: {e}"))
-        })?;
+    let session = create_session_fn(
+        byo.pds.clone(),
+        byo.identifier.clone(),
+        byo.password.clone(),
+    )
+    .await
+    .map_err(|e| {
+        log::error!("community.create (byo): createSession failed: {e}");
+        pds_error(format!("createSession failed: {e}"))
+    })?;
     let community_did = session.did.clone();
     log::info!("community.create (byo): verified control of {community_did}");
 
@@ -531,7 +535,9 @@ async fn create_byo_with(
     )
     .await
     .map_err(|e| {
-        log::error!("community.create (byo): failed to persist credentials for {community_did}: {e}");
+        log::error!(
+            "community.create (byo): failed to persist credentials for {community_did}: {e}"
+        );
         internal_error(format!("failed to persist credentials: {e}"))
     })?;
 

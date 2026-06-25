@@ -297,7 +297,8 @@ async fn map_tap_event_with(
                     // community URI from; downstream member-delete still covers it.
                     return Ok(vec![]);
                 };
-                let Ok(safe_record) = serde_json::from_value::<ColibriMembership>(old_record) else {
+                let Ok(safe_record) = serde_json::from_value::<ColibriMembership>(old_record)
+                else {
                     return Ok(vec![]);
                 };
 
@@ -911,6 +912,9 @@ async fn map_tap_event_with(
             }
         }
         "social.colibri.approval" => Ok(vec![]),
+        // Read cursors are handled directly in `tap.rs`, which emits the
+        // cross-device read-state sync event. No server event maps here.
+        "social.colibri.channel.read" => Ok(vec![]),
         "social.colibri.richtext.facet" => Err(serde_json::Error::custom("Facet")),
         _ => Err(serde_json::Error::custom("Unknown collection")),
     }

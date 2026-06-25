@@ -19,11 +19,7 @@ pub struct UpdateSeenForMessageResponse {
 type MarkSeenFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<u64, DbErr>>
     + Send
     + Sync;
-type FetchChannelFn = dyn Fn(
-        DatabaseConnection,
-        String,
-        String,
-    ) -> BoxFuture<'static, Result<Option<String>, DbErr>>
+type FetchChannelFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<Option<String>, DbErr>>
     + Send
     + Sync;
 type BroadcastFn = dyn Fn(SeenEvent) + Send + Sync;
@@ -47,9 +43,10 @@ async fn update_seen_for_message_with(
 
             // Resolve the channel before marking, so a `message_seen` event can
             // tell the user's other clients which channel badge to decrement.
-            let channel = fetch_channel_fn(db.clone(), caller_did.clone(), message_uri.clone())
-                .await?;
-            let updated = mark_seen_fn(db, caller_did.clone(), message_uri.clone(), seen_at).await?;
+            let channel =
+                fetch_channel_fn(db.clone(), caller_did.clone(), message_uri.clone()).await?;
+            let updated =
+                mark_seen_fn(db, caller_did.clone(), message_uri.clone(), seen_at).await?;
 
             // Only broadcast when something actually changed (idempotent re-clears
             // shouldn't echo) and we know which channel to target.
@@ -79,7 +76,9 @@ fn mark_seen_boxed(
     message_uri: String,
     seen_at: String,
 ) -> BoxFuture<'static, Result<u64, DbErr>> {
-    Box::pin(async move { notifications::mark_seen_for_message(&db, &did, &message_uri, &seen_at).await })
+    Box::pin(async move {
+        notifications::mark_seen_for_message(&db, &did, &message_uri, &seen_at).await
+    })
 }
 
 fn fetch_channel_boxed(

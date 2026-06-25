@@ -104,9 +104,7 @@ async fn delete_community_with(
 
             let creds = load_creds_fn(db.clone(), did.clone())
                 .await?
-                .ok_or_else(|| {
-                    not_found_error("No credentials registered for this community.")
-                })?;
+                .ok_or_else(|| not_found_error("No credentials registered for this community."))?;
 
             if creds.source == SOURCE_APPVIEW_MANAGED {
                 // Managed account: it lives on a PDS the AppView administers,
@@ -388,19 +386,20 @@ mod tests {
 
         // Two records sit on the BYO repo; both must be deleted at the PDS,
         // addressed against the community DID (the repo).
-        let list_records = move |_: DatabaseConnection,
-                                 _: String|
-              -> BoxFuture<'static, Result<Vec<(String, String)>, DbErr>> {
-            Box::pin(async {
-                Ok(vec![
-                    (
-                        String::from("social.colibri.community"),
-                        String::from("self"),
-                    ),
-                    (String::from("social.colibri.role"), String::from("r1")),
-                ])
-            })
-        };
+        let list_records =
+            move |_: DatabaseConnection,
+                  _: String|
+                  -> BoxFuture<'static, Result<Vec<(String, String)>, DbErr>> {
+                Box::pin(async {
+                    Ok(vec![
+                        (
+                            String::from("social.colibri.community"),
+                            String::from("self"),
+                        ),
+                        (String::from("social.colibri.role"), String::from("r1")),
+                    ])
+                })
+            };
         let delete_record = move |_: String,
                                   _: String,
                                   repo: String,
@@ -472,16 +471,17 @@ mod tests {
         let creds_deleted: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
         let cd = creds_deleted.clone();
 
-        let list_records = move |_: DatabaseConnection,
-                                 _: String|
-              -> BoxFuture<'static, Result<Vec<(String, String)>, DbErr>> {
-            Box::pin(async {
-                Ok(vec![
-                    (String::from("social.colibri.role"), String::from("r1")),
-                    (String::from("social.colibri.role"), String::from("r2")),
-                ])
-            })
-        };
+        let list_records =
+            move |_: DatabaseConnection,
+                  _: String|
+                  -> BoxFuture<'static, Result<Vec<(String, String)>, DbErr>> {
+                Box::pin(async {
+                    Ok(vec![
+                        (String::from("social.colibri.role"), String::from("r1")),
+                        (String::from("social.colibri.role"), String::from("r2")),
+                    ])
+                })
+            };
         // The first delete fails; the teardown must press on and still drop
         // local state rather than aborting.
         let delete_record = move |_: String,

@@ -40,10 +40,7 @@ pub async fn fetch_mutes(
 
 type VerifyAuthFn =
     dyn Fn(String, String) -> BoxFuture<'static, Result<String, ServiceAuthError>> + Send + Sync;
-type FetchMutesFn = dyn Fn(
-        DatabaseConnection,
-        String,
-    ) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>
+type FetchMutesFn = dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Vec<record_data::Model>, DbErr>>
     + Send
     + Sync;
 

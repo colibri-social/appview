@@ -950,6 +950,7 @@ dependencies = [
  "async-stream",
  "base64 0.22.1",
  "bs58",
+ "bytes",
  "dotenvy",
  "ecdsa",
  "futures",
@@ -958,6 +959,7 @@ dependencies = [
  "jsonwebtoken",
  "k256",
  "log",
+ "lru",
  "migration",
  "openssl",
  "p256",
@@ -2907,6 +2909,15 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
