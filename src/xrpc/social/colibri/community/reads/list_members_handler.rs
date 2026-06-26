@@ -159,6 +159,7 @@ pub fn build_member(
         .and_then(|p| p.display_name.clone())
         .unwrap_or_else(|| handle.clone());
 
+    let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
     let (avatar, banner, description): (Option<Value>, Option<Value>, Option<String>) =
         match profile {
             Some(p) => (p.avatar, p.banner, p.description),
@@ -191,6 +192,7 @@ pub fn build_member(
             avatar,
             banner,
             description,
+            is_bot,
             online_state,
             status,
         },

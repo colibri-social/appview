@@ -266,6 +266,7 @@ async fn resurface_as_application_if_pending(
                         avatar: app.data.avatar,
                         banner: app.data.banner,
                         description: app.data.description,
+                        is_bot: app.data.is_bot,
                         online_state: app.data.online_state,
                         status: crate::lib::events::MemberEventMemberStatus {
                             text: app.data.status.text,
@@ -742,6 +743,7 @@ mod tests {
                             avatar: None,
                             banner: None,
                             description: None,
+                            is_bot: false,
                             online_state: String::from("offline"),
                             status:
                                 crate::xrpc::social::colibri::actor::get_data_handler::ActorStatus {

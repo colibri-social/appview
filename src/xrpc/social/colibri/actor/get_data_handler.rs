@@ -31,6 +31,8 @@ pub struct ActorData {
     pub banner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(rename = "isBot")]
+    pub is_bot: bool,
     #[serde(rename = "onlineState")]
     pub online_state: String,
     pub status: ActorStatus,
@@ -94,6 +96,7 @@ async fn get_data_with(
         .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
 
     let actor_state = get_state_fn(identity.id.clone(), db).await?;
+    let is_bot = bsky_profile.is_bot();
 
     Ok(Json(Actor {
         did: identity.id.clone(),
@@ -103,6 +106,7 @@ async fn get_data_with(
             banner: bsky_profile.banner,
             description: bsky_profile.description,
             display_name: bsky_profile.display_name.unwrap_or(handle),
+            is_bot,
             online_state: actor_state.to_string(),
             status: ActorStatus {
                 text: colibri_actor.status.unwrap_or(String::from("")),
@@ -204,5 +208,36 @@ mod tests {
         assert_eq!(result.data.display_name, "Alice");
         assert_eq!(result.data.online_state, "away");
         assert_eq!(result.data.status.text, "Working");
+        assert!(!result.data.is_bot);
+    }
+
+    #[tokio::test]
+    async fn marks_actor_as_bot_when_self_label_present() {
+        let db = mock_db();
+        let result = get_data_with(
+            String::from("alice.test"),
+            db,
+            &|_| Box::pin(async { Ok(identity_json()) }),
+            &|_did, nsid, _rkey, _| {
+                Box::pin(async move {
+                    if nsid == "app.bsky.actor.profile" {
+                        Ok(serde_json::json!({
+                            "displayName": "Alice Bot",
+                            "labels": {
+                                "$type": "com.atproto.label.defs#selfLabels",
+                                "values": [{ "val": "bot" }]
+                            }
+                        }))
+                    } else {
+                        Ok(serde_json::json!({ "communities": [] }))
+                    }
+                })
+            },
+            &|_did, _| Box::pin(async { Ok(UserState::Away) }),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.data.is_bot);
     }
 }

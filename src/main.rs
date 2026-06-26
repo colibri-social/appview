@@ -38,7 +38,7 @@ fn require_env_var(name: &str) {
 /// Client-to-client broadcast payload — used by the WS subscriber pipeline
 /// for events the AppView generates internally (e.g. typing presence) and
 /// distributes between connected clients.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EventNotification {
     pub event_type: String,
     pub data: Vec<String>,

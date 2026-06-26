@@ -234,6 +234,7 @@ fn build_actor(
         .and_then(|p| p.display_name.clone())
         .unwrap_or_else(|| handle.clone());
 
+    let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
     let (avatar, banner, description) = match profile {
         Some(p) => (p.avatar, p.banner, p.description),
         None => (None, None, None),
@@ -257,6 +258,7 @@ fn build_actor(
             avatar,
             banner,
             description,
+            is_bot,
             online_state: state.unwrap_or_else(|| String::from("offline")),
             status,
         },

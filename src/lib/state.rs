@@ -2,9 +2,9 @@ use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent}
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::tap::TapMessageRecord;
-use crate::models::user_states::{self, ActiveModel as UserStatesModel, Entity as UserStates};
+use crate::models::user_states::{self, Entity as UserStates};
 use rocket::tokio::sync::broadcast::Sender;
-use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -67,49 +67,32 @@ pub async fn broadcast_state_change(
 }
 
 pub async fn join_vc(did: String, vc: String, community: String, db: &DatabaseConnection) {
-    let _ = UserStates::insert(UserStatesModel {
-        did: ActiveValue::Set(did),
-        vc: ActiveValue::Set(Some(vc)),
-        vc_community: ActiveValue::Set(Some(community)),
-        ..Default::default()
-    })
-    .on_conflict(
-        sea_query::OnConflict::columns([user_states::Column::Did])
-            .update_column(user_states::Column::Vc)
-            .to_owned(),
-    )
-    .exec(db)
-    .await;
+    let _ = UserStates::update_many()
+        .col_expr(user_states::Column::Vc, Expr::value(vc))
+        .col_expr(user_states::Column::VcCommunity, Expr::value(community))
+        .filter(user_states::Column::Did.eq(did))
+        .exec(db)
+        .await;
 }
 
 pub async fn leave_vc(did: String, db: &DatabaseConnection) {
-    let _ = UserStates::insert(UserStatesModel {
-        did: ActiveValue::Set(did),
-        vc: ActiveValue::Set(None),
-        ..Default::default()
-    })
-    .on_conflict(
-        sea_query::OnConflict::columns([user_states::Column::Did])
-            .update_column(user_states::Column::Vc)
-            .to_owned(),
-    )
-    .exec(db)
-    .await;
+    let _ = UserStates::update_many()
+        .col_expr(user_states::Column::Vc, Expr::value(Option::<String>::None))
+        .col_expr(
+            user_states::Column::VcCommunity,
+            Expr::value(Option::<String>::None),
+        )
+        .filter(user_states::Column::Did.eq(did))
+        .exec(db)
+        .await;
 }
 
 pub async fn view_channel(did: String, channel: String, db: &DatabaseConnection) {
-    let _ = UserStates::insert(UserStatesModel {
-        did: ActiveValue::Set(did),
-        channel: ActiveValue::Set(Some(channel)),
-        ..Default::default()
-    })
-    .on_conflict(
-        sea_query::OnConflict::columns([user_states::Column::Did])
-            .update_column(user_states::Column::Channel)
-            .to_owned(),
-    )
-    .exec(db)
-    .await;
+    let _ = UserStates::update_many()
+        .col_expr(user_states::Column::Channel, Expr::value(channel))
+        .filter(user_states::Column::Did.eq(did))
+        .exec(db)
+        .await;
 }
 
 #[cfg(test)]

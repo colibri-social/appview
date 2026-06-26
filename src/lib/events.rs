@@ -39,6 +39,8 @@ pub struct MemberEventMemberData {
     pub banner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(rename = "isBot")]
+    pub is_bot: bool,
     #[serde(rename = "onlineState")]
     pub online_state: String,
     pub status: MemberEventMemberStatus,
@@ -140,6 +142,8 @@ pub struct MessageEventAuthorData {
     pub banner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(rename = "isBot")]
+    pub is_bot: bool,
     #[serde(rename = "onlineState")]
     pub online_state: String,
     pub status: MessageEventAuthorStatus,
@@ -222,6 +226,8 @@ pub struct UserEventProfile {
     pub banner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(rename = "isBot")]
+    pub is_bot: bool,
     pub handle: String,
 }
 
@@ -390,16 +396,14 @@ pub struct TypingMessageData {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-#[serde(untagged)]
-pub enum ColibriClientEventData {
-    TypingMessage(TypingMessageData),
-    View(ViewData),
-    VoiceChannel(VoiceChannelData),
-}
-
-#[derive(Serialize, Deserialize, Clone)]
 pub struct ColibriClientEvent {
     #[serde(rename = "type")]
     pub event_type: String,
-    pub data: Option<ColibriClientEventData>,
+    /// Raw payload, shape depends on `event_type`. Deliberately not a typed
+    /// enum: `TypingMessageData` and `ViewData` are structurally identical
+    /// (`{ channel: String }`), so an untagged enum can't disambiguate them
+    /// by shape — it would always pick the first matching variant regardless
+    /// of `event_type`. Callers deserialize into the concrete struct their
+    /// `event_type` arm expects.
+    pub data: Option<serde_json::Value>,
 }

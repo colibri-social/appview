@@ -35,6 +35,16 @@ pub struct ActorProfile {
     pub created_at: Option<String>,
 }
 
+impl ActorProfile {
+    /// Whether this profile carries the `bot` self-label convention
+    /// documented at docs.bsky.app for marking automated accounts.
+    pub fn is_bot(&self) -> bool {
+        self.labels
+            .as_ref()
+            .is_some_and(|l| l.values.iter().any(|v| v.val == "bot"))
+    }
+}
+
 /// com.atproto.repo.strongRef
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrongRef {

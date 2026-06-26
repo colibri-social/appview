@@ -184,6 +184,7 @@ mod tests {
                 avatar: None,
                 banner: None,
                 description: None,
+                is_bot: false,
                 online_state: String::from("offline"),
                 status: ActorStatus {
                     text: String::new(),

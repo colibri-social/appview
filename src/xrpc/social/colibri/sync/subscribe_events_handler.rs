@@ -2,8 +2,9 @@ use crate::EventNotification;
 use crate::lib::at_uri::AtUri;
 use crate::lib::event_scope::{EventScope, SharedScopedEvent};
 use crate::lib::events::{
-    ColibriClientEventData, ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent,
-    NotificationEventData, NotificationEventMessage, SeenEvent, TypingEventData,
+    ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent, NotificationEventData,
+    NotificationEventMessage, SeenEvent, TypingEventData, TypingMessageData, ViewData,
+    VoiceChannelData,
 };
 use crate::lib::get_state::get_did_states;
 use crate::lib::notifications::IndexedNotification;
@@ -54,49 +55,27 @@ async fn parse_client_event(
             Some(serde_json::to_string(&ack_res).unwrap())
         }
         "typing" => {
-            let user_message_data: ColibriClientEventData = user_message.data?;
-
-            let typing_msg_data = match user_message_data {
-                ColibriClientEventData::TypingMessage(data) => Some(data),
-                _ => None,
-            };
-
-            typing_msg_data.as_ref()?;
+            let typing_msg_data: TypingMessageData =
+                serde_json::from_value(user_message.data?).ok()?;
 
             let _ = to_c2c_broadcast.send(EventNotification {
                 event_type: String::from("typing"),
-                data: vec![did, typing_msg_data.unwrap().channel],
+                data: vec![did, typing_msg_data.channel],
             });
 
             None
         }
         "view" => {
-            let user_message_data: ColibriClientEventData = user_message.data?;
+            let view_msg_data: ViewData = serde_json::from_value(user_message.data?).ok()?;
 
-            let view_msg_data = match user_message_data {
-                ColibriClientEventData::View(data) => Some(data),
-                _ => None,
-            };
-
-            view_msg_data.as_ref()?;
-
-            view_channel(did, view_msg_data.unwrap().channel, db).await;
+            view_channel(did, view_msg_data.channel, db).await;
 
             None
         }
         "voice_join" => {
-            let user_message_data: ColibriClientEventData = user_message.data?;
+            let vc_msg_data: VoiceChannelData = serde_json::from_value(user_message.data?).ok()?;
 
-            let vc_msg_data = match user_message_data {
-                ColibriClientEventData::VoiceChannel(data) => Some(data),
-                _ => None,
-            };
-
-            vc_msg_data.as_ref()?;
-
-            let safe_data = vc_msg_data.unwrap();
-
-            join_vc(did, safe_data.channel, safe_data.community, db).await;
+            join_vc(did, vc_msg_data.channel, vc_msg_data.community, db).await;
 
             None
         }
@@ -118,17 +97,26 @@ async fn serialize_typing_broadcast(
         return None;
     }
 
-    let msg_channel = msg.data[1].clone();
     let msg_did = msg.data[0].clone();
+    let msg_channel = msg.data[1].clone();
+
+    // Filter out user who is typing
     if msg_did == did {
         return None;
     }
 
-    let states = get_did_states(did, db).await;
+    let states = get_did_states(did.clone(), db).await;
 
     if states.is_err() {
+        log::warn!(
+            "Unable to fetch states for {}: {:?}",
+            did,
+            states.map_err(|x| x.to_string())
+        );
         return None;
     }
+
+    dbg!(&states);
 
     if states.unwrap().channel.as_deref() != Some(msg_channel.as_str()) {
         return None;
@@ -575,7 +563,7 @@ mod tests {
     use crate::models::user_states;
     use rocket::tokio;
     use rocket::tokio::sync::broadcast;
-    use sea_orm::{DatabaseBackend, MockDatabase};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::collections::HashSet;
 
     #[test]
@@ -680,6 +668,39 @@ mod tests {
 
         assert!(res.is_none());
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Regression test: `TypingMessageData` and `ViewData` are both `{
+    /// channel: String }`. Before the fix, `data` was an untagged
+    /// `ColibriClientEventData` enum, which always deserialized such a
+    /// payload as `TypingMessage` (declared first) regardless of the
+    /// `event_type` field — so a `"view"` event never reached `view_channel`
+    /// and no DB write ever happened. This asserts the write actually fires.
+    #[tokio::test]
+    async fn view_event_writes_viewed_channel() {
+        let (tx, _) = broadcast::channel(4);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                last_insert_id: 1,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let res = parse_client_event(
+            r#"{"type":"view","data":{"channel":"community-1"}}"#,
+            String::from("did:plc:me"),
+            &tx,
+            &db,
+        )
+        .await;
+
+        assert!(res.is_none());
+        let log = db.into_transaction_log();
+        assert_eq!(
+            log.len(),
+            1,
+            "expected exactly one DB write from view_channel"
+        );
     }
 
     #[tokio::test]

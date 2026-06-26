@@ -165,6 +165,7 @@ async fn build_actor_handle_and_data(
         avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
         banner: profile.as_ref().and_then(|p| p.banner.clone()),
         description: profile.as_ref().and_then(|p| p.description.clone()),
+        is_bot: profile.as_ref().is_some_and(ActorProfile::is_bot),
         online_state: state,
         status: MemberEventMemberStatus {
             text: actor_data
@@ -630,6 +631,7 @@ async fn map_tap_event_with(
                         avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
                         banner: profile.as_ref().and_then(|p| p.banner.clone()),
                         description: profile.as_ref().and_then(|p| p.description.clone()),
+                        is_bot: profile.as_ref().is_some_and(ActorProfile::is_bot),
                         online_state: state,
                         status: MessageEventAuthorStatus {
                             text: actor_data
@@ -759,6 +761,7 @@ async fn map_tap_event_with(
             )
             .await?;
             let safe_profile = serde_json::from_value::<ActorProfile>(bsky_profile)?;
+            let is_bot = safe_profile.is_bot();
 
             let safe_actor_data = parse_payload::<ColibriActorData>(event_record)?;
             let handle = resolve_handle_fn(event_record.did.clone()).await?;
@@ -776,6 +779,7 @@ async fn map_tap_event_with(
                             banner: safe_profile.banner,
                             description: safe_profile.description,
                             display_name: safe_profile.display_name,
+                            is_bot,
                             handle,
                         },
                         status: Some(UserEventStatus {
@@ -806,6 +810,7 @@ async fn map_tap_event_with(
             };
 
             let safe_profile = parse_payload::<ActorProfile>(event_record)?;
+            let is_bot = safe_profile.is_bot();
 
             let handle = resolve_handle_fn(event_record.did.clone()).await?;
             let state = get_state_fn(event_record.did.clone(), db.clone()).await?;
@@ -820,6 +825,7 @@ async fn map_tap_event_with(
                             banner: safe_profile.banner,
                             description: safe_profile.description,
                             display_name: safe_profile.display_name,
+                            is_bot,
                             handle,
                         },
                         status: Some(UserEventStatus {
