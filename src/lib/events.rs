@@ -125,15 +125,9 @@ pub struct ChannelEventData {
     pub channel_type: Option<String>,
     #[serde(rename = "ownerOnly", skip_serializing_if = "Option::is_none")]
     pub owner_only: Option<bool>,
-    #[serde(
-        rename = "allowedRoles",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "allowedRoles", skip_serializing_if = "Option::is_none")]
     pub allowed_roles: Option<Vec<String>>,
-    #[serde(
-        rename = "allowedMembers",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "allowedMembers", skip_serializing_if = "Option::is_none")]
     pub allowed_members: Option<Vec<String>>,
 }
 

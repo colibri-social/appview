@@ -110,11 +110,7 @@ mod tests {
 
         let authz = member_authz(
             "did:plc:alice",
-            vec![crate::lib::test_fixtures::role(
-                "Trusted",
-                10,
-                vec![],
-            )],
+            vec![crate::lib::test_fixtures::role("Trusted", 10, vec![])],
         );
         assert!(can_post(&chan, &authz, "did:plc:alice"));
 

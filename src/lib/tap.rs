@@ -1,8 +1,7 @@
 use crate::lib::at_uri::AtUri;
 use crate::lib::channel_authz;
 use crate::lib::colibri::{
-    ColibriChannel, ColibriMembership, ColibriMessage, ColibriModeration,
-    ColibriModerationSubject,
+    ColibriChannel, ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
 };
 use crate::lib::community_authz;
 use crate::lib::community_record::fetch_community_record;
@@ -308,12 +307,24 @@ pub async fn run_connection(
                     // error, malformed JSON) — only a successfully loaded
                     // channel + authz pair that conclusively disallows the
                     // author causes a reject.
+                    //
+                    // The per-actor authz load (`load_actor_authz`) is the
+                    // expensive part — a member-table query plus a roles query
+                    // per message — so it runs ONLY when it can actually change
+                    // the outcome: the channel is genuinely restricted AND the
+                    // author isn't the community owner. An unrestricted channel
+                    // allows everyone and the owner can always post (see
+                    // `channel_authz::can_post`), so for those cases — the hot
+                    // path for the firehose — we skip the authz queries
+                    // entirely and only pay the cheap indexed channel lookup.
                     if record.collection == "social.colibri.message"
                         && record.action != "delete"
                         && let Some(payload) = record.record.as_ref()
                         && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload.clone())
                         && let Some(community_did) =
                             resolver.community_for_channel(&db, &message.channel).await
+                        // Owner may always post; skip the channel + authz reads.
+                        && record.did != community_did
                         && let Ok(Some(chan_json)) = community_write::read_cached(
                             &db,
                             &community_did,
@@ -322,6 +333,10 @@ pub async fn run_connection(
                         )
                         .await
                         && let Ok(channel) = serde_json::from_value::<ColibriChannel>(chan_json)
+                        // Unrestricted channels allow everyone — don't load authz.
+                        && (channel.owner_only == Some(true)
+                            || !channel.allowed_roles.is_empty()
+                            || !channel.allowed_members.is_empty())
                     {
                         let community_uri =
                             format!("at://{community_did}/social.colibri.community/self");
