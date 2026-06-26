@@ -1,8 +1,12 @@
 use crate::lib::at_uri::AtUri;
+use crate::lib::channel_authz;
 use crate::lib::colibri::{
-    ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
+    ColibriChannel, ColibriMembership, ColibriMessage, ColibriModeration,
+    ColibriModerationSubject,
 };
+use crate::lib::community_authz;
 use crate::lib::community_record::fetch_community_record;
+use crate::lib::community_write;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
 use crate::lib::events::{
     CommunityCreationProgressEvent, MuteEvent, MuteEventData, SeenEvent, SeenEventData,
@@ -296,6 +300,55 @@ pub async fn run_connection(
                     let record = tap_msg.record.unwrap();
 
                     log::debug!("Processing Tap event, ID {}", tap_msg.id);
+
+                    // Channel post restrictions: reject (don't index, don't
+                    // notify, don't broadcast) messages from authors not
+                    // permitted to post in the target channel. Fails open on
+                    // any inconclusive lookup (channel not yet cached, DB
+                    // error, malformed JSON) — only a successfully loaded
+                    // channel + authz pair that conclusively disallows the
+                    // author causes a reject.
+                    if record.collection == "social.colibri.message"
+                        && record.action != "delete"
+                        && let Some(payload) = record.record.as_ref()
+                        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload.clone())
+                        && let Some(community_did) =
+                            resolver.community_for_channel(&db, &message.channel).await
+                        && let Ok(Some(chan_json)) = community_write::read_cached(
+                            &db,
+                            &community_did,
+                            "social.colibri.channel",
+                            &message.channel,
+                        )
+                        .await
+                        && let Ok(channel) = serde_json::from_value::<ColibriChannel>(chan_json)
+                    {
+                        let community_uri =
+                            format!("at://{community_did}/social.colibri.community/self");
+                        match community_authz::load_actor_authz(
+                            &db,
+                            &community_uri,
+                            &record.did,
+                        )
+                        .await
+                        {
+                            Ok(authz) if !channel_authz::can_post(&channel, &authz, &record.did) => {
+                                log::info!(
+                                    "rejecting message {}/{} into restricted channel {}: author not permitted",
+                                    record.did,
+                                    record.rkey,
+                                    message.channel
+                                );
+                                ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(e) => log::warn!(
+                                "authz lookup failed for {}: {e}; allowing message through",
+                                record.did
+                            ),
+                        }
+                    }
 
                     // Centralized notification indexing for newly authored
                     // Colibri messages. Persists rows + broadcasts to live

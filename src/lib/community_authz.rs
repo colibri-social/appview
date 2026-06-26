@@ -89,6 +89,16 @@ impl ActorAuthz {
             (None, _) => false,
         }
     }
+
+    /// Hierarchy guard for granting access tied to a raw role position
+    /// (rather than another actor) — e.g. deciding whether the actor may
+    /// add or remove a given role from a channel's post-restriction
+    /// allow-list. The actor must have a strictly higher position than
+    /// `position`; an actor with no roles can never satisfy this. The owner
+    /// always satisfies it, since their `highest_position` is `i64::MAX`.
+    pub fn outranks_position(&self, position: i64) -> bool {
+        self.highest_position().is_some_and(|p| p > position)
+    }
 }
 
 /// Loads the authz state for `actor_did` in the community identified by
@@ -255,5 +265,38 @@ mod tests {
         assert!(high.outranks(&mid));
         assert!(!mid.outranks(&other_mid));
         assert!(!mid.outranks(&high));
+    }
+
+    #[test]
+    fn owner_outranks_any_position() {
+        let owner = ActorAuthz {
+            is_owner: true,
+            member: None,
+            roles: vec![],
+        };
+        assert!(owner.outranks_position(100));
+        assert!(owner.outranks_position(i64::MAX - 1));
+    }
+
+    #[test]
+    fn outranks_position_requires_strictly_higher() {
+        let mid = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:b", vec!["r1"])),
+            roles: vec![role("Mid", 10, vec![])],
+        };
+        assert!(mid.outranks_position(5));
+        assert!(!mid.outranks_position(10));
+        assert!(!mid.outranks_position(20));
+    }
+
+    #[test]
+    fn outranks_position_false_with_no_roles() {
+        let no_roles = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:c", vec![])),
+            roles: vec![],
+        };
+        assert!(!no_roles.outranks_position(i64::MIN));
     }
 }

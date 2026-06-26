@@ -96,6 +96,16 @@ pub struct ColibriChannel {
     /// Default: false
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_only: Option<bool>,
+
+    /// Role record-keys allowed to post in this channel. Empty/absent means
+    /// no role restriction (everyone may post, subject to `owner_only`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roles: Vec<String>,
+
+    /// Member DIDs explicitly allowed to post in this channel, in addition
+    /// to `allowed_roles`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_members: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

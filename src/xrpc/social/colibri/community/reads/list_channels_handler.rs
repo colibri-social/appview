@@ -16,6 +16,14 @@ pub struct Channel {
     #[serde(rename = "type")]
     pub channel_type: String,
     pub category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "ownerOnly", skip_serializing_if = "Option::is_none")]
+    pub owner_only: Option<bool>,
+    #[serde(rename = "allowedRoles", skip_serializing_if = "Vec::is_empty")]
+    pub allowed_roles: Vec<String>,
+    #[serde(rename = "allowedMembers", skip_serializing_if = "Vec::is_empty")]
+    pub allowed_members: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,6 +37,14 @@ struct StoredChannel {
     #[serde(rename = "type")]
     channel_type: String,
     category: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "ownerOnly", default)]
+    owner_only: Option<bool>,
+    #[serde(rename = "allowedRoles", default)]
+    allowed_roles: Vec<String>,
+    #[serde(rename = "allowedMembers", default)]
+    allowed_members: Vec<String>,
 }
 
 pub async fn fetch_channel_records(
@@ -82,6 +98,10 @@ async fn list_channels_with(
                     "at://{}/social.colibri.category/{}",
                     community.authority, stored.category
                 ),
+                description: stored.description,
+                owner_only: stored.owner_only,
+                allowed_roles: stored.allowed_roles,
+                allowed_members: stored.allowed_members,
             })
         })
         .collect();
@@ -134,7 +154,11 @@ mod tests {
                             "name": "general",
                             "type": "social.colibri.channel.text",
                             "category": "cat1",
-                            "community": "c1"
+                            "community": "c1",
+                            "description": "where it all happens",
+                            "ownerOnly": true,
+                            "allowedRoles": ["role-a"],
+                            "allowedMembers": ["did:plc:alice"]
                         }),
                         indexed_at: String::from(""),
                     }])
@@ -158,6 +182,13 @@ mod tests {
             result.channels[0].category,
             "at://did:plc:owner/social.colibri.category/cat1"
         );
+        assert_eq!(
+            result.channels[0].description,
+            Some(String::from("where it all happens"))
+        );
+        assert_eq!(result.channels[0].owner_only, Some(true));
+        assert_eq!(result.channels[0].allowed_roles, vec!["role-a"]);
+        assert_eq!(result.channels[0].allowed_members, vec!["did:plc:alice"]);
     }
 
     #[tokio::test]

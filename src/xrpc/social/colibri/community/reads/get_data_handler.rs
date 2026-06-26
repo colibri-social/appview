@@ -88,6 +88,14 @@ struct StoredChannel {
     #[serde(rename = "type")]
     channel_type: String,
     category: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "ownerOnly", default)]
+    owner_only: Option<bool>,
+    #[serde(rename = "allowedRoles", default)]
+    allowed_roles: Vec<String>,
+    #[serde(rename = "allowedMembers", default)]
+    allowed_members: Vec<String>,
 }
 
 type FetchDataFn =
@@ -181,6 +189,10 @@ async fn get_data_with(
                     "at://{}/social.colibri.category/{}",
                     community.authority, stored.category
                 ),
+                description: stored.description,
+                owner_only: stored.owner_only,
+                allowed_roles: stored.allowed_roles,
+                allowed_members: stored.allowed_members,
             })
         })
         .collect();

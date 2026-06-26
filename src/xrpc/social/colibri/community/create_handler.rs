@@ -364,6 +364,8 @@ async fn bootstrap_community(
         category: category_rkey.clone(),
         community: COMMUNITY_RKEY.to_string(),
         owner_only: None,
+        allowed_roles: vec![],
+        allowed_members: vec![],
     };
     let channel_ref = write_record_logged(
         create_record_fn,

@@ -116,8 +116,6 @@ async fn serialize_typing_broadcast(
         return None;
     }
 
-    dbg!(&states);
-
     if states.unwrap().channel.as_deref() != Some(msg_channel.as_str()) {
         return None;
     }

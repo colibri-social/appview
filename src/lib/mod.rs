@@ -1,6 +1,7 @@
 pub mod at_uri;
 pub mod blob_cache;
 pub mod bsky;
+pub mod channel_authz;
 pub mod channel_unread;
 pub mod colibri;
 pub mod community_authz;
