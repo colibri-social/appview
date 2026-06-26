@@ -1,4 +1,5 @@
 pub mod at_uri;
+pub mod author_cache;
 pub mod blob_cache;
 pub mod bsky;
 pub mod channel_authz;

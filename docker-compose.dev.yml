@@ -27,6 +27,8 @@ services:
     image: ghcr.io/bluesky-social/indigo/tap:latest
     restart: unless-stopped
     environment:
+      TAP_WORKERS: ${TAP_WORKERS:-12}
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-24}
       TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
       TAP_DATABASE_URL: postgres://root:colibri@postgres:5432/colibri
       TAP_SIGNAL_COLLECTION: social.colibri.actor.data

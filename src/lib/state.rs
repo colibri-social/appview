@@ -1,3 +1,4 @@
+use crate::lib::author_cache::AuthorCache;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::map_tap_event::map_tap_event;
@@ -47,10 +48,12 @@ pub async fn broadcast_state_change(
         cid: None,
     };
 
-    // The actor.data arm yields a single `Global` `user_event` and never
-    // consults the resolver, so a throwaway empty one is fine here.
+    // The actor.data arm yields a single `Global` `user_event` and consults
+    // neither the resolver nor the author cache, so throwaway empty ones are
+    // fine here.
     let resolver = CommunityResolver::new();
-    match map_tap_event(&record, db, &resolver).await {
+    let author_cache = AuthorCache::new();
+    match map_tap_event(&record, db, &resolver, &author_cache).await {
         Ok(events) => {
             for (event, scope) in events {
                 let scoped = Arc::new(ScopedEvent {

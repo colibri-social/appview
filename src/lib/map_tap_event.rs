@@ -3,6 +3,7 @@ use sea_orm::DatabaseConnection;
 use serde::de::{DeserializeOwned, Error};
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::author_cache::{AuthorCache, AuthorEnrichment};
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
@@ -117,6 +118,49 @@ async fn get_user_state(did: String, db: DatabaseConnection) -> Result<String, s
         .map_err(|e| serde_json::Error::custom(e.to_string()))
 }
 
+/// Returns the author's `app.bsky.actor.profile` + `social.colibri.actor.data`
+/// records, served from `author_cache` when warm and otherwise fetched (DB,
+/// with a live PDS fallback inside `fetch_record_fn`) and cached. The result —
+/// including "looked up, not present" — is cached so a backfill's stream of
+/// same-author messages performs these lookups once rather than per message.
+async fn cached_enrichment(
+    did: &str,
+    db: &DatabaseConnection,
+    fetch_record_fn: &FetchRecordFn,
+    author_cache: &AuthorCache,
+) -> AuthorEnrichment {
+    if let Some(hit) = author_cache.get(did) {
+        return hit;
+    }
+
+    let profile = fetch_record_fn(
+        did.to_string(),
+        String::from("app.bsky.actor.profile"),
+        String::from("self"),
+        db.clone(),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
+
+    let actor_data = fetch_record_fn(
+        did.to_string(),
+        String::from("social.colibri.actor.data"),
+        String::from("self"),
+        db.clone(),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
+
+    let enrichment = AuthorEnrichment {
+        profile,
+        actor_data,
+    };
+    author_cache.put(did, enrichment.clone());
+    enrichment
+}
+
 /// Resolves the handle and builds the enriched [`MemberEventMemberData`] for
 /// the given subject, using best-effort profile/state lookups. Individual
 /// fetch failures fall back to safe defaults so a missing profile never drops
@@ -128,6 +172,7 @@ async fn build_actor_handle_and_data(
     fetch_record_fn: &FetchRecordFn,
     resolve_handle_fn: &ResolveHandleFn,
     get_state_fn: &GetStateFn,
+    author_cache: &AuthorCache,
 ) -> (String, MemberEventMemberData) {
     let handle = resolve_handle_fn(subject_did.to_string())
         .await
@@ -137,25 +182,10 @@ async fn build_actor_handle_and_data(
         .await
         .unwrap_or_else(|_| String::from("offline"));
 
-    let profile = fetch_record_fn(
-        subject_did.to_string(),
-        String::from("app.bsky.actor.profile"),
-        String::from("self"),
-        db.clone(),
-    )
-    .await
-    .ok()
-    .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
-
-    let actor_data = fetch_record_fn(
-        subject_did.to_string(),
-        String::from("social.colibri.actor.data"),
-        String::from("self"),
-        db.clone(),
-    )
-    .await
-    .ok()
-    .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
+    let AuthorEnrichment {
+        profile,
+        actor_data,
+    } = cached_enrichment(subject_did, &db, fetch_record_fn, author_cache).await;
 
     let data = MemberEventMemberData {
         display_name: profile
@@ -182,6 +212,7 @@ async fn build_actor_handle_and_data(
 /// Builds a fully-enriched [`MemberEventMember`] for the given subject, using
 /// best-effort profile/state lookups. Individual fetch failures fall back to
 /// safe defaults so a missing profile never drops the event.
+#[allow(clippy::too_many_arguments)]
 async fn build_member_event_member(
     subject_did: &str,
     member: &ColibriMember,
@@ -190,6 +221,7 @@ async fn build_member_event_member(
     fetch_record_fn: &FetchRecordFn,
     resolve_handle_fn: &ResolveHandleFn,
     get_state_fn: &GetStateFn,
+    author_cache: &AuthorCache,
 ) -> MemberEventMember {
     let (handle, data) = build_actor_handle_and_data(
         subject_did,
@@ -197,6 +229,7 @@ async fn build_member_event_member(
         fetch_record_fn,
         resolve_handle_fn,
         get_state_fn,
+        author_cache,
     )
     .await;
 
@@ -219,6 +252,7 @@ async fn build_member_event_member(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn map_tap_event_with(
     event_record: &TapMessageRecord,
     db: DatabaseConnection,
@@ -226,6 +260,7 @@ async fn map_tap_event_with(
     fetch_record_fn: &FetchRecordFn,
     resolve_handle_fn: &ResolveHandleFn,
     get_state_fn: &GetStateFn,
+    author_cache: &AuthorCache,
 ) -> Result<Vec<ScopedServerEvent>, serde_json::Error> {
     let uri = make_event_uri(event_record);
 
@@ -369,6 +404,7 @@ async fn map_tap_event_with(
                 fetch_record_fn,
                 resolve_handle_fn,
                 get_state_fn,
+                author_cache,
             )
             .await;
 
@@ -409,6 +445,7 @@ async fn map_tap_event_with(
                     fetch_record_fn,
                     resolve_handle_fn,
                     get_state_fn,
+                    author_cache,
                 )
                 .await;
                 let join_event = ColibriServerEvent {
@@ -440,6 +477,7 @@ async fn map_tap_event_with(
                     fetch_record_fn,
                     resolve_handle_fn,
                     get_state_fn,
+                    author_cache,
                 )
                 .await;
                 return Ok(scoped(
@@ -606,25 +644,10 @@ async fn map_tap_event_with(
                     .await
                     .unwrap_or_else(|_| String::from("offline"));
 
-                let profile = fetch_record_fn(
-                    event_record.did.clone(),
-                    String::from("app.bsky.actor.profile"),
-                    String::from("self"),
-                    db.clone(),
-                )
-                .await
-                .ok()
-                .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
-
-                let actor_data = fetch_record_fn(
-                    event_record.did.clone(),
-                    String::from("social.colibri.actor.data"),
-                    String::from("self"),
-                    db.clone(),
-                )
-                .await
-                .ok()
-                .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok());
+                let AuthorEnrichment {
+                    profile,
+                    actor_data,
+                } = cached_enrichment(&event_record.did, &db, fetch_record_fn, author_cache).await;
 
                 let author = MessageEventAuthor {
                     did: event_record.did.clone(),
@@ -940,6 +963,7 @@ pub async fn map_tap_event(
     event_record: &TapMessageRecord,
     db: &DatabaseConnection,
     resolver: &CommunityResolver,
+    author_cache: &AuthorCache,
 ) -> Result<Vec<ScopedServerEvent>, serde_json::Error> {
     map_tap_event_with(
         event_record,
@@ -948,6 +972,7 @@ pub async fn map_tap_event(
         &|did, nsid, rkey, db| Box::pin(fetch_record_value(did, nsid, rkey, db)),
         &|did| Box::pin(resolve_handle_for_did(did)),
         &|did, db| Box::pin(get_user_state(did, db)),
+        author_cache,
     )
     .await
 }
@@ -997,6 +1022,30 @@ mod tests {
     /// from `record.did` and never consult it; message/reaction tests seed it.
     fn resolver() -> CommunityResolver {
         CommunityResolver::new()
+    }
+
+    /// Test shim: forwards to the real `map_tap_event_with` with a fresh
+    /// (empty) author cache, so the cache is exercised but each test stays
+    /// isolated. Shadows the glob-imported `super::map_tap_event_with`, letting
+    /// the existing six-argument test call sites stay unchanged.
+    async fn map_tap_event_with(
+        event_record: &TapMessageRecord,
+        db: DatabaseConnection,
+        resolver: &CommunityResolver,
+        fetch_record_fn: &FetchRecordFn,
+        resolve_handle_fn: &ResolveHandleFn,
+        get_state_fn: &GetStateFn,
+    ) -> Result<Vec<ScopedServerEvent>, serde_json::Error> {
+        super::map_tap_event_with(
+            event_record,
+            db,
+            resolver,
+            fetch_record_fn,
+            resolve_handle_fn,
+            get_state_fn,
+            &AuthorCache::new(),
+        )
+        .await
     }
 
     /// Asserts exactly one scoped event was produced and returns it.

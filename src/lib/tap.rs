@@ -1,4 +1,5 @@
 use crate::lib::at_uri::AtUri;
+use crate::lib::author_cache::AuthorCache;
 use crate::lib::channel_authz;
 use crate::lib::colibri::{
     ColibriChannel, ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
@@ -84,7 +85,7 @@ pub async fn connect_to_tap() -> Result<TapStream, Error> {
         format!("Basic {credentials}").parse().unwrap(),
     );
 
-    let (ws_stream, _response) = connect_async(request).await.expect("Failed to connect");
+    let (ws_stream, _response) = connect_async(request).await.map_err(Error::other)?;
 
     log::info!("Connected to Tap!");
 
@@ -195,10 +196,6 @@ pub async fn ack_tap_msg(
 /// Bundles the cross-task channels the AppView uses for tap-derived events.
 /// Stored in Rocket state so handlers can subscribe to the broadcasts.
 pub struct CommsBridge {
-    /// Outbound channel for sending messages back upstream to tap (e.g. acks).
-    /// Kept around for symmetry; not all handlers consume it.
-    #[allow(dead_code)]
-    pub channel: mpsc::Sender<String>,
     /// Fan-out of pre-mapped, scope-tagged server events derived from tap
     /// records. Each record is mapped and enriched exactly once in
     /// `run_connection`; every WS subscriber holds its own `Receiver` and
@@ -249,282 +246,436 @@ pub struct CommsBridge {
 ///
 /// This is the only place the AppView consumes tap data; subscriber WS
 /// connections read from `tx_inbound` and `notifications_tx` exclusively.
+///
+/// ## Concurrency model
+///
+/// Tap delivers historical/backfill events (`live: false`) concurrently across
+/// repos, while live events (`live: true`) are strict one-in-flight barriers.
+/// To exploit the backfill concurrency without reordering anything tap considers
+/// ordered, the connection is structured as:
+///
+/// * a **dispatcher** (this function's main loop) that reads the socket and
+///   routes each record to a shard worker keyed by its full identity
+///   (`did` + `collection` + `rkey`),
+/// * `N` **shard workers**, each draining its own bounded queue in FIFO order
+///   and running the full per-event pipeline ([`process_event`]) — so every
+///   event for a given `(did, collection, rkey)` is processed in order on a
+///   single worker, while distinct records (even within one repo's backfill)
+///   process in parallel,
+/// * a **writer task** that owns the socket's send half and forwards acks
+///   (produced by the workers via `to_tap`) upstream, independently of the
+///   read/route path so a full shard queue can never deadlock the ack path.
+///
+/// Returns when the socket closes or errors; the caller is responsible for
+/// reconnecting.
 pub async fn run_connection(
     db: DatabaseConnection,
-    mut socket: TapStream,
-    mut rx_outbound: mpsc::Receiver<String>,
+    socket: TapStream,
     tx_inbound: broadcast::Sender<SharedScopedEvent>,
-    mut to_tap: mpsc::Sender<String>,
     notifications_tx: broadcast::Sender<IndexedNotification>,
     seen_tx: broadcast::Sender<SeenEvent>,
     mute_tx: broadcast::Sender<MuteEvent>,
 ) {
     // Caches channel/message -> community DID across the connection's lifetime
-    // so per-event community resolution rarely touches the database.
-    let resolver = CommunityResolver::new();
+    // so per-event community resolution rarely touches the database. Shared
+    // across all workers (its internal maps are Mutex-guarded and append-only).
+    let resolver = std::sync::Arc::new(CommunityResolver::new());
 
-    loop {
-        rocket::tokio::select! {
-            // Message from an S2C client -> send to Remote Server
-            Some(msg) = rx_outbound.recv() => {
-                let _ = socket.send(TungMessage::Text(msg.clone().into())).await;
+    // Caches per-author profile enrichment so a single repo's backfill (every
+    // message by the same author) does the profile/actor.data lookups once
+    // instead of per message. Invalidated when a profile/actor.data record flows
+    // through (see `process_event`). Shared across all workers.
+    let author_cache = std::sync::Arc::new(AuthorCache::new());
+
+    let worker_count = tap_worker_count();
+
+    // Outbound ack channel. Acks are produced inside the workers and drained to
+    // the socket by the writer task below. Created per connection so reconnects
+    // start with a clean channel.
+    let (to_tap, mut rx_outbound) = mpsc::channel::<String>(OUTBOUND_QUEUE_CAP);
+
+    let (mut sink, mut stream) = socket.split();
+
+    // Writer task: drains acks to the socket independently of socket reads.
+    let writer = rocket::tokio::spawn(async move {
+        while let Some(msg) = rx_outbound.recv().await {
+            if sink.send(TungMessage::Text(msg.into())).await.is_err() {
+                break;
             }
-            // Message from Remote Server -> broadcast to all S2C clients
-            msg = socket.next() => {
-                if let Some(Ok(TungMessage::Text(text))) = msg {
-                    let tap_msg = match serde_json::from_str::<TapMessage>(&text) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            log::warn!("Received unparseable event from tap: {e}; payload={text}");
-                            continue;
-                        }
-                    };
+        }
+    });
 
-                    // if tap_msg.message_type == "record"
-                    //     && tap_msg.record.is_some()
-                    //     && !tap_msg.record.as_ref().unwrap().live
-                    // {
-                    //     log::warn!("Received old event from tap ({})", tap_msg.id);
-                    //     // Event isn't live, skip but stay connected
-                    //     ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
-                    //     continue;
-                    // }
+    // Spawn the shard workers. Each owns a bounded queue and processes its
+    // events sequentially; the dispatcher routes by `hash(did) % worker_count`.
+    let mut shard_txs: Vec<mpsc::Sender<WorkItem>> = Vec::with_capacity(worker_count);
+    let mut worker_handles = Vec::with_capacity(worker_count);
+    for _ in 0..worker_count {
+        let (tx, mut rx) = mpsc::channel::<WorkItem>(WORKER_QUEUE_CAP);
+        shard_txs.push(tx);
 
-                    if tap_msg.record.is_none() {
-                        // Event does not carry a record
-                        ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
-                        continue;
-                    }
+        let db = db.clone();
+        let resolver = resolver.clone();
+        let author_cache = author_cache.clone();
+        let mut to_tap = to_tap.clone();
+        let tx_inbound = tx_inbound.clone();
+        let notifications_tx = notifications_tx.clone();
+        let seen_tx = seen_tx.clone();
+        let mute_tx = mute_tx.clone();
 
-                    let record = tap_msg.record.unwrap();
+        worker_handles.push(rocket::tokio::spawn(async move {
+            while let Some(item) = rx.recv().await {
+                process_event(
+                    item.record,
+                    item.text,
+                    &db,
+                    &resolver,
+                    &author_cache,
+                    &mut to_tap,
+                    &tx_inbound,
+                    &notifications_tx,
+                    &seen_tx,
+                    &mute_tx,
+                )
+                .await;
+            }
+        }));
+    }
 
-                    log::debug!("Processing Tap event, ID {}", tap_msg.id);
+    // The dispatcher keeps one ack sender for record-less events, which need an
+    // ack but no per-shard processing.
+    let mut dispatcher_to_tap = to_tap.clone();
+    // Drop our extra reference so the workers' clones are the only senders left;
+    // once the dispatcher loop ends and the workers finish, the writer's
+    // `rx_outbound.recv()` resolves to `None` and it exits cleanly.
+    drop(to_tap);
 
-                    // Channel post restrictions: reject (don't index, don't
-                    // notify, don't broadcast) messages from authors not
-                    // permitted to post in the target channel. Fails open on
-                    // any inconclusive lookup (channel not yet cached, DB
-                    // error, malformed JSON) — only a successfully loaded
-                    // channel + authz pair that conclusively disallows the
-                    // author causes a reject.
-                    //
-                    // The per-actor authz load (`load_actor_authz`) is the
-                    // expensive part — a member-table query plus a roles query
-                    // per message — so it runs ONLY when it can actually change
-                    // the outcome: the channel is genuinely restricted AND the
-                    // author isn't the community owner. An unrestricted channel
-                    // allows everyone and the owner can always post (see
-                    // `channel_authz::can_post`), so for those cases — the hot
-                    // path for the firehose — we skip the authz queries
-                    // entirely and only pay the cheap indexed channel lookup.
-                    if record.collection == "social.colibri.message"
-                        && record.action != "delete"
-                        && let Some(payload) = record.record.as_ref()
-                        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload.clone())
-                        && let Some(community_did) =
-                            resolver.community_for_channel(&db, &message.channel).await
-                        // Owner may always post; skip the channel + authz reads.
-                        && record.did != community_did
-                        && let Ok(Some(chan_json)) = community_write::read_cached(
-                            &db,
-                            &community_did,
-                            "social.colibri.channel",
-                            &message.channel,
-                        )
-                        .await
-                        && let Ok(channel) = serde_json::from_value::<ColibriChannel>(chan_json)
-                        // Unrestricted channels allow everyone — don't load authz.
-                        && (channel.owner_only == Some(true)
-                            || !channel.allowed_roles.is_empty()
-                            || !channel.allowed_members.is_empty())
-                    {
-                        let community_uri =
-                            format!("at://{community_did}/social.colibri.community/self");
-                        match community_authz::load_actor_authz(
-                            &db,
-                            &community_uri,
-                            &record.did,
-                        )
-                        .await
-                        {
-                            Ok(authz) if !channel_authz::can_post(&channel, &authz, &record.did) => {
-                                log::info!(
-                                    "rejecting message {}/{} into restricted channel {}: author not permitted",
-                                    record.did,
-                                    record.rkey,
-                                    message.channel
-                                );
-                                ack_tap_msg(&db, &mut to_tap, text.to_string(), false).await;
-                                continue;
-                            }
-                            Ok(_) => {}
-                            Err(e) => log::warn!(
-                                "authz lookup failed for {}: {e}; allowing message through",
-                                record.did
-                            ),
-                        }
-                    }
+    // Dispatcher: read the socket and route records to shard workers.
+    while let Some(msg) = stream.next().await {
+        let text = match msg {
+            Ok(TungMessage::Text(text)) => text.to_string(),
+            // Ping/pong/binary/close frames carry no records; ignore non-text
+            // and stop on close.
+            Ok(TungMessage::Close(_)) => break,
+            Ok(_) => continue,
+            Err(e) => {
+                log::warn!("tap socket read error: {e}");
+                break;
+            }
+        };
 
-                    // Centralized notification indexing for newly authored
-                    // Colibri messages. Persists rows + broadcasts to live
-                    // WS subscribers, so each notification is written
-                    // exactly once regardless of subscriber count.
-                    if record.collection == "social.colibri.message"
-                        && record.action != "delete"
-                        && let Some(payload) = record.record.clone()
-                        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
-                    {
-                        let message_uri = format!(
-                            "at://{}/{}/{}",
-                            record.did, record.collection, record.rkey
-                        );
-                        match index_message_notifications(&db, &record.did, &message_uri, &message)
-                            .await
-                        {
-                            Ok(rows) => {
-                                for row in rows {
-                                    // Background Web Push (closed-app delivery)
-                                    // runs off-thread so its network I/O never
-                                    // stalls the tap loop. It applies its own
-                                    // DND + mute filtering. The live WS
-                                    // broadcast below is the foreground path.
-                                    let push_db = db.clone();
-                                    let push_row = row.clone();
-                                    rocket::tokio::spawn(async move {
-                                        crate::lib::push_send::deliver(push_db, push_row).await;
-                                    });
+        let tap_msg = match serde_json::from_str::<TapMessage>(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("Received unparseable event from tap: {e}; payload={text}");
+                continue;
+            }
+        };
 
-                                    let _ = notifications_tx.send(row);
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("notification indexing failed for {message_uri}: {e}");
-                            }
-                        }
-                    }
+        let Some(record) = tap_msg.record else {
+            // Event does not carry a record — ack immediately, no DB work.
+            ack_tap_msg(&db, &mut dispatcher_to_tap, text, false).await;
+            continue;
+        };
 
-                    // Self-leave detection: when a user deletes their own
-                    // `social.colibri.membership`, drop their community-side
-                    // `social.colibri.member` record. Runs before `ack_tap_msg`
-                    // so the cached membership row (which holds the community
-                    // URI) is still present to read.
-                    if record.collection == MEMBERSHIP_NSID
-                        && record.action == "delete"
-                        && let Err(e) = revoke_member_for_leave(&db, &record).await
-                    {
-                        log::error!(
-                            "member revoke on leave failed for {}/{}: {}",
-                            record.did,
-                            record.rkey,
-                            e
-                        );
-                    }
+        let shard = shard_for(&record.did, &record.collection, &record.rkey, worker_count);
 
-                    // Auto-join on membership-create. For open communities the
-                    // AppView writes the matching `social.colibri.member` record
-                    // on the community's PDS. Closed communities sit pending
-                    // until a moderator hits `approveMembership`. Banned users
-                    // get a `blockedJoin` moderation entry for the audit trail
-                    // and no member record. Legacy communities (rkey != "self"
-                    // on the community record) are not auto-joinable — we have
-                    // no community-side credentials for them.
-                    if record.collection == MEMBERSHIP_NSID
-                        && record.action != "delete"
-                        && let Err(e) = process_membership_create(&db, &record).await
-                    {
-                        log::error!(
-                            "membership-create processing failed for {}/{}: {}",
-                            record.did,
-                            record.rkey,
-                            e
-                        );
-                    }
+        log::debug!("Processing Tap event ID {} on shard {}", tap_msg.id, shard);
 
-                    // Cross-device read-state sync: when a user's read cursor
-                    // advances (a `social.colibri.channel.read` record is
-                    // indexed), tell their other connected clients to clear that
-                    // channel's white "unread messages" dot.
-                    if record.collection == "social.colibri.channel.read"
-                        && record.action != "delete"
-                        && let Some(payload) = record.record.as_ref()
-                        && let Some(channel) =
-                            payload.get("channel").and_then(|c| c.as_str())
-                    {
-                        let _ = seen_tx.send(SeenEvent {
-                            recipient_did: record.did.clone(),
-                            data: SeenEventData {
-                                event: String::from("channel_read"),
-                                channel_uri: channel.to_string(),
-                                message_uri: None,
-                                cleared: None,
-                            },
-                        });
-                    }
+        if shard_txs[shard]
+            .send(WorkItem { record, text })
+            .await
+            .is_err()
+        {
+            log::error!("tap shard worker {shard} stopped; ending dispatcher");
+            break;
+        }
+    }
 
-                    // Cross-device mute sync: when a user mutes or unmutes a
-                    // channel/community (a `social.colibri.actor.mute` record is
-                    // created or deleted), tell their other connected clients so
-                    // their mute set stays current without a reload. On delete
-                    // the record body is gone, so read the `subject` from the
-                    // cached row before `ack_tap_msg` removes it.
-                    if record.collection == "social.colibri.actor.mute" {
-                        let subject = match record.action.as_str() {
-                            "delete" => mute_subject_from_cache(&db, &record).await,
-                            _ => record
-                                .record
-                                .as_ref()
-                                .and_then(|p| p.get("subject"))
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string()),
-                        };
+    // Socket closed or errored: drop the shard senders so each worker drains
+    // its remaining queue and exits, then wait for them and the writer to wind
+    // down before returning (so the caller can reconnect cleanly).
+    drop(shard_txs);
+    drop(dispatcher_to_tap);
+    for handle in worker_handles {
+        let _ = handle.await;
+    }
+    let _ = writer.await;
+}
 
-                        if let Some(subject) = subject {
-                            let event = if record.action == "delete" {
-                                "unmuted"
-                            } else {
-                                "muted"
-                            };
-                            let _ = mute_tx.send(MuteEvent {
-                                recipient_did: record.did.clone(),
-                                data: MuteEventData {
-                                    event: String::from(event),
-                                    subject,
-                                },
-                            });
-                        }
-                    }
+/// A single tap record routed to a shard worker. Carries both the parsed
+/// `record` (for enrichment) and the original `text` (which [`ack_tap_msg`]
+/// re-serializes for the cache write + ack).
+struct WorkItem {
+    record: TapMessageRecord,
+    text: String,
+}
 
-                    // Map the record into scope-tagged events and fan them out
-                    // exactly once — every connected subscriber then only
-                    // filters by scope rather than re-mapping/enriching. This
-                    // runs BEFORE `ack_tap_msg`, which deletes the cached row
-                    // for delete actions that the mapper still needs to read
-                    // (member/reaction deletes, message community resolution).
-                    match map_tap_event(&record, &db, &resolver).await {
-                        Ok(events) => {
-                            for (event, scope) in events {
-                                let scoped = std::sync::Arc::new(ScopedEvent {
-                                    scope,
-                                    payload: event.serialize(),
-                                });
-                                let _ = tx_inbound.send(scoped);
-                            }
-                        }
-                        Err(e) => {
-                            let msg = e.to_string();
-                            // `Facet` is an expected, intentionally-unhandled
-                            // collection; don't spam the log for it.
-                            if msg != "Facet" {
-                                log::error!("Unable to map tap record {:?}: {}", record, msg);
-                            }
-                        }
-                    }
+/// Outbound ack channel capacity. Acks are small and drained promptly by the
+/// writer task; this only needs to absorb bursts from all workers at once.
+const OUTBOUND_QUEUE_CAP: usize = 256;
 
-                    ack_tap_msg(&db, &mut to_tap, text.to_string(), true).await;
+/// Per-shard work queue capacity. A full queue back-pressures the dispatcher
+/// (which back-pressures tap), bounding memory under a backlog.
+const WORKER_QUEUE_CAP: usize = 64;
+
+/// Number of shard workers. Configurable via `TAP_WORKERS`; defaults to 8 and
+/// is clamped to at least 1. Keep it comfortably under the DB pool size so
+/// workers don't starve each other on connections.
+fn tap_worker_count() -> usize {
+    std::env::var("TAP_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(8)
+}
+
+/// Maps a record's full identity (`did` + `collection` + `rkey`) to a shard
+/// index in `[0, worker_count)`. Deterministic for a given record, so every
+/// event for the same `(did, collection, rkey)` — i.e. a record's create →
+/// update → delete lifecycle — lands on the same worker and is processed in
+/// order. That per-record ordering is the only invariant the cache relies on
+/// (delete reads the row a prior create wrote); records with different rkeys are
+/// independent and may process concurrently.
+///
+/// Hashing the full identity rather than just the DID lets a *single* repo's
+/// backfill fan out across all workers (a backfill is dominated by one DID, so
+/// DID-only sharding would pin it to one worker and leave the rest idle). The
+/// trade-off: events within a repo may now be processed/acked out of order. We
+/// only ever required per-record order, not per-repo, so this is safe; clients
+/// already reconcile by URI and sort by `createdAt`.
+fn shard_for(did: &str, collection: &str, rkey: &str, worker_count: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    did.hash(&mut hasher);
+    collection.hash(&mut hasher);
+    rkey.hash(&mut hasher);
+    (hasher.finish() % worker_count.max(1) as u64) as usize
+}
+
+/// Runs the full per-event pipeline for a single tap record and acks it. This
+/// is the body each shard worker runs in FIFO order; because a repo's events
+/// all route to one worker, the read-before-delete ordering the cache relies on
+/// (member/reaction/membership/mute deletes read the cached row before
+/// `ack_tap_msg` removes it) holds exactly as in the original serial loop.
+///
+/// Steps, in order: channel-post authz gate → durable notification indexing
+/// (+ background Web Push) → membership/seen/mute side-effects → `map_tap_event`
+/// broadcast → `ack_tap_msg` (cache write + ack). Notifications are indexed
+/// before the ack so a crash never drops a durable notification for an acked
+/// event.
+#[allow(clippy::too_many_arguments)]
+async fn process_event(
+    record: TapMessageRecord,
+    text: String,
+    db: &DatabaseConnection,
+    resolver: &CommunityResolver,
+    author_cache: &AuthorCache,
+    to_tap: &mut mpsc::Sender<String>,
+    tx_inbound: &broadcast::Sender<SharedScopedEvent>,
+    notifications_tx: &broadcast::Sender<IndexedNotification>,
+    seen_tx: &broadcast::Sender<SeenEvent>,
+    mute_tx: &broadcast::Sender<MuteEvent>,
+) {
+    // Author enrichment invalidation: a change to the author's profile or
+    // actor.data must drop their cached enrichment so subsequent messages pick
+    // up the new values. The record's `did` is the author whose data changed.
+    if record.collection == "app.bsky.actor.profile"
+        || record.collection == "social.colibri.actor.data"
+    {
+        author_cache.invalidate(&record.did);
+    }
+
+    // Channel post restrictions: reject (don't index, don't notify, don't
+    // broadcast) messages from authors not permitted to post in the target
+    // channel. Fails open on any inconclusive lookup (channel not yet cached,
+    // DB error, malformed JSON) — only a successfully loaded channel + authz
+    // pair that conclusively disallows the author causes a reject.
+    //
+    // The per-actor authz load (`load_actor_authz`) is the expensive part — a
+    // member-table query plus a roles query per message — so it runs ONLY when
+    // it can actually change the outcome: the channel is genuinely restricted
+    // AND the author isn't the community owner. An unrestricted channel allows
+    // everyone and the owner can always post (see `channel_authz::can_post`), so
+    // for those cases — the hot path for the firehose — we skip the authz
+    // queries entirely and only pay the cheap indexed channel lookup.
+    if record.collection == "social.colibri.message"
+        && record.action != "delete"
+        && let Some(payload) = record.record.as_ref()
+        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload.clone())
+        && let Some(community_did) = resolver.community_for_channel(db, &message.channel).await
+        // Owner may always post; skip the channel + authz reads.
+        && record.did != community_did
+        && let Ok(Some(chan_json)) =
+            community_write::read_cached(db, &community_did, "social.colibri.channel", &message.channel)
+                .await
+        && let Ok(channel) = serde_json::from_value::<ColibriChannel>(chan_json)
+        // Unrestricted channels allow everyone — don't load authz.
+        && (channel.owner_only == Some(true)
+            || !channel.allowed_roles.is_empty()
+            || !channel.allowed_members.is_empty())
+    {
+        let community_uri = format!("at://{community_did}/social.colibri.community/self");
+        match community_authz::load_actor_authz(db, &community_uri, &record.did).await {
+            Ok(authz) if !channel_authz::can_post(&channel, &authz, &record.did) => {
+                log::info!(
+                    "rejecting message {}/{} into restricted channel {}: author not permitted",
+                    record.did,
+                    record.rkey,
+                    message.channel
+                );
+                ack_tap_msg(db, to_tap, text, false).await;
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!(
+                "authz lookup failed for {}: {e}; allowing message through",
+                record.did
+            ),
+        }
+    }
+
+    // Centralized notification indexing for newly authored Colibri messages.
+    // Persists rows + broadcasts to live WS subscribers, so each notification is
+    // written exactly once regardless of subscriber count.
+    if record.collection == "social.colibri.message"
+        && record.action != "delete"
+        && let Some(payload) = record.record.clone()
+        && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
+    {
+        let message_uri = format!("at://{}/{}/{}", record.did, record.collection, record.rkey);
+        match index_message_notifications(db, &record.did, &message_uri, &message).await {
+            Ok(rows) => {
+                for row in rows {
+                    // Background Web Push (closed-app delivery) runs off-thread
+                    // so its network I/O never stalls the worker. It applies its
+                    // own DND + mute filtering. The live WS broadcast below is
+                    // the foreground path.
+                    let push_db = db.clone();
+                    let push_row = row.clone();
+                    rocket::tokio::spawn(async move {
+                        crate::lib::push_send::deliver(push_db, push_row).await;
+                    });
+
+                    let _ = notifications_tx.send(row);
                 }
+            }
+            Err(e) => {
+                log::error!("notification indexing failed for {message_uri}: {e}");
             }
         }
     }
+
+    // Self-leave detection: when a user deletes their own
+    // `social.colibri.membership`, drop their community-side
+    // `social.colibri.member` record. Runs before `ack_tap_msg` so the cached
+    // membership row (which holds the community URI) is still present to read.
+    if record.collection == MEMBERSHIP_NSID
+        && record.action == "delete"
+        && let Err(e) = revoke_member_for_leave(db, &record).await
+    {
+        log::error!(
+            "member revoke on leave failed for {}/{}: {}",
+            record.did,
+            record.rkey,
+            e
+        );
+    }
+
+    // Auto-join on membership-create. For open communities the AppView writes
+    // the matching `social.colibri.member` record on the community's PDS. Closed
+    // communities sit pending until a moderator hits `approveMembership`. Banned
+    // users get a `blockedJoin` moderation entry for the audit trail and no
+    // member record. Legacy communities (rkey != "self" on the community record)
+    // are not auto-joinable — we have no community-side credentials for them.
+    if record.collection == MEMBERSHIP_NSID
+        && record.action != "delete"
+        && let Err(e) = process_membership_create(db, &record).await
+    {
+        log::error!(
+            "membership-create processing failed for {}/{}: {}",
+            record.did,
+            record.rkey,
+            e
+        );
+    }
+
+    // Cross-device read-state sync: when a user's read cursor advances (a
+    // `social.colibri.channel.read` record is indexed), tell their other
+    // connected clients to clear that channel's white "unread messages" dot.
+    if record.collection == "social.colibri.channel.read"
+        && record.action != "delete"
+        && let Some(payload) = record.record.as_ref()
+        && let Some(channel) = payload.get("channel").and_then(|c| c.as_str())
+    {
+        let _ = seen_tx.send(SeenEvent {
+            recipient_did: record.did.clone(),
+            data: SeenEventData {
+                event: String::from("channel_read"),
+                channel_uri: channel.to_string(),
+                message_uri: None,
+                cleared: None,
+            },
+        });
+    }
+
+    // Cross-device mute sync: when a user mutes or unmutes a channel/community
+    // (a `social.colibri.actor.mute` record is created or deleted), tell their
+    // other connected clients so their mute set stays current without a reload.
+    // On delete the record body is gone, so read the `subject` from the cached
+    // row before `ack_tap_msg` removes it.
+    if record.collection == "social.colibri.actor.mute" {
+        let subject = match record.action.as_str() {
+            "delete" => mute_subject_from_cache(db, &record).await,
+            _ => record
+                .record
+                .as_ref()
+                .and_then(|p| p.get("subject"))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string()),
+        };
+
+        if let Some(subject) = subject {
+            let event = if record.action == "delete" {
+                "unmuted"
+            } else {
+                "muted"
+            };
+            let _ = mute_tx.send(MuteEvent {
+                recipient_did: record.did.clone(),
+                data: MuteEventData {
+                    event: String::from(event),
+                    subject,
+                },
+            });
+        }
+    }
+
+    // Map the record into scope-tagged events and fan them out exactly once —
+    // every connected subscriber then only filters by scope rather than
+    // re-mapping/enriching. This runs BEFORE `ack_tap_msg`, which deletes the
+    // cached row for delete actions that the mapper still needs to read
+    // (member/reaction deletes, message community resolution).
+    match map_tap_event(&record, db, resolver, author_cache).await {
+        Ok(events) => {
+            for (event, scope) in events {
+                let scoped = std::sync::Arc::new(ScopedEvent {
+                    scope,
+                    payload: event.serialize(),
+                });
+                let _ = tx_inbound.send(scoped);
+            }
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            // `Facet` is an expected, intentionally-unhandled collection; don't
+            // spam the log for it.
+            if msg != "Facet" {
+                log::error!("Unable to map tap record {:?}: {}", record, msg);
+            }
+        }
+    }
+
+    ack_tap_msg(db, to_tap, text, true).await;
 }
 
 /// Processes a `social.colibri.membership` create event. Parses the payload,
@@ -733,7 +884,8 @@ mod tests {
     use super::*;
     use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
-    use rocket::tokio::sync::mpsc;
+    use rocket::tokio::sync::{broadcast, mpsc};
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
     #[tokio::test]
     async fn sends_ack_for_non_record_messages() {
@@ -752,5 +904,94 @@ mod tests {
         let ack_json: serde_json::Value = serde_json::from_str(&ack).unwrap();
         assert_eq!(ack_json["type"], "ack");
         assert_eq!(ack_json["id"], 1);
+    }
+
+    #[test]
+    fn shard_for_is_deterministic_and_in_range() {
+        for n in [1usize, 2, 8, 16] {
+            let first = shard_for("did:plc:alice", "social.colibri.message", "r1", n);
+            let second = shard_for("did:plc:alice", "social.colibri.message", "r1", n);
+            assert_eq!(
+                first, second,
+                "same record identity must always map to the same shard"
+            );
+            assert!(first < n, "shard index {first} must be < worker_count {n}");
+        }
+        // A single worker collapses everything onto shard 0.
+        assert_eq!(
+            shard_for("did:plc:whoever", "social.colibri.message", "r1", 1),
+            0
+        );
+    }
+
+    #[test]
+    fn shard_for_spreads_one_repos_records() {
+        // The point of hashing the full record identity: a single repo's
+        // backfill (one DID, many rkeys) must fan out across workers rather
+        // than pinning to a single shard.
+        let n = 8;
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..200 {
+            seen.insert(shard_for(
+                "did:plc:one-repo",
+                "social.colibri.message",
+                &format!("r{i}"),
+                n,
+            ));
+        }
+        assert!(
+            seen.len() >= 4,
+            "expected one repo's records to spread across shards, only hit {}",
+            seen.len()
+        );
+    }
+
+    /// `process_event` runs the full pipeline for a record and acks it back to
+    /// tap after the cache write. Uses a `channel.read` delete, which maps to no
+    /// downstream events and exercises the delete branch of `ack_tap_msg`
+    /// (cache row removed, then ack sent).
+    #[tokio::test]
+    async fn process_event_runs_pipeline_and_acks() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let resolver = CommunityResolver::new();
+        let author_cache = AuthorCache::new();
+        let (mut to_tap, mut rx) = mpsc::channel::<String>(4);
+        let (tx_inbound, _) = broadcast::channel::<SharedScopedEvent>(4);
+        let (notifications_tx, _) = broadcast::channel::<IndexedNotification>(4);
+        let (seen_tx, _) = broadcast::channel::<SeenEvent>(4);
+        let (mute_tx, _) = broadcast::channel::<MuteEvent>(4);
+
+        let text = String::from(
+            r#"{"id":7,"type":"record","record":{"live":true,"did":"did:plc:alice","rev":"r","collection":"social.colibri.channel.read","rkey":"k1","action":"delete","record":null,"cid":null}}"#,
+        );
+        let record = serde_json::from_str::<TapMessage>(&text)
+            .unwrap()
+            .record
+            .unwrap();
+
+        process_event(
+            record,
+            text,
+            &db,
+            &resolver,
+            &author_cache,
+            &mut to_tap,
+            &tx_inbound,
+            &notifications_tx,
+            &seen_tx,
+            &mute_tx,
+        )
+        .await;
+
+        let ack = rx.recv().await.unwrap();
+        let ack_json: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack_json["type"], "ack");
+        assert_eq!(ack_json["id"], 7);
     }
 }

@@ -6,11 +6,11 @@ use crate::lib::crypto;
 use crate::lib::db::init_db;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::sentry::init_sentry;
-use crate::lib::tap::{self, CommsBridge, TapStream, run_connection};
+use crate::lib::tap::{self, CommsBridge, run_connection};
 use migration::{Migrator, MigratorTrait};
 use rocket::fairing::AdHoc;
 use rocket::http::Method;
-use rocket::tokio::sync::{broadcast, mpsc};
+use rocket::tokio::sync::broadcast;
 use rocket::{get, launch, routes, tokio};
 use rocket_cors::{AllowedOrigins, CorsOptions};
 use sea_orm::DatabaseConnection;
@@ -122,7 +122,6 @@ async fn rocket() -> _ {
 
     let safe_cors = cors.to_cors().unwrap();
 
-    let (to_tap, from_tap_channel) = mpsc::channel::<String>(128);
     let (from_tap_broadcast, _) =
         broadcast::channel::<crate::lib::event_scope::SharedScopedEvent>(128);
 
@@ -141,7 +140,6 @@ async fn rocket() -> _ {
         broadcast::channel::<crate::lib::events::CommunityCreationProgressEvent>(128);
 
     let tap_bridge = CommsBridge {
-        channel: to_tap.clone(),
         broadcast: from_tap_broadcast.clone(),
         notifications: notification_broadcast.clone(),
         applications: application_broadcast,
@@ -162,20 +160,38 @@ async fn rocket() -> _ {
         .await
         .expect("Unable to apply SeaORM migrations");
 
-    let tap_stream: TapStream = tap::connect_to_tap()
-        .await
-        .expect("Failed to connect to tap");
-
-    tokio::spawn(run_connection(
-        db.clone(),
-        tap_stream,
-        from_tap_channel,
-        from_tap_broadcast,
-        to_tap,
-        notification_broadcast,
-        seen_broadcast,
-        mute_broadcast,
-    ));
+    // Supervise the tap connection: connect, run until the socket drops, then
+    // reconnect after a short backoff. The broadcast senders are cloned into
+    // each connection; subscribers' receivers persist across reconnects.
+    {
+        let tap_db = db.clone();
+        let tap_inbound = from_tap_broadcast.clone();
+        let tap_notifications = notification_broadcast.clone();
+        let tap_seen = seen_broadcast.clone();
+        let tap_mute = mute_broadcast.clone();
+        tokio::spawn(async move {
+            loop {
+                match tap::connect_to_tap().await {
+                    Ok(stream) => {
+                        run_connection(
+                            tap_db.clone(),
+                            stream,
+                            tap_inbound.clone(),
+                            tap_notifications.clone(),
+                            tap_seen.clone(),
+                            tap_mute.clone(),
+                        )
+                        .await;
+                        log::warn!("Tap connection closed; reconnecting in 5s");
+                    }
+                    Err(e) => {
+                        log::error!("Tap connect failed: {e}; retrying in 5s");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
 
     rocket::build()
         .mount(

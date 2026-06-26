@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VerificationMethod {
     pub id: String,
     #[serde(rename = "type")]
@@ -16,7 +16,7 @@ pub struct VerificationMethod {
     pub public_key_jwk: Option<serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Service {
     pub id: String,
     #[serde(rename = "type")]
@@ -25,7 +25,7 @@ pub struct Service {
     pub service_endpoint: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DidDocument {
     #[serde(rename = "@context")]
     pub context: Vec<String>,
