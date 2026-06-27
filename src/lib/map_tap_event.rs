@@ -543,6 +543,13 @@ async fn map_tap_event_with(
             // Category records live on the community's repo → `record.did` is
             // the community DID.
             let scope = EventScope::Community(event_record.did.clone());
+            // The record stores `community` as a bare record-key ("self"), but
+            // the client compares against the full community AT-URI, so emit
+            // that (matching `member_event`/`role_event`) — otherwise the
+            // client's community-scope guard drops the event and nothing
+            // updates live.
+            let community_uri =
+                format!("at://{}/social.colibri.community/self", event_record.did);
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriCategory>(event_record)?;
                 Ok(scoped(
@@ -552,7 +559,7 @@ async fn map_tap_event_with(
                             event: String::from("upsert"),
                             uri,
                             channel_order: Some(record_data.channel_order),
-                            community: Some(record_data.community),
+                            community: Some(community_uri),
                             name: Some(record_data.name),
                         })),
                     },
@@ -578,6 +585,13 @@ async fn map_tap_event_with(
             // Channel records live on the community's repo → `record.did` is
             // the community DID.
             let scope = EventScope::Community(event_record.did.clone());
+            // The record stores `community` as a bare record-key ("self"), but
+            // the client compares against the full community AT-URI, so emit
+            // that (matching `member_event`/`role_event`) — otherwise the
+            // client's community-scope guard drops the event and nothing
+            // updates live.
+            let community_uri =
+                format!("at://{}/social.colibri.community/self", event_record.did);
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriChannel>(event_record)?;
                 Ok(scoped(
@@ -587,7 +601,7 @@ async fn map_tap_event_with(
                             event: String::from("upsert"),
                             uri,
                             channel_type: Some(record_data.channel_type),
-                            community: Some(record_data.community),
+                            community: Some(community_uri),
                             category: Some(record_data.category),
                             description: record_data.description,
                             name: Some(record_data.name),
@@ -1567,6 +1581,50 @@ mod tests {
         if let Some(ColibriServerEventData::Channel(data)) = event.data {
             assert_eq!(data.event, "delete");
             assert!(data.name.is_none());
+        } else {
+            panic!("expected channel event");
+        }
+    }
+
+    #[tokio::test]
+    async fn maps_channel_upsert_emits_full_community_uri() {
+        // The record stores `community` as a bare record-key ("self"), but the
+        // event must carry the full community AT-URI — the client filters
+        // incoming events by comparing `data.community` against the community
+        // URI it holds, so a bare key would be dropped and never live-update.
+        let (event, scope) = only(
+            map_tap_event_with(
+                &record(
+                    "social.colibri.channel",
+                    "create",
+                    json!({
+                        "$type": "social.colibri.channel",
+                        "name": "General",
+                        "description": "Teste",
+                        "type": "social.colibri.channel.text",
+                        "category": "cat-rkey",
+                        "community": "self"
+                    }),
+                ),
+                mock_db(),
+                &resolver(),
+                &no_fetch,
+                &no_resolve,
+                &no_state,
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(scope, EventScope::Community(String::from("did:plc:abc")));
+        if let Some(ColibriServerEventData::Channel(data)) = event.data {
+            assert_eq!(data.event, "upsert");
+            assert_eq!(data.name.as_deref(), Some("General"));
+            assert_eq!(data.description.as_deref(), Some("Teste"));
+            assert_eq!(
+                data.community.as_deref(),
+                Some("at://did:plc:abc/social.colibri.community/self")
+            );
         } else {
             panic!("expected channel event");
         }
