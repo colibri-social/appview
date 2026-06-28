@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::lib::colibri::ColibriProfileTheme;
+
 // -- Server -> Client
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -235,6 +237,8 @@ pub struct UserEventProfile {
     #[serde(rename = "isBot")]
     pub is_bot: bool,
     pub handle: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ColibriProfileTheme>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

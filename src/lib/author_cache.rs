@@ -10,23 +10,28 @@
 //! Presence (`online_state`) is deliberately *not* cached — it changes
 //! constantly and is a cheap indexed query, so it stays per-event.
 //!
-//! Staleness is handled by invalidation: when an `app.bsky.actor.profile` or
-//! `social.colibri.actor.data` record flows through the firehose, the tap loop
-//! calls [`AuthorCache::invalidate`] for that DID so the next enrichment
-//! re-reads. One instance is shared (via `Arc`) across all shard workers.
+//! Staleness is handled by invalidation: when an `app.bsky.actor.profile`,
+//! `social.colibri.actor.profile`, or `social.colibri.actor.data` record flows
+//! through the firehose, the tap loop calls [`AuthorCache::invalidate`] for that
+//! DID so the next enrichment re-reads. One instance is shared (via `Arc`)
+//! across all shard workers.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::ColibriActorData;
+use crate::lib::colibri::{ColibriActorData, ColibriActorProfile};
 
 /// The cached author records. `None` for a field means "looked up, not present"
 /// — cached too, so authors without a profile/actor.data aren't re-fetched on
-/// every message.
+/// every message. `profile` is the raw `app.bsky.actor.profile`; `colibri_profile`
+/// is the raw `social.colibri.actor.profile`. The two are resolved into an
+/// effective profile at enrichment time (see `map_tap_event::cached_enrichment`)
+/// so member/author surfaces honour `syncBluesky` just like `getData`.
 #[derive(Clone, Default)]
 pub struct AuthorEnrichment {
     pub profile: Option<ActorProfile>,
+    pub colibri_profile: Option<ColibriActorProfile>,
     pub actor_data: Option<ColibriActorData>,
 }
 
@@ -79,6 +84,7 @@ mod tests {
             "did:plc:alice",
             AuthorEnrichment {
                 profile: Some(profile_named("Alice")),
+                colibri_profile: None,
                 actor_data: None,
             },
         );

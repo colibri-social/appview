@@ -6,8 +6,9 @@ use crate::lib::at_uri::AtUri;
 use crate::lib::author_cache::{AuthorCache, AuthorEnrichment};
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{
-    ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember,
-    ColibriMembership, ColibriMessage, ColibriModeration, ColibriReaction, ColibriRole,
+    ColibriActorData, ColibriActorProfile, ColibriCategory, ColibriChannel, ColibriCommunity,
+    ColibriMember, ColibriMembership, ColibriMessage, ColibriModeration, ColibriReaction,
+    ColibriRole, EffectiveProfile, resolve_effective_profile,
 };
 use crate::lib::event_scope::{CommunityResolver, EventScope};
 use crate::lib::events::{
@@ -61,6 +62,37 @@ type ScopedServerEvent = (ColibriServerEvent, EventScope);
 /// Convenience: a single mapped event with its scope.
 fn scoped(event: ColibriServerEvent, scope: EventScope) -> Vec<ScopedServerEvent> {
     vec![(event, scope)]
+}
+
+/// Builds a globally-scoped `user_event` from an already-resolved effective
+/// profile. Presence/profile updates are low-frequency and small, so they are
+/// delivered globally rather than computing the union of the user's communities.
+fn build_user_event_global(
+    did: String,
+    effective: EffectiveProfile,
+    is_bot: bool,
+    handle: String,
+    status: UserEventStatus,
+) -> Vec<ScopedServerEvent> {
+    scoped(
+        ColibriServerEvent {
+            event_type: String::from("user_event"),
+            data: Some(ColibriServerEventData::User(UserEventData {
+                did,
+                profile: UserEventProfile {
+                    avatar: effective.avatar,
+                    banner: effective.banner,
+                    description: effective.description,
+                    display_name: effective.display_name,
+                    is_bot,
+                    handle,
+                    theme: effective.theme,
+                },
+                status: Some(status),
+            })),
+        },
+        EventScope::Global,
+    )
 }
 
 async fn fetch_record_value(
@@ -118,11 +150,14 @@ async fn get_user_state(did: String, db: DatabaseConnection) -> Result<String, s
         .map_err(|e| serde_json::Error::custom(e.to_string()))
 }
 
-/// Returns the author's `app.bsky.actor.profile` + `social.colibri.actor.data`
-/// records, served from `author_cache` when warm and otherwise fetched (DB,
-/// with a live PDS fallback inside `fetch_record_fn`) and cached. The result —
-/// including "looked up, not present" — is cached so a backfill's stream of
-/// same-author messages performs these lookups once rather than per message.
+/// Returns the author's `app.bsky.actor.profile`, `social.colibri.actor.profile`,
+/// and `social.colibri.actor.data` records, served from `author_cache` when warm
+/// and otherwise fetched (DB, with a live PDS fallback inside `fetch_record_fn`)
+/// and cached. The Bluesky and Colibri profiles are resolved into the served
+/// profile by [`resolve_effective_profile`] at the call sites, so member/author
+/// surfaces honour `syncBluesky` exactly like `getData`. The result — including
+/// "looked up, not present" — is cached so a backfill's stream of same-author
+/// messages performs these lookups once rather than per message.
 async fn cached_enrichment(
     did: &str,
     db: &DatabaseConnection,
@@ -143,6 +178,16 @@ async fn cached_enrichment(
     .ok()
     .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
 
+    let colibri_profile = fetch_record_fn(
+        did.to_string(),
+        String::from("social.colibri.actor.profile"),
+        String::from("self"),
+        db.clone(),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ColibriActorProfile>(v).ok());
+
     let actor_data = fetch_record_fn(
         did.to_string(),
         String::from("social.colibri.actor.data"),
@@ -155,6 +200,7 @@ async fn cached_enrichment(
 
     let enrichment = AuthorEnrichment {
         profile,
+        colibri_profile,
         actor_data,
     };
     author_cache.put(did, enrichment.clone());
@@ -184,18 +230,22 @@ async fn build_actor_handle_and_data(
 
     let AuthorEnrichment {
         profile,
+        colibri_profile,
         actor_data,
     } = cached_enrichment(subject_did, &db, fetch_record_fn, author_cache).await;
 
+    // `is_bot` always comes from the Bluesky profile; the served display
+    // name/avatar/banner/description/theme come from the effective profile so a
+    // non-synced Colibri user shows their Colibri identity here, matching `getData`.
+    let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
+    let effective = resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
+
     let data = MemberEventMemberData {
-        display_name: profile
-            .as_ref()
-            .and_then(|p| p.display_name.clone())
-            .unwrap_or_default(),
-        avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
-        banner: profile.as_ref().and_then(|p| p.banner.clone()),
-        description: profile.as_ref().and_then(|p| p.description.clone()),
-        is_bot: profile.as_ref().is_some_and(ActorProfile::is_bot),
+        display_name: effective.display_name.unwrap_or_default(),
+        avatar: effective.avatar,
+        banner: effective.banner,
+        description: effective.description,
+        is_bot,
         online_state: state,
         status: MemberEventMemberStatus {
             text: actor_data
@@ -660,21 +710,26 @@ async fn map_tap_event_with(
 
                 let AuthorEnrichment {
                     profile,
+                    colibri_profile,
                     actor_data,
                 } = cached_enrichment(&event_record.did, &db, fetch_record_fn, author_cache).await;
+
+                // `is_bot` always comes from Bluesky; the served mirrored fields
+                // come from the effective profile so a non-synced Colibri author
+                // shows their Colibri identity here, matching `getData`.
+                let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
+                let effective =
+                    resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
 
                 let author = MessageEventAuthor {
                     did: event_record.did.clone(),
                     handle,
                     data: MessageEventAuthorData {
-                        display_name: profile
-                            .as_ref()
-                            .and_then(|p| p.display_name.clone())
-                            .unwrap_or_default(),
-                        avatar: profile.as_ref().and_then(|p| p.avatar.clone()),
-                        banner: profile.as_ref().and_then(|p| p.banner.clone()),
-                        description: profile.as_ref().and_then(|p| p.description.clone()),
-                        is_bot: profile.as_ref().is_some_and(ActorProfile::is_bot),
+                        display_name: effective.display_name.unwrap_or_default(),
+                        avatar: effective.avatar,
+                        banner: effective.banner,
+                        description: effective.description,
+                        is_bot,
                         online_state: state,
                         status: MessageEventAuthorStatus {
                             text: actor_data
@@ -796,50 +851,96 @@ async fn map_tap_event_with(
             }
         }
         "social.colibri.actor.data" => {
+            // A status/communities change. The profile fields in the broadcast
+            // still come from the effective profile (Colibri profile, or Bluesky
+            // when synced / un-onboarded).
+            let colibri_profile = fetch_record_fn(
+                event_record.did.clone(),
+                String::from("social.colibri.actor.profile"),
+                String::from("self"),
+                db.clone(),
+            )
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<ColibriActorProfile>(v).ok());
             let bsky_profile = fetch_record_fn(
                 event_record.did.clone(),
                 String::from("app.bsky.actor.profile"),
-                event_record.rkey.clone(),
+                String::from("self"),
                 db.clone(),
             )
-            .await?;
-            let safe_profile = serde_json::from_value::<ActorProfile>(bsky_profile)?;
-            let is_bot = safe_profile.is_bot();
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
+
+            let effective =
+                resolve_effective_profile(colibri_profile.as_ref(), bsky_profile.as_ref());
+            let is_bot = bsky_profile.as_ref().is_some_and(ActorProfile::is_bot);
 
             let safe_actor_data = parse_payload::<ColibriActorData>(event_record)?;
             let handle = resolve_handle_fn(event_record.did.clone()).await?;
             let state = get_state_fn(event_record.did.clone(), db.clone()).await?;
 
-            // Presence/profile updates are low-frequency and small; deliver
-            // globally rather than computing the union of the user's communities.
-            Ok(scoped(
-                ColibriServerEvent {
-                    event_type: String::from("user_event"),
-                    data: Some(ColibriServerEventData::User(UserEventData {
-                        did: event_record.did.clone(),
-                        profile: UserEventProfile {
-                            avatar: safe_profile.avatar,
-                            banner: safe_profile.banner,
-                            description: safe_profile.description,
-                            display_name: safe_profile.display_name,
-                            is_bot,
-                            handle,
-                        },
-                        status: Some(UserEventStatus {
-                            emoji: safe_actor_data.emoji,
-                            state,
-                            text: safe_actor_data.status.unwrap_or(String::from("")),
-                        }),
-                    })),
+            Ok(build_user_event_global(
+                event_record.did.clone(),
+                effective,
+                is_bot,
+                handle,
+                UserEventStatus {
+                    emoji: safe_actor_data.emoji,
+                    state,
+                    text: safe_actor_data.status.unwrap_or_default(),
                 },
-                EventScope::Global,
+            ))
+        }
+        "social.colibri.actor.profile" => {
+            // On create/update the payload is the new Colibri profile; on delete
+            // it is absent, so we fall back to `None` — which reverts the served
+            // profile to Bluesky.
+            let colibri_profile = parse_payload::<ColibriActorProfile>(event_record).ok();
+            let bsky_profile = fetch_record_fn(
+                event_record.did.clone(),
+                String::from("app.bsky.actor.profile"),
+                String::from("self"),
+                db.clone(),
+            )
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
+            let actor_data = fetch_record_fn(
+                event_record.did.clone(),
+                String::from("social.colibri.actor.data"),
+                String::from("self"),
+                db.clone(),
+            )
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok())
+            .unwrap_or_default();
+
+            let effective =
+                resolve_effective_profile(colibri_profile.as_ref(), bsky_profile.as_ref());
+            let is_bot = bsky_profile.as_ref().is_some_and(ActorProfile::is_bot);
+            let handle = resolve_handle_fn(event_record.did.clone()).await?;
+            let state = get_state_fn(event_record.did.clone(), db.clone()).await?;
+
+            Ok(build_user_event_global(
+                event_record.did.clone(),
+                effective,
+                is_bot,
+                handle,
+                UserEventStatus {
+                    emoji: actor_data.emoji,
+                    state,
+                    text: actor_data.status.unwrap_or_default(),
+                },
             ))
         }
         "app.bsky.actor.profile" => {
             let colibri_data = fetch_record_fn(
                 event_record.did.clone(),
                 String::from("social.colibri.actor.data"),
-                event_record.rkey.clone(),
+                String::from("self"),
                 db.clone(),
             )
             .await
@@ -852,33 +953,43 @@ async fn map_tap_event_with(
                 None => return Ok(vec![]),
             };
 
+            let colibri_profile = fetch_record_fn(
+                event_record.did.clone(),
+                String::from("social.colibri.actor.profile"),
+                String::from("self"),
+                db.clone(),
+            )
+            .await
+            .ok()
+            .and_then(|v| serde_json::from_value::<ColibriActorProfile>(v).ok());
+
+            // A Bluesky edit only affects the Colibri-served profile when the
+            // user has no Colibri profile (Bluesky is the fallback source) or has
+            // sync enabled. A non-synced Colibri profile owns its fields.
+            if matches!(&colibri_profile, Some(p) if !p.sync_bluesky) {
+                return Ok(vec![]);
+            }
+
+            // Resolve against the freshly-updated payload so synced users see the
+            // new Bluesky values immediately.
             let safe_profile = parse_payload::<ActorProfile>(event_record)?;
             let is_bot = safe_profile.is_bot();
+            let effective =
+                resolve_effective_profile(colibri_profile.as_ref(), Some(&safe_profile));
 
             let handle = resolve_handle_fn(event_record.did.clone()).await?;
             let state = get_state_fn(event_record.did.clone(), db.clone()).await?;
 
-            Ok(scoped(
-                ColibriServerEvent {
-                    event_type: String::from("user_event"),
-                    data: Some(ColibriServerEventData::User(UserEventData {
-                        did: event_record.did.clone(),
-                        profile: UserEventProfile {
-                            avatar: safe_profile.avatar,
-                            banner: safe_profile.banner,
-                            description: safe_profile.description,
-                            display_name: safe_profile.display_name,
-                            is_bot,
-                            handle,
-                        },
-                        status: Some(UserEventStatus {
-                            emoji: safe_colibri_data.emoji,
-                            state,
-                            text: safe_colibri_data.status.unwrap_or(String::from("")),
-                        }),
-                    })),
+            Ok(build_user_event_global(
+                event_record.did.clone(),
+                effective,
+                is_bot,
+                handle,
+                UserEventStatus {
+                    emoji: safe_colibri_data.emoji,
+                    state,
+                    text: safe_colibri_data.status.unwrap_or_default(),
                 },
-                EventScope::Global,
             ))
         }
         "social.colibri.role" => {
@@ -1900,6 +2011,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maps_actor_profile_to_user_event_with_theme() {
+        let (event, scope) = only(
+            map_tap_event_with(
+                &record(
+                    "social.colibri.actor.profile",
+                    "update",
+                    json!({
+                        "$type": "social.colibri.actor.profile",
+                        "displayName": "Colibri Alice",
+                        "syncBluesky": false,
+                        "theme": { "accentColor": "#ff0000" }
+                    }),
+                ),
+                mock_db(),
+                &resolver(),
+                &|_, nsid, _, _| {
+                    Box::pin(async move {
+                        match nsid.as_str() {
+                            "social.colibri.actor.data" => Ok(json!({
+                                "$type": "social.colibri.actor.data",
+                                "status": "Busy",
+                                "communities": []
+                            })),
+                            _ => Err(serde_json::Error::custom("unexpected nsid")),
+                        }
+                    })
+                },
+                &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+                &|_, _| Box::pin(async { Ok(String::from("online")) }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(scope, EventScope::Global);
+        if let Some(ColibriServerEventData::User(data)) = event.data {
+            assert_eq!(data.profile.display_name.as_deref(), Some("Colibri Alice"));
+            assert_eq!(
+                data.profile.theme.unwrap().accent_color.as_deref(),
+                Some("#ff0000")
+            );
+            assert_eq!(data.status.unwrap().text, "Busy");
+        } else {
+            panic!("expected user event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn bsky_edit_skipped_for_unsynced_colibri_profile() {
+        // A non-synced Colibri profile owns its fields, so a Bluesky edit must
+        // not change the Colibri-served profile.
+        let events = map_tap_event_with(
+            &record(
+                "app.bsky.actor.profile",
+                "update",
+                json!({ "displayName": "New Bsky Name" }),
+            ),
+            mock_db(),
+            &resolver(),
+            &|_, nsid, _, _| {
+                Box::pin(async move {
+                    match nsid.as_str() {
+                        "social.colibri.actor.data" => Ok(json!({
+                            "$type": "social.colibri.actor.data",
+                            "status": "Busy",
+                            "communities": []
+                        })),
+                        "social.colibri.actor.profile" => Ok(json!({
+                            "$type": "social.colibri.actor.profile",
+                            "displayName": "Colibri Name",
+                            "syncBluesky": false
+                        })),
+                        _ => Err(serde_json::Error::custom("unexpected nsid")),
+                    }
+                })
+            },
+            &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+            &|_, _| Box::pin(async { Ok(String::from("online")) }),
+        )
+        .await
+        .unwrap();
+
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bsky_edit_propagates_for_synced_colibri_profile() {
+        let (event, _scope) = only(
+            map_tap_event_with(
+                &record(
+                    "app.bsky.actor.profile",
+                    "update",
+                    json!({ "displayName": "New Bsky Name" }),
+                ),
+                mock_db(),
+                &resolver(),
+                &|_, nsid, _, _| {
+                    Box::pin(async move {
+                        match nsid.as_str() {
+                            "social.colibri.actor.data" => Ok(json!({
+                                "$type": "social.colibri.actor.data",
+                                "status": "Busy",
+                                "communities": []
+                            })),
+                            "social.colibri.actor.profile" => Ok(json!({
+                                "$type": "social.colibri.actor.profile",
+                                "syncBluesky": true,
+                                "theme": { "accentColor": "#abcdef" }
+                            })),
+                            _ => Err(serde_json::Error::custom("unexpected nsid")),
+                        }
+                    })
+                },
+                &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+                &|_, _| Box::pin(async { Ok(String::from("online")) }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        if let Some(ColibriServerEventData::User(data)) = event.data {
+            // Synced: the new Bluesky name flows through, Colibri theme is kept.
+            assert_eq!(data.profile.display_name.as_deref(), Some("New Bsky Name"));
+            assert_eq!(
+                data.profile.theme.unwrap().accent_color.as_deref(),
+                Some("#abcdef")
+            );
+        } else {
+            panic!("expected user event data");
+        }
+    }
+
+    #[tokio::test]
     async fn approval_collection_is_irrelevant() {
         let events = map_tap_event_with(
             &record(
@@ -2031,6 +2275,107 @@ mod tests {
             assert_eq!(data.target.as_deref(), Some("msg-1"));
         } else {
             panic!("expected reaction event");
+        }
+    }
+
+    // A non-synced Colibri profile must win over the Bluesky profile in member
+    // and message-author enrichment, exactly like `getData`. Mirrors the
+    // `get_data_handler` "unsynced" case for the firehose enrichment paths.
+    #[tokio::test]
+    async fn member_create_enrichment_uses_non_synced_colibri_profile() {
+        let events = map_tap_event_with(
+            &TapMessageRecord {
+                live: true,
+                did: String::from("did:plc:community"),
+                rev: String::from("1"),
+                collection: String::from("social.colibri.member"),
+                rkey: String::from("member-1"),
+                action: String::from("create"),
+                record: Some(json!({
+                    "$type": "social.colibri.member",
+                    "subject": "did:plc:abc",
+                    "roles": [],
+                    "joinedAt": "2026-01-01T00:00:00Z"
+                })),
+                cid: Some(String::from("cid")),
+            },
+            mock_db(),
+            &resolver(),
+            &|_, nsid, _, _| {
+                Box::pin(async move {
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(json!({ "displayName": "Bsky Alice" })),
+                        "social.colibri.actor.profile" => Ok(json!({
+                            "displayName": "Colibri Alice",
+                            "syncBluesky": false
+                        })),
+                        "social.colibri.actor.data" => Ok(json!({
+                            "$type": "social.colibri.actor.data",
+                            "communities": []
+                        })),
+                        _ => Err(serde_json::Error::custom("unexpected nsid")),
+                    }
+                })
+            },
+            &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+            &|_, _| Box::pin(async { Ok(String::from("online")) }),
+        )
+        .await
+        .unwrap();
+
+        let event = &events[0].0;
+        if let Some(ColibriServerEventData::Member(data)) = &event.data {
+            let member = data.member.as_ref().expect("member should be present");
+            assert_eq!(member.data.display_name, "Colibri Alice");
+        } else {
+            panic!("expected member_event");
+        }
+    }
+
+    #[tokio::test]
+    async fn message_author_enrichment_uses_non_synced_colibri_profile() {
+        let (event, _scope) = only(
+            map_tap_event_with(
+                &record(
+                    "social.colibri.message",
+                    "create",
+                    json!({
+                        "$type": "social.colibri.message",
+                        "text": "hi",
+                        "channel": "chan-a",
+                        "createdAt": "2026-01-01T00:00:00Z"
+                    }),
+                ),
+                mock_db(),
+                &resolver(),
+                &|_, nsid, _, _| {
+                    Box::pin(async move {
+                        match nsid.as_str() {
+                            "app.bsky.actor.profile" => Ok(json!({ "displayName": "Bsky Bob" })),
+                            "social.colibri.actor.profile" => Ok(json!({
+                                "displayName": "Colibri Bob",
+                                "syncBluesky": false
+                            })),
+                            "social.colibri.actor.data" => Ok(json!({
+                                "$type": "social.colibri.actor.data",
+                                "communities": []
+                            })),
+                            _ => Err(serde_json::Error::custom("unexpected nsid")),
+                        }
+                    })
+                },
+                &|_| Box::pin(async { Ok(String::from("bob.test")) }),
+                &|_, _| Box::pin(async { Ok(String::from("online")) }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
+            let author = data.author.expect("author should be present");
+            assert_eq!(author.data.display_name, "Colibri Bob");
+        } else {
+            panic!("expected message_event");
         }
     }
 

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::lib::bsky::ActorProfile;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColibriActorData {
     #[serde(rename = "$type", skip_serializing_if = "Option::is_none")]
@@ -18,6 +20,112 @@ pub struct ColibriActorData {
     // the user's preferred sidebar order.
     #[serde(default)]
     pub communities: Vec<String>,
+}
+
+/// Two-color gradient theme for a Colibri profile (`social.colibri.actor.profile`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriProfileGradient {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<String>,
+}
+
+/// Colibri-only profile theming. Always sourced from the Colibri profile record
+/// regardless of `syncBluesky`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriProfileTheme {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<ColibriProfileGradient>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner_color: Option<String>,
+}
+
+/// The Colibri-specific profile record (`social.colibri.actor.profile`, key
+/// `self`). Kept separate from `app.bsky.actor.profile` so Colibri never needs
+/// write access to the Bluesky record. All mirrored fields are optional: a
+/// "from scratch" profile may be essentially empty, and a synced profile omits
+/// them entirely (Bluesky stays the live source).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColibriActorProfile {
+    #[serde(rename = "$type", skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<Value>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<Value>,
+
+    /// When true, the AppView serves the four mirrored fields from the user's
+    /// `app.bsky.actor.profile` record instead of from this record.
+    #[serde(default)]
+    pub sync_bluesky: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ColibriProfileTheme>,
+}
+
+/// The profile a viewer should see for a user, after applying the Colibri
+/// profile / Bluesky / sync rules. Produced by [`resolve_effective_profile`].
+#[derive(Debug, Clone, Default)]
+pub struct EffectiveProfile {
+    pub display_name: Option<String>,
+    pub avatar: Option<Value>,
+    pub banner: Option<Value>,
+    pub description: Option<String>,
+    pub theme: Option<ColibriProfileTheme>,
+    pub sync_bluesky: bool,
+    pub has_colibri_profile: bool,
+}
+
+/// Computes the effective profile for a user from their optional Colibri profile
+/// record and optional Bluesky profile record:
+///
+/// - Colibri profile present, not synced → its own mirrored fields + theme.
+/// - Colibri profile present, `syncBluesky` → Bluesky mirrored fields + Colibri theme.
+/// - Colibri profile absent (un-onboarded) → Bluesky fields, no theme.
+///
+/// Note this does not derive `is_bot`/`handle`; those always come from the
+/// Bluesky record / identity respectively and are filled by callers.
+pub fn resolve_effective_profile(
+    colibri_profile: Option<&ColibriActorProfile>,
+    bsky_profile: Option<&ActorProfile>,
+) -> EffectiveProfile {
+    let from_bsky = |theme: Option<ColibriProfileTheme>, sync: bool, has: bool| EffectiveProfile {
+        display_name: bsky_profile.and_then(|b| b.display_name.clone()),
+        avatar: bsky_profile.and_then(|b| b.avatar.clone()),
+        banner: bsky_profile.and_then(|b| b.banner.clone()),
+        description: bsky_profile.and_then(|b| b.description.clone()),
+        theme,
+        sync_bluesky: sync,
+        has_colibri_profile: has,
+    };
+
+    match colibri_profile {
+        Some(p) if !p.sync_bluesky => EffectiveProfile {
+            display_name: p.display_name.clone(),
+            avatar: p.avatar.clone(),
+            banner: p.banner.clone(),
+            description: p.description.clone(),
+            theme: p.theme.clone(),
+            sync_bluesky: false,
+            has_colibri_profile: true,
+        },
+        Some(p) => from_bsky(p.theme.clone(), true, true),
+        None => from_bsky(None, false, false),
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -277,4 +385,76 @@ pub struct ColibriModeration {
 
     /// Format: datetime
     pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bsky(display_name: &str) -> ActorProfile {
+        serde_json::from_value(serde_json::json!({
+            "displayName": display_name,
+            "description": "from bsky",
+            "avatar": { "ref": "bsky-blob" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn unsynced_colibri_profile_uses_its_own_fields() {
+        let profile = ColibriActorProfile {
+            display_name: Some(String::from("Colibri Alice")),
+            description: Some(String::from("colibri bio")),
+            sync_bluesky: false,
+            theme: Some(ColibriProfileTheme {
+                accent_color: Some(String::from("#ff0000")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let effective = resolve_effective_profile(Some(&profile), Some(&bsky("Bsky Alice")));
+
+        assert_eq!(effective.display_name.as_deref(), Some("Colibri Alice"));
+        assert_eq!(effective.description.as_deref(), Some("colibri bio"));
+        assert!(!effective.sync_bluesky);
+        assert!(effective.has_colibri_profile);
+        assert_eq!(
+            effective.theme.unwrap().accent_color.as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[test]
+    fn synced_colibri_profile_uses_bsky_fields_but_colibri_theme() {
+        let profile = ColibriActorProfile {
+            // Mirrored fields intentionally omitted while syncing.
+            sync_bluesky: true,
+            theme: Some(ColibriProfileTheme {
+                banner_color: Some(String::from("#00ff00")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let effective = resolve_effective_profile(Some(&profile), Some(&bsky("Bsky Alice")));
+
+        assert_eq!(effective.display_name.as_deref(), Some("Bsky Alice"));
+        assert!(effective.sync_bluesky);
+        assert!(effective.has_colibri_profile);
+        assert_eq!(
+            effective.theme.unwrap().banner_color.as_deref(),
+            Some("#00ff00")
+        );
+    }
+
+    #[test]
+    fn missing_colibri_profile_falls_back_to_bsky() {
+        let effective = resolve_effective_profile(None, Some(&bsky("Bsky Alice")));
+
+        assert_eq!(effective.display_name.as_deref(), Some("Bsky Alice"));
+        assert!(!effective.sync_bluesky);
+        assert!(!effective.has_colibri_profile);
+        assert!(effective.theme.is_none());
+    }
 }

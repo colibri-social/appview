@@ -209,6 +209,7 @@ async fn get_data_with(
     let MemberAggregate {
         member_dids,
         mut profiles,
+        mut colibri_profiles,
         mut actor_data,
         mut states,
         mut handles,
@@ -220,6 +221,7 @@ async fn get_data_with(
         .map(|did| {
             let handle = handles.remove(&did);
             let profile = profiles.remove(&did);
+            let colibri_profile = colibri_profiles.remove(&did);
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
             let role_rkeys = member_roles.remove(&did).unwrap_or_default();
@@ -227,6 +229,7 @@ async fn get_data_with(
                 did,
                 handle,
                 profile,
+                colibri_profile,
                 data,
                 state,
                 &community.authority,
@@ -331,6 +334,7 @@ mod tests {
             member_aggregate: MemberAggregate {
                 member_dids: vec![String::from("did:plc:alice")],
                 profiles: HashMap::new(),
+                colibri_profiles: HashMap::new(),
                 actor_data: HashMap::new(),
                 states: HashMap::new(),
                 handles: HashMap::from([(

@@ -12,7 +12,7 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::ColibriActorData;
+use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -23,7 +23,9 @@ use crate::models::community_invitations::{
     self, ActiveModel as InvitationModel, Entity as Invitations, Model as Invitation,
 };
 use crate::models::{record_data, repos, user_states};
-use crate::xrpc::social::colibri::actor::get_data_handler::{Actor, ActorData, ActorStatus};
+use crate::xrpc::social::colibri::actor::get_data_handler::{
+    Actor, ActorStatus, actor_data_from_effective,
+};
 
 #[derive(Serialize, Debug)]
 pub struct InvitationView {
@@ -225,20 +227,17 @@ fn build_actor(
     did: String,
     handle: Option<String>,
     profile: Option<ActorProfile>,
+    colibri_profile: Option<ColibriActorProfile>,
     actor_data: Option<ColibriActorData>,
     state: Option<String>,
 ) -> Actor {
     let handle = handle.unwrap_or_else(|| did.clone());
-    let display_name = profile
-        .as_ref()
-        .and_then(|p| p.display_name.clone())
-        .unwrap_or_else(|| handle.clone());
 
+    // `is_bot` always comes from Bluesky; the served profile fields come from the
+    // effective profile so a non-synced Colibri user shows their Colibri identity
+    // here, matching `getData` and the profile popover.
     let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
-    let (avatar, banner, description) = match profile {
-        Some(p) => (p.avatar, p.banner, p.description),
-        None => (None, None, None),
-    };
+    let effective = resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
 
     let status = actor_data
         .map(|d| ActorStatus {
@@ -250,18 +249,12 @@ fn build_actor(
             emoji: None,
         });
 
+    let online_state = state.unwrap_or_else(|| String::from("offline"));
+
     Actor {
         did,
+        data: actor_data_from_effective(effective, is_bot, &handle, online_state, status),
         handle,
-        data: ActorData {
-            display_name,
-            avatar,
-            banner,
-            description,
-            is_bot,
-            online_state: state.unwrap_or_else(|| String::from("offline")),
-            status,
-        },
     }
 }
 
@@ -282,17 +275,23 @@ pub async fn hydrate_actors(
         .filter(
             Condition::any()
                 .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
+                .add(record_data::Column::Nsid.eq("social.colibri.actor.profile"))
                 .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
         )
         .all(db)
         .await?;
 
     let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
+    let mut colibri_profiles: HashMap<String, ColibriActorProfile> = HashMap::new();
     let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
     for record in self_records {
         if record.nsid == "app.bsky.actor.profile" {
             if let Ok(profile) = serde_json::from_value::<ActorProfile>(record.data) {
                 profiles.insert(record.did, profile);
+            }
+        } else if record.nsid == "social.colibri.actor.profile" {
+            if let Ok(profile) = serde_json::from_value::<ColibriActorProfile>(record.data) {
+                colibri_profiles.insert(record.did, profile);
             }
         } else if record.nsid == "social.colibri.actor.data"
             && let Ok(data) = serde_json::from_value::<ColibriActorData>(record.data)
@@ -326,6 +325,7 @@ pub async fn hydrate_actors(
                 did.clone(),
                 handles.remove(&did),
                 profiles.remove(&did),
+                colibri_profiles.remove(&did),
                 actor_data.remove(&did),
                 states.remove(&did),
             );
@@ -371,7 +371,7 @@ async fn list_invitations_with(
                     let created_by = creators
                         .get(&inv.created_by)
                         .cloned()
-                        .unwrap_or_else(|| build_actor(inv.created_by, None, None, None, None));
+                        .unwrap_or_else(|| build_actor(inv.created_by, None, None, None, None, None));
                     InvitationProfileView {
                         code: inv.code,
                         community: inv.community_uri,
@@ -704,6 +704,7 @@ mod tests {
                                 created_at: None,
                             }),
                             None,
+                            None,
                             Some(String::from("online")),
                         ),
                     )]))
@@ -804,5 +805,81 @@ mod tests {
         assert_eq!(b.len(), CODE_LENGTH);
         assert_ne!(a, b);
         assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    fn bsky(display_name: &str) -> ActorProfile {
+        serde_json::from_value(serde_json::json!({ "displayName": display_name })).unwrap()
+    }
+
+    // These three mirror the `get_data_handler` cases so hydrated actors (used
+    // by `listInvitations` and `listBannedUsers`) resolve the same effective
+    // profile as the profile popover.
+
+    #[test]
+    fn build_actor_uses_non_synced_colibri_profile() {
+        let colibri = ColibriActorProfile {
+            display_name: Some(String::from("Colibri Owner")),
+            sync_bluesky: false,
+            theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                accent_color: Some(String::from("#ff0000")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let actor = build_actor(
+            String::from("did:plc:owner"),
+            Some(String::from("owner.test")),
+            Some(bsky("Bsky Owner")),
+            Some(colibri),
+            None,
+            None,
+        );
+        assert_eq!(actor.data.display_name, "Colibri Owner");
+        assert!(!actor.data.sync_bluesky);
+        assert_eq!(
+            actor.data.theme.unwrap().accent_color.as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[test]
+    fn build_actor_synced_uses_bsky_fields_but_colibri_theme() {
+        let colibri = ColibriActorProfile {
+            sync_bluesky: true,
+            theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                banner_color: Some(String::from("#00ff00")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let actor = build_actor(
+            String::from("did:plc:owner"),
+            Some(String::from("owner.test")),
+            Some(bsky("Bsky Owner")),
+            Some(colibri),
+            None,
+            None,
+        );
+        assert_eq!(actor.data.display_name, "Bsky Owner");
+        assert!(actor.data.sync_bluesky);
+        assert_eq!(
+            actor.data.theme.unwrap().banner_color.as_deref(),
+            Some("#00ff00")
+        );
+    }
+
+    #[test]
+    fn build_actor_un_onboarded_falls_back_to_bsky() {
+        let actor = build_actor(
+            String::from("did:plc:owner"),
+            Some(String::from("owner.test")),
+            Some(bsky("Bsky Owner")),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(actor.data.display_name, "Bsky Owner");
+        assert!(!actor.data.sync_bluesky);
+        assert!(actor.data.theme.is_none());
     }
 }

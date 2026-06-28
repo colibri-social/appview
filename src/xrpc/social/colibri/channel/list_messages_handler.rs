@@ -13,12 +13,14 @@ use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::ColibriActorData;
+use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
 use crate::lib::moderation::community_moderation_state;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::{record_data, repos, user_states};
-use crate::xrpc::social::colibri::actor::get_data_handler::{ActorData, ActorStatus};
+use crate::xrpc::social::colibri::actor::get_data_handler::{
+    ActorData, ActorStatus, actor_data_from_effective,
+};
 
 const MESSAGE_NSID: &str = "social.colibri.message";
 const CHANNEL_NSID: &str = "social.colibri.channel";
@@ -225,19 +227,18 @@ fn build_author(
     did: String,
     handle: Option<String>,
     profile: Option<ActorProfile>,
+    colibri_profile: Option<ColibriActorProfile>,
     actor_data: Option<ColibriActorData>,
     state: Option<String>,
 ) -> MessageAuthor {
     let handle = handle.unwrap_or_else(|| did.clone());
-    let display_name = profile
-        .as_ref()
-        .and_then(|p| p.display_name.clone())
-        .unwrap_or_else(|| handle.clone());
+
+    // `is_bot` always comes from the Bluesky profile; the served profile fields
+    // come from the effective profile so a non-synced Colibri author shows their
+    // Colibri identity here, matching `getData` and the profile popover.
     let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
-    let (avatar, banner, description) = match profile {
-        Some(p) => (p.avatar, p.banner, p.description),
-        None => (None, None, None),
-    };
+    let effective = resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
+
     let status = actor_data
         .map(|d| ActorStatus {
             text: d.status.unwrap_or(String::from("")),
@@ -250,16 +251,8 @@ fn build_author(
     let online_state = state.unwrap_or_else(|| String::from("offline"));
     MessageAuthor {
         did,
+        data: actor_data_from_effective(effective, is_bot, &handle, online_state, status),
         handle,
-        data: ActorData {
-            display_name,
-            avatar,
-            banner,
-            description,
-            is_bot,
-            online_state,
-            status,
-        },
     }
 }
 
@@ -299,6 +292,9 @@ pub struct MessagePage {
     pub parent_records: HashMap<String, record_data::Model>,
     pub reactions: HashMap<String, Vec<ReactionSummary>>,
     pub author_profiles: HashMap<String, ActorProfile>,
+    /// Raw `social.colibri.actor.profile` records, keyed by author DID. Resolved
+    /// against `author_profiles` per the `syncBluesky` rule when building authors.
+    pub author_colibri_profiles: HashMap<String, ColibriActorProfile>,
     pub author_actor_data: HashMap<String, ColibriActorData>,
     pub author_states: HashMap<String, String>,
     pub author_handles: HashMap<String, String>,
@@ -388,58 +384,70 @@ pub async fn assemble_message_page(
         .collect();
     author_dids.sort();
 
-    let (author_profiles, author_actor_data, author_states, author_handles) =
-        if author_dids.is_empty() {
-            (
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
-                HashMap::new(),
+    let (
+        author_profiles,
+        author_colibri_profiles,
+        author_actor_data,
+        author_states,
+        author_handles,
+    ) = if author_dids.is_empty() {
+        (
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    } else {
+        let self_records = record_data::Entity::find()
+            .filter(record_data::Column::Did.is_in(author_dids.clone()))
+            .filter(record_data::Column::Rkey.eq("self"))
+            .filter(
+                Condition::any()
+                    .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
+                    .add(record_data::Column::Nsid.eq("social.colibri.actor.profile"))
+                    .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
             )
-        } else {
-            let self_records = record_data::Entity::find()
-                .filter(record_data::Column::Did.is_in(author_dids.clone()))
-                .filter(record_data::Column::Rkey.eq("self"))
-                .filter(
-                    Condition::any()
-                        .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
-                        .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
-                )
-                .all(db)
-                .await?;
+            .all(db)
+            .await?;
 
-            let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
-            let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
-            for rec in self_records {
-                if rec.nsid == "app.bsky.actor.profile" {
-                    if let Ok(p) = serde_json::from_value::<ActorProfile>(rec.data) {
-                        profiles.insert(rec.did, p);
-                    }
-                } else if rec.nsid == "social.colibri.actor.data"
-                    && let Ok(d) = serde_json::from_value::<ColibriActorData>(rec.data)
-                {
-                    actor_data.insert(rec.did, d);
+        let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
+        let mut colibri_profiles: HashMap<String, ColibriActorProfile> = HashMap::new();
+        let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
+        for rec in self_records {
+            if rec.nsid == "app.bsky.actor.profile" {
+                if let Ok(p) = serde_json::from_value::<ActorProfile>(rec.data) {
+                    profiles.insert(rec.did, p);
                 }
+            } else if rec.nsid == "social.colibri.actor.profile" {
+                if let Ok(p) = serde_json::from_value::<ColibriActorProfile>(rec.data) {
+                    colibri_profiles.insert(rec.did, p);
+                }
+            } else if rec.nsid == "social.colibri.actor.data"
+                && let Ok(d) = serde_json::from_value::<ColibriActorData>(rec.data)
+            {
+                actor_data.insert(rec.did, d);
             }
+        }
 
-            let states: HashMap<String, String> = user_states::Entity::find()
-                .filter(user_states::Column::Did.is_in(author_dids.clone()))
-                .all(db)
-                .await?
-                .into_iter()
-                .map(|row| (row.did, row.state))
-                .collect();
+        let states: HashMap<String, String> = user_states::Entity::find()
+            .filter(user_states::Column::Did.is_in(author_dids.clone()))
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|row| (row.did, row.state))
+            .collect();
 
-            let handles: HashMap<String, String> = repos::Entity::find()
-                .filter(repos::Column::Did.is_in(author_dids))
-                .all(db)
-                .await?
-                .into_iter()
-                .filter_map(|row| row.handle.map(|h| (row.did, h)))
-                .collect();
+        let handles: HashMap<String, String> = repos::Entity::find()
+            .filter(repos::Column::Did.is_in(author_dids))
+            .all(db)
+            .await?
+            .into_iter()
+            .filter_map(|row| row.handle.map(|h| (row.did, h)))
+            .collect();
 
-            (profiles, actor_data, states, handles)
-        };
+        (profiles, colibri_profiles, actor_data, states, handles)
+    };
 
     Ok(MessagePage {
         records,
@@ -447,6 +455,7 @@ pub async fn assemble_message_page(
         parent_records,
         reactions,
         author_profiles,
+        author_colibri_profiles,
         author_actor_data,
         author_states,
         author_handles,
@@ -529,6 +538,7 @@ async fn list_messages_with(
                     pr.did.clone(),
                     page.author_handles.get(&pr.did).cloned(),
                     page.author_profiles.get(&pr.did).cloned(),
+                    page.author_colibri_profiles.get(&pr.did).cloned(),
                     page.author_actor_data.get(&pr.did).cloned(),
                     page.author_states.get(&pr.did).cloned(),
                 );
@@ -549,6 +559,7 @@ async fn list_messages_with(
                 record.did.clone(),
                 page.author_handles.get(&record.did).cloned(),
                 page.author_profiles.get(&record.did).cloned(),
+                page.author_colibri_profiles.get(&record.did).cloned(),
                 page.author_actor_data.get(&record.did).cloned(),
                 page.author_states.get(&record.did).cloned(),
             );
@@ -677,6 +688,7 @@ mod tests {
                             }],
                         )]),
                         author_profiles: HashMap::new(),
+                        author_colibri_profiles: HashMap::new(),
                         author_actor_data: HashMap::new(),
                         author_states: HashMap::new(),
                         author_handles: HashMap::from([
@@ -744,6 +756,7 @@ mod tests {
                         parent_records: HashMap::new(),
                         reactions: HashMap::new(),
                         author_profiles: HashMap::new(),
+                        author_colibri_profiles: HashMap::new(),
                         author_actor_data: HashMap::new(),
                         author_states: HashMap::new(),
                         author_handles: HashMap::new(),
@@ -783,6 +796,81 @@ mod tests {
         assert_eq!(summaries[0].emoji, "🦜");
         assert_eq!(summaries[0].count, 1);
         assert_eq!(summaries[0].reactor_dids, vec![String::from("did:plc:bob")]);
+    }
+
+    fn bsky_profile(display_name: &str) -> ActorProfile {
+        serde_json::from_value(serde_json::json!({ "displayName": display_name })).unwrap()
+    }
+
+    // These three mirror the `get_data_handler` cases so message-author chips
+    // resolve the same effective profile as the popover.
+
+    #[test]
+    fn build_author_uses_non_synced_colibri_profile() {
+        let colibri = ColibriActorProfile {
+            display_name: Some(String::from("Colibri Bob")),
+            sync_bluesky: false,
+            theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                accent_color: Some(String::from("#ff0000")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let author = build_author(
+            String::from("did:plc:bob"),
+            Some(String::from("bob.test")),
+            Some(bsky_profile("Bsky Bob")),
+            Some(colibri),
+            None,
+            None,
+        );
+        assert_eq!(author.data.display_name, "Colibri Bob");
+        assert!(!author.data.sync_bluesky);
+        assert_eq!(
+            author.data.theme.unwrap().accent_color.as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[test]
+    fn build_author_synced_uses_bsky_fields_but_colibri_theme() {
+        let colibri = ColibriActorProfile {
+            sync_bluesky: true,
+            theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                banner_color: Some(String::from("#00ff00")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let author = build_author(
+            String::from("did:plc:bob"),
+            Some(String::from("bob.test")),
+            Some(bsky_profile("Bsky Bob")),
+            Some(colibri),
+            None,
+            None,
+        );
+        assert_eq!(author.data.display_name, "Bsky Bob");
+        assert!(author.data.sync_bluesky);
+        assert_eq!(
+            author.data.theme.unwrap().banner_color.as_deref(),
+            Some("#00ff00")
+        );
+    }
+
+    #[test]
+    fn build_author_un_onboarded_falls_back_to_bsky() {
+        let author = build_author(
+            String::from("did:plc:bob"),
+            Some(String::from("bob.test")),
+            Some(bsky_profile("Bsky Bob")),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(author.data.display_name, "Bsky Bob");
+        assert!(!author.data.sync_bluesky);
+        assert!(author.data.theme.is_none());
     }
 
     #[tokio::test]

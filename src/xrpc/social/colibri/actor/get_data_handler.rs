@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::ColibriActorData;
+use crate::lib::colibri::{
+    ColibriActorData, ColibriActorProfile, ColibriProfileTheme, EffectiveProfile,
+    resolve_effective_profile,
+};
 use crate::lib::did_document::DidDocument;
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::get_state::get_state;
@@ -35,6 +38,10 @@ pub struct ActorData {
     pub is_bot: bool,
     #[serde(rename = "onlineState")]
     pub online_state: String,
+    #[serde(rename = "syncBluesky")]
+    pub sync_bluesky: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ColibriProfileTheme>,
     pub status: ActorStatus,
 }
 
@@ -43,6 +50,36 @@ pub struct Actor {
     pub did: String,
     pub handle: String,
     pub data: ActorData,
+}
+
+/// Builds the wire-shape [`ActorData`] from a resolved [`EffectiveProfile`],
+/// applying the fallbacks shared by every actor-bearing surface (the profile
+/// popover via `getData`, member lists, message authors, applicants, banned
+/// users, invitation creators): an absent display name falls back to `handle`.
+/// `is_bot` is always derived from the Bluesky profile by the caller — the
+/// effective profile never carries it. Centralised here so every surface serves
+/// the same Colibri-profile / Bluesky / `syncBluesky` resolution rather than
+/// reading `app.bsky.actor.profile` directly and drifting apart.
+pub fn actor_data_from_effective(
+    effective: EffectiveProfile,
+    is_bot: bool,
+    handle: &str,
+    online_state: String,
+    status: ActorStatus,
+) -> ActorData {
+    ActorData {
+        display_name: effective
+            .display_name
+            .unwrap_or_else(|| handle.to_string()),
+        avatar: effective.avatar,
+        banner: effective.banner,
+        description: effective.description,
+        is_bot,
+        online_state,
+        sync_bluesky: effective.sync_bluesky,
+        theme: effective.theme,
+        status,
+    }
 }
 
 type ResolveIdentityFn =
@@ -75,44 +112,62 @@ async fn get_data_with(
         .unwrap()
         .to_owned();
 
-    let bsky_profile_value = get_record_fn(
+    // The Colibri profile and Bluesky profile are both optional: un-onboarded
+    // users have no Colibri profile (we fall back to Bluesky), and synced
+    // profiles may omit the mirrored fields. A missing record (or a transient
+    // fetch error) is treated as "absent" so the response degrades gracefully.
+    let colibri_profile = get_record_fn(
+        identity.id.clone(),
+        String::from("social.colibri.actor.profile"),
+        String::from("self"),
+        db.clone(),
+    )
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ColibriActorProfile>(v).ok());
+
+    let bsky_profile = get_record_fn(
         identity.id.clone(),
         String::from("app.bsky.actor.profile"),
         String::from("self"),
         db.clone(),
     )
-    .await?;
-    let bsky_profile = serde_json::from_value::<ActorProfile>(bsky_profile_value)
-        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ActorProfile>(v).ok());
 
-    let colibri_actor_value = get_record_fn(
+    let colibri_actor = get_record_fn(
         identity.id.clone(),
         String::from("social.colibri.actor.data"),
         String::from("self"),
         db.clone(),
     )
-    .await?;
-    let colibri_actor = serde_json::from_value::<ColibriActorData>(colibri_actor_value)
-        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+    .await
+    .ok()
+    .and_then(|v| serde_json::from_value::<ColibriActorData>(v).ok())
+    .unwrap_or_default();
+
+    let effective = resolve_effective_profile(colibri_profile.as_ref(), bsky_profile.as_ref());
+    // `is_bot` is always derived from the Bluesky self-label convention.
+    let is_bot = bsky_profile.as_ref().is_some_and(ActorProfile::is_bot);
 
     let actor_state = get_state_fn(identity.id.clone(), db).await?;
-    let is_bot = bsky_profile.is_bot();
+
+    let data = actor_data_from_effective(
+        effective,
+        is_bot,
+        &handle,
+        actor_state.to_string(),
+        ActorStatus {
+            text: colibri_actor.status.unwrap_or(String::from("")),
+            emoji: colibri_actor.emoji,
+        },
+    );
 
     Ok(Json(Actor {
         did: identity.id.clone(),
-        handle: handle.clone(),
-        data: ActorData {
-            avatar: bsky_profile.avatar,
-            banner: bsky_profile.banner,
-            description: bsky_profile.description,
-            display_name: bsky_profile.display_name.unwrap_or(handle),
-            is_bot,
-            online_state: actor_state.to_string(),
-            status: ActorStatus {
-                text: colibri_actor.status.unwrap_or(String::from("")),
-                emoji: colibri_actor.emoji,
-            },
-        },
+        handle,
+        data,
     }))
 }
 
@@ -174,8 +229,14 @@ mod tests {
         })
     }
 
+    /// Simulates a record absent from the index (e.g. an un-onboarded user with
+    /// no Colibri profile). `get_data_with` treats this as "no record".
+    fn not_found() -> ErrorResponse {
+        sea_orm::DbErr::RecordNotFound(String::from("not found")).into()
+    }
+
     #[tokio::test]
-    async fn builds_actor_data_from_resolved_identity_and_records() {
+    async fn unsynced_profile_uses_colibri_fields() {
         let db = mock_db();
         let result = get_data_with(
             String::from("alice.test"),
@@ -183,18 +244,23 @@ mod tests {
             &|_| Box::pin(async { Ok(identity_json()) }),
             &|_did, nsid, _rkey, _| {
                 Box::pin(async move {
-                    if nsid == "app.bsky.actor.profile" {
-                        Ok(serde_json::json!({
-                            "displayName": "Alice",
-                            "description": "Hello",
-                            "avatar": { "ref": "blob1" }
-                        }))
-                    } else {
-                        Ok(serde_json::json!({
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(serde_json::json!({
+                            "displayName": "Bsky Alice",
+                            "description": "bsky bio",
+                            "avatar": { "ref": "bsky-blob" }
+                        })),
+                        "social.colibri.actor.profile" => Ok(serde_json::json!({
+                            "displayName": "Colibri Alice",
+                            "description": "colibri bio",
+                            "syncBluesky": false,
+                            "theme": { "accentColor": "#ff0000" }
+                        })),
+                        _ => Ok(serde_json::json!({
                             "status": "Working",
                             "emoji": "🦜",
                             "communities": []
-                        }))
+                        })),
                     }
                 })
             },
@@ -205,14 +271,20 @@ mod tests {
 
         assert_eq!(result.did, "did:plc:abc");
         assert_eq!(result.handle, "alice.test");
-        assert_eq!(result.data.display_name, "Alice");
+        assert_eq!(result.data.display_name, "Colibri Alice");
+        assert_eq!(result.data.description.as_deref(), Some("colibri bio"));
+        assert!(!result.data.sync_bluesky);
+        assert_eq!(
+            result.data.theme.clone().unwrap().accent_color.as_deref(),
+            Some("#ff0000")
+        );
         assert_eq!(result.data.online_state, "away");
         assert_eq!(result.data.status.text, "Working");
         assert!(!result.data.is_bot);
     }
 
     #[tokio::test]
-    async fn marks_actor_as_bot_when_self_label_present() {
+    async fn synced_profile_uses_bsky_fields_but_colibri_theme() {
         let db = mock_db();
         let result = get_data_with(
             String::from("alice.test"),
@@ -220,16 +292,51 @@ mod tests {
             &|_| Box::pin(async { Ok(identity_json()) }),
             &|_did, nsid, _rkey, _| {
                 Box::pin(async move {
-                    if nsid == "app.bsky.actor.profile" {
-                        Ok(serde_json::json!({
-                            "displayName": "Alice Bot",
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(serde_json::json!({
+                            "displayName": "Bsky Alice",
+                            "description": "bsky bio"
+                        })),
+                        "social.colibri.actor.profile" => Ok(serde_json::json!({
+                            "syncBluesky": true,
+                            "theme": { "bannerColor": "#00ff00" }
+                        })),
+                        _ => Ok(serde_json::json!({ "communities": [] })),
+                    }
+                })
+            },
+            &|_did, _| Box::pin(async { Ok(UserState::Online) }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.data.display_name, "Bsky Alice");
+        assert!(result.data.sync_bluesky);
+        assert_eq!(
+            result.data.theme.clone().unwrap().banner_color.as_deref(),
+            Some("#00ff00")
+        );
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_bsky_when_no_colibri_profile() {
+        let db = mock_db();
+        let result = get_data_with(
+            String::from("alice.test"),
+            db,
+            &|_| Box::pin(async { Ok(identity_json()) }),
+            &|_did, nsid, _rkey, _| {
+                Box::pin(async move {
+                    match nsid.as_str() {
+                        "app.bsky.actor.profile" => Ok(serde_json::json!({
+                            "displayName": "Bsky Alice",
                             "labels": {
                                 "$type": "com.atproto.label.defs#selfLabels",
                                 "values": [{ "val": "bot" }]
                             }
-                        }))
-                    } else {
-                        Ok(serde_json::json!({ "communities": [] }))
+                        })),
+                        // No Colibri profile and no actor.data — un-onboarded.
+                        _ => Err(not_found()),
                     }
                 })
             },
@@ -238,6 +345,9 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(result.data.display_name, "Bsky Alice");
+        assert!(!result.data.sync_bluesky);
+        assert!(result.data.theme.is_none());
         assert!(result.data.is_bot);
     }
 }

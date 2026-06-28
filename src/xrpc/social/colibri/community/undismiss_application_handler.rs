@@ -151,6 +151,8 @@ mod tests {
                 description: None,
                 is_bot: false,
                 online_state: String::from("offline"),
+                sync_bluesky: false,
+                theme: None,
                 status: ActorStatus {
                     text: String::new(),
                     emoji: None,

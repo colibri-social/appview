@@ -25,10 +25,11 @@ use rocket::{State, get};
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::{ColibriActorData, ColibriMembership};
+use crate::lib::colibri::{
+    ColibriActorData, ColibriActorProfile, ColibriMembership, resolve_effective_profile,
+};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -36,7 +37,9 @@ use crate::lib::moderation::currently_banned_dids;
 use crate::lib::permissions::Permission;
 use crate::lib::responses::ErrorResponse;
 use crate::models::{record_data, repos, user_states};
-use crate::xrpc::social::colibri::actor::get_data_handler::{ActorData, ActorStatus};
+use crate::xrpc::social::colibri::actor::get_data_handler::{
+    ActorData, ActorStatus, actor_data_from_effective,
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Application {
@@ -78,6 +81,10 @@ pub struct PendingApplicant {
 pub struct ApplicationAggregate {
     pub applicants: Vec<PendingApplicant>,
     pub profiles: HashMap<String, ActorProfile>,
+    /// Raw `social.colibri.actor.profile` records, keyed by applicant DID.
+    /// Resolved against `profiles` per the `syncBluesky` rule when building each
+    /// application.
+    pub colibri_profiles: HashMap<String, ColibriActorProfile>,
     pub actor_data: HashMap<String, ColibriActorData>,
     pub states: HashMap<String, String>,
     pub handles: HashMap<String, String>,
@@ -149,6 +156,7 @@ pub async fn fetch_application_aggregate(
         return Ok(ApplicationAggregate {
             applicants,
             profiles: HashMap::new(),
+            colibri_profiles: HashMap::new(),
             actor_data: HashMap::new(),
             states: HashMap::new(),
             handles: HashMap::new(),
@@ -163,17 +171,23 @@ pub async fn fetch_application_aggregate(
         .filter(
             Condition::any()
                 .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
+                .add(record_data::Column::Nsid.eq("social.colibri.actor.profile"))
                 .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
         )
         .all(db)
         .await?;
 
     let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
+    let mut colibri_profiles: HashMap<String, ColibriActorProfile> = HashMap::new();
     let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
     for record in self_records {
         if record.nsid == "app.bsky.actor.profile" {
             if let Ok(profile) = serde_json::from_value::<ActorProfile>(record.data) {
                 profiles.insert(record.did, profile);
+            }
+        } else if record.nsid == "social.colibri.actor.profile" {
+            if let Ok(profile) = serde_json::from_value::<ColibriActorProfile>(record.data) {
+                colibri_profiles.insert(record.did, profile);
             }
         } else if record.nsid == "social.colibri.actor.data"
             && let Ok(data) = serde_json::from_value::<ColibriActorData>(record.data)
@@ -203,6 +217,7 @@ pub async fn fetch_application_aggregate(
     Ok(ApplicationAggregate {
         applicants,
         profiles,
+        colibri_profiles,
         actor_data,
         states,
         handles,
@@ -215,6 +230,7 @@ pub fn build_applications(aggregate: ApplicationAggregate) -> Vec<Application> {
     let ApplicationAggregate {
         applicants,
         mut profiles,
+        mut colibri_profiles,
         mut actor_data,
         mut states,
         mut handles,
@@ -231,19 +247,15 @@ pub fn build_applications(aggregate: ApplicationAggregate) -> Vec<Application> {
 
             let handle = handles.remove(&did).unwrap_or_else(|| did.clone());
             let profile = profiles.remove(&did);
+            let colibri_profile = colibri_profiles.remove(&did);
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
 
-            let display_name = profile
-                .as_ref()
-                .and_then(|p| p.display_name.clone())
-                .unwrap_or_else(|| handle.clone());
+            // `is_bot` always comes from Bluesky; the served profile fields come
+            // from the effective profile so a non-synced Colibri applicant shows
+            // their Colibri identity here, matching `getData`.
             let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
-            let (avatar, banner, description): (Option<Value>, Option<Value>, Option<String>) =
-                match profile {
-                    Some(p) => (p.avatar, p.banner, p.description),
-                    None => (None, None, None),
-                };
+            let effective = resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
             let status = data
                 .map(|d| ActorStatus {
                     text: d.status.unwrap_or(String::from("")),
@@ -256,19 +268,11 @@ pub fn build_applications(aggregate: ApplicationAggregate) -> Vec<Application> {
             let online_state = state.unwrap_or_else(|| String::from("offline"));
 
             Application {
-                did,
-                handle,
                 membership: membership_uri,
                 created_at,
-                data: ActorData {
-                    display_name,
-                    avatar,
-                    banner,
-                    description,
-                    is_bot,
-                    online_state,
-                    status,
-                },
+                data: actor_data_from_effective(effective, is_bot, &handle, online_state, status),
+                did,
+                handle,
             }
         })
         .collect()
@@ -404,10 +408,105 @@ mod tests {
         ApplicationAggregate {
             applicants,
             profiles: HashMap::new(),
+            colibri_profiles: HashMap::new(),
             actor_data: HashMap::new(),
             states: HashMap::new(),
             handles: HashMap::new(),
         }
+    }
+
+    fn applicant(did: &str) -> Vec<PendingApplicant> {
+        vec![PendingApplicant {
+            did: String::from(did),
+            membership_uri: format!("at://{did}/social.colibri.membership/m1"),
+            created_at: String::from("2026-01-01T00:00:00Z"),
+        }]
+    }
+
+    fn bsky(display_name: &str) -> ActorProfile {
+        ActorProfile {
+            display_name: Some(display_name.to_string()),
+            description: Some(String::from("bsky bio")),
+            pronouns: None,
+            website: None,
+            avatar: None,
+            banner: None,
+            labels: None,
+            joined_via_starter_pack: None,
+            pinned_post: None,
+            created_at: None,
+        }
+    }
+
+    // These three mirror the `get_data_handler` cases so the application queue
+    // resolves the same effective profile as the profile popover.
+
+    #[test]
+    fn build_applications_uses_non_synced_colibri_profile() {
+        let mut aggregate = empty_aggregate(applicant("did:plc:alice"));
+        aggregate
+            .profiles
+            .insert(String::from("did:plc:alice"), bsky("Bsky Alice"));
+        aggregate.colibri_profiles.insert(
+            String::from("did:plc:alice"),
+            ColibriActorProfile {
+                display_name: Some(String::from("Colibri Alice")),
+                sync_bluesky: false,
+                theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                    accent_color: Some(String::from("#ff0000")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let alice = &build_applications(aggregate)[0];
+        assert_eq!(alice.data.display_name, "Colibri Alice");
+        assert!(!alice.data.sync_bluesky);
+        assert_eq!(
+            alice.data.theme.clone().unwrap().accent_color.as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[test]
+    fn build_applications_synced_uses_bsky_fields_but_colibri_theme() {
+        let mut aggregate = empty_aggregate(applicant("did:plc:alice"));
+        aggregate
+            .profiles
+            .insert(String::from("did:plc:alice"), bsky("Bsky Alice"));
+        aggregate.colibri_profiles.insert(
+            String::from("did:plc:alice"),
+            ColibriActorProfile {
+                sync_bluesky: true,
+                theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                    banner_color: Some(String::from("#00ff00")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let alice = &build_applications(aggregate)[0];
+        assert_eq!(alice.data.display_name, "Bsky Alice");
+        assert!(alice.data.sync_bluesky);
+        assert_eq!(
+            alice.data.theme.clone().unwrap().banner_color.as_deref(),
+            Some("#00ff00")
+        );
+    }
+
+    #[test]
+    fn build_applications_un_onboarded_falls_back_to_bsky() {
+        let mut aggregate = empty_aggregate(applicant("did:plc:alice"));
+        aggregate
+            .profiles
+            .insert(String::from("did:plc:alice"), bsky("Bsky Alice"));
+
+        let alice = &build_applications(aggregate)[0];
+        assert_eq!(alice.data.display_name, "Bsky Alice");
+        assert!(!alice.data.sync_bluesky);
+        assert!(alice.data.theme.is_none());
     }
 
     #[test]

@@ -476,10 +476,13 @@ async fn process_event(
     seen_tx: &broadcast::Sender<SeenEvent>,
     mute_tx: &broadcast::Sender<MuteEvent>,
 ) {
-    // Author enrichment invalidation: a change to the author's profile or
-    // actor.data must drop their cached enrichment so subsequent messages pick
-    // up the new values. The record's `did` is the author whose data changed.
+    // Author enrichment invalidation: a change to the author's Bluesky profile,
+    // Colibri profile, or actor.data must drop their cached enrichment so
+    // subsequent messages pick up the new values. The Colibri profile feeds the
+    // effective-profile resolution (display name / avatar / theme / syncBluesky),
+    // so it invalidates here too. The record's `did` is the author who changed.
     if record.collection == "app.bsky.actor.profile"
+        || record.collection == "social.colibri.actor.profile"
         || record.collection == "social.colibri.actor.data"
     {
         author_cache.invalidate(&record.did);

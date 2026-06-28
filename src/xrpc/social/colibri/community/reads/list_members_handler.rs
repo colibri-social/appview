@@ -5,14 +5,15 @@ use rocket::serde::json::Json;
 use rocket::{State, get};
 use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::ColibriActorData;
+use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::{record_data, repos, user_states};
-use crate::xrpc::social::colibri::actor::get_data_handler::{ActorData, ActorStatus};
+use crate::xrpc::social::colibri::actor::get_data_handler::{
+    ActorData, ActorStatus, actor_data_from_effective,
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Member {
@@ -31,6 +32,9 @@ pub struct MemberList {
 pub struct MemberAggregate {
     pub member_dids: Vec<String>,
     pub profiles: HashMap<String, ActorProfile>,
+    /// Raw `social.colibri.actor.profile` records, keyed by member DID. Resolved
+    /// against `profiles` per the `syncBluesky` rule when building each member.
+    pub colibri_profiles: HashMap<String, ColibriActorProfile>,
     pub actor_data: HashMap<String, ColibriActorData>,
     pub states: HashMap<String, String>,
     pub handles: HashMap<String, String>,
@@ -84,6 +88,7 @@ pub async fn fetch_member_aggregate(
         return Ok(MemberAggregate {
             member_dids,
             profiles: HashMap::new(),
+            colibri_profiles: HashMap::new(),
             actor_data: HashMap::new(),
             states: HashMap::new(),
             handles: HashMap::new(),
@@ -97,17 +102,23 @@ pub async fn fetch_member_aggregate(
         .filter(
             Condition::any()
                 .add(record_data::Column::Nsid.eq("app.bsky.actor.profile"))
+                .add(record_data::Column::Nsid.eq("social.colibri.actor.profile"))
                 .add(record_data::Column::Nsid.eq("social.colibri.actor.data")),
         )
         .all(db)
         .await?;
 
     let mut profiles: HashMap<String, ActorProfile> = HashMap::new();
+    let mut colibri_profiles: HashMap<String, ColibriActorProfile> = HashMap::new();
     let mut actor_data: HashMap<String, ColibriActorData> = HashMap::new();
     for record in self_records {
         if record.nsid == "app.bsky.actor.profile" {
             if let Ok(profile) = serde_json::from_value::<ActorProfile>(record.data) {
                 profiles.insert(record.did, profile);
+            }
+        } else if record.nsid == "social.colibri.actor.profile" {
+            if let Ok(profile) = serde_json::from_value::<ColibriActorProfile>(record.data) {
+                colibri_profiles.insert(record.did, profile);
             }
         } else if record.nsid == "social.colibri.actor.data"
             && let Ok(data) = serde_json::from_value::<ColibriActorData>(record.data)
@@ -137,6 +148,7 @@ pub async fn fetch_member_aggregate(
     Ok(MemberAggregate {
         member_dids,
         profiles,
+        colibri_profiles,
         actor_data,
         states,
         handles,
@@ -144,27 +156,25 @@ pub async fn fetch_member_aggregate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_member(
     did: String,
     handle: Option<String>,
     profile: Option<ActorProfile>,
+    colibri_profile: Option<ColibriActorProfile>,
     actor_data: Option<ColibriActorData>,
     state: Option<String>,
     community_authority: &str,
     role_rkeys: Vec<String>,
 ) -> Member {
     let handle = handle.unwrap_or_else(|| did.clone());
-    let display_name = profile
-        .as_ref()
-        .and_then(|p| p.display_name.clone())
-        .unwrap_or_else(|| handle.clone());
 
+    // `is_bot` always comes from the Bluesky profile; the served profile fields
+    // (name/avatar/banner/description/theme/syncBluesky) come from the effective
+    // profile so a non-synced Colibri user shows their Colibri identity, matching
+    // `getData` and the profile popover.
     let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
-    let (avatar, banner, description): (Option<Value>, Option<Value>, Option<String>) =
-        match profile {
-            Some(p) => (p.avatar, p.banner, p.description),
-            None => (None, None, None),
-        };
+    let effective = resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
 
     let status = actor_data
         .map(|d| ActorStatus {
@@ -185,17 +195,9 @@ pub fn build_member(
 
     Member {
         did,
-        handle,
         roles,
-        data: ActorData {
-            display_name,
-            avatar,
-            banner,
-            description,
-            is_bot,
-            online_state,
-            status,
-        },
+        data: actor_data_from_effective(effective, is_bot, &handle, online_state, status),
+        handle,
     }
 }
 
@@ -219,6 +221,7 @@ async fn list_members_with(
     let MemberAggregate {
         member_dids,
         mut profiles,
+        mut colibri_profiles,
         mut actor_data,
         mut states,
         mut handles,
@@ -230,6 +233,7 @@ async fn list_members_with(
         .map(|did| {
             let handle = handles.remove(&did);
             let profile = profiles.remove(&did);
+            let colibri_profile = colibri_profiles.remove(&did);
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
             let role_rkeys = member_roles.remove(&did).unwrap_or_default();
@@ -237,6 +241,7 @@ async fn list_members_with(
                 did,
                 handle,
                 profile,
+                colibri_profile,
                 data,
                 state,
                 &community.authority,
@@ -300,6 +305,21 @@ mod tests {
         }
     }
 
+    /// A non-synced Colibri profile: owns its mirrored fields and theme.
+    fn unsynced_colibri_profile(display_name: &str) -> ColibriActorProfile {
+        ColibriActorProfile {
+            display_name: Some(display_name.to_string()),
+            description: Some(format!("{display_name} colibri bio")),
+            avatar: Some(serde_json::json!({ "ref": "colibri-avatar" })),
+            sync_bluesky: false,
+            theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                accent_color: Some(String::from("#ff0000")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn assembles_members_from_aggregate() {
         let db = mock_db();
@@ -317,6 +337,7 @@ mod tests {
                             (String::from("did:plc:alice"), profile_for("Alice")),
                             (String::from("did:plc:bob"), profile_for("Bob")),
                         ]),
+                        colibri_profiles: HashMap::new(),
                         actor_data: HashMap::from([(
                             String::from("did:plc:alice"),
                             actor_data_for(Some("🦜"), "Working"),
@@ -370,6 +391,7 @@ mod tests {
                     Ok(MemberAggregate {
                         member_dids: vec![String::from("did:plc:alice")],
                         profiles: HashMap::new(),
+                        colibri_profiles: HashMap::new(),
                         actor_data: HashMap::new(),
                         states: HashMap::new(),
                         handles: HashMap::new(),
@@ -402,6 +424,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             "did:plc:owner",
             vec![],
         );
@@ -411,6 +434,80 @@ mod tests {
         assert_eq!(member.data.status.text, "");
         assert!(member.data.status.emoji.is_none());
         assert!(member.roles.is_empty());
+        assert!(!member.data.sync_bluesky);
+        assert!(member.data.theme.is_none());
+    }
+
+    // The three effective-profile cases below mirror the `get_data_handler`
+    // tests so member-list enrichment stays consistent with the profile popover.
+
+    #[tokio::test]
+    async fn non_synced_member_uses_colibri_profile_and_theme() {
+        let member = build_member(
+            String::from("did:plc:alice"),
+            Some(String::from("alice.test")),
+            Some(profile_for("Bsky Alice")),
+            Some(unsynced_colibri_profile("Colibri Alice")),
+            None,
+            None,
+            "did:plc:owner",
+            vec![],
+        );
+        assert_eq!(member.data.display_name, "Colibri Alice");
+        assert_eq!(
+            member.data.description.as_deref(),
+            Some("Colibri Alice colibri bio")
+        );
+        assert!(!member.data.sync_bluesky);
+        assert_eq!(
+            member.data.theme.unwrap().accent_color.as_deref(),
+            Some("#ff0000")
+        );
+    }
+
+    #[tokio::test]
+    async fn synced_member_uses_bsky_fields_but_colibri_theme() {
+        let colibri = ColibriActorProfile {
+            sync_bluesky: true,
+            theme: Some(crate::lib::colibri::ColibriProfileTheme {
+                banner_color: Some(String::from("#00ff00")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let member = build_member(
+            String::from("did:plc:alice"),
+            Some(String::from("alice.test")),
+            Some(profile_for("Bsky Alice")),
+            Some(colibri),
+            None,
+            None,
+            "did:plc:owner",
+            vec![],
+        );
+        assert_eq!(member.data.display_name, "Bsky Alice");
+        assert!(member.data.sync_bluesky);
+        assert_eq!(
+            member.data.theme.unwrap().banner_color.as_deref(),
+            Some("#00ff00")
+        );
+    }
+
+    #[tokio::test]
+    async fn un_onboarded_member_falls_back_to_bsky() {
+        let member = build_member(
+            String::from("did:plc:alice"),
+            Some(String::from("alice.test")),
+            Some(profile_for("Bsky Alice")),
+            None,
+            None,
+            None,
+            "did:plc:owner",
+            vec![],
+        );
+        assert_eq!(member.data.display_name, "Bsky Alice");
+        assert!(!member.data.sync_bluesky);
+        assert!(member.data.theme.is_none());
     }
 
     #[tokio::test]

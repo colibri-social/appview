@@ -745,6 +745,8 @@ mod tests {
                             description: None,
                             is_bot: false,
                             online_state: String::from("offline"),
+                            sync_bluesky: false,
+                            theme: None,
                             status:
                                 crate::xrpc::social::colibri::actor::get_data_handler::ActorStatus {
                                     text: String::new(),
