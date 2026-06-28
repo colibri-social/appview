@@ -9,6 +9,7 @@ mod m20260526_000000_add_indexed_at_to_record_data;
 mod m20260607_000000_rename_notifications_channel_rkey;
 mod m20260624_120000_create_dismissed_applications;
 mod m20260625_000000_create_push_subscriptions;
+mod m20260628_120000_record_data_data_to_jsonb;
 
 pub struct Migrator;
 
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260607_000000_rename_notifications_channel_rkey::Migration),
             Box::new(m20260624_120000_create_dismissed_applications::Migration),
             Box::new(m20260625_000000_create_push_subscriptions::Migration),
+            Box::new(m20260628_120000_record_data_data_to_jsonb::Migration),
         ]
     }
 }
