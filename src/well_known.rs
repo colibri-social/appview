@@ -27,11 +27,18 @@ pub fn did_json() -> Json<DidDocument> {
             public_key_multibase: Some(hex::encode(compressed_point)),
             public_key_jwk: None,
         }],
-        service: vec![Service {
-            id: String::from("#colibri_appview"),
-            service_endpoint: String::from("https://api.colibri.social"),
-            service_type: String::from("ColibriAppView"),
-        }],
+        service: vec![
+            Service {
+                id: String::from("#colibri_appview"),
+                service_endpoint: String::from("https://api.colibri.social"),
+                service_type: String::from("ColibriAppView"),
+            },
+            Service {
+                id: String::from("#colibri_notif"),
+                service_endpoint: String::from("https://api.colibri.social"),
+                service_type: String::from("ColibriNotificationService"),
+            },
+        ],
     })
 }
 
@@ -52,6 +59,6 @@ mod tests {
         assert_eq!(did.id, "did:web:api.colibri.social");
         assert_eq!(did.verification_method.len(), 1);
         assert!(did.verification_method[0].public_key_multibase.is_some());
-        assert_eq!(did.service.len(), 1);
+        assert_eq!(did.service.len(), 2);
     }
 }

@@ -16,6 +16,12 @@ pub mod actor {
     pub use set_state_handler::set_state;
 }
 
+pub mod server {
+    pub mod describe_server_handler;
+
+    pub use describe_server_handler::describe_server;
+}
+
 pub mod channel;
 pub mod community;
 pub mod embed;

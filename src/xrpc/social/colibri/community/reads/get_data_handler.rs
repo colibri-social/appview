@@ -191,7 +191,14 @@ async fn get_data_with(
                 ),
                 description: stored.description,
                 owner_only: stored.owner_only,
-                allowed_roles: stored.allowed_roles,
+                // Stored as bare rkeys; the client addresses roles by AT-URI.
+                allowed_roles: stored
+                    .allowed_roles
+                    .into_iter()
+                    .map(|rkey| {
+                        format!("at://{}/social.colibri.role/{}", community.authority, rkey)
+                    })
+                    .collect(),
                 allowed_members: stored.allowed_members,
             })
         })

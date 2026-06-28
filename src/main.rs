@@ -258,6 +258,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::notification::update_seen,
                 xrpc::social::colibri::notification::update_seen_for_message,
                 xrpc::social::colibri::sync::subscribe_events,
+                xrpc::social::colibri::server::describe_server,
             ],
         )
         .mount("/", rocket_cors::catch_all_options_routes())

@@ -14,13 +14,17 @@ use crate::lib::community_authz::ActorAuthz;
 /// `authz` state in the channel's community.
 ///
 /// Evaluation order:
-///   1. The community owner may always post.
+///   1. An admin (the owner, or a protected-role holder) may always post,
+///      bypassing `owner_only` and the allow-lists entirely.
 ///   2. `owner_only` channels reject everyone else, regardless of allow-lists.
 ///   3. Empty `allowed_roles`/`allowed_members` means no restriction.
 ///   4. Otherwise the actor must be in `allowed_members` or hold a role
 ///      listed in `allowed_roles`.
 pub fn can_post(channel: &ColibriChannel, authz: &ActorAuthz, actor_did: &str) -> bool {
-    if authz.is_owner {
+    // The human owner acts under their own DID (never the community account's),
+    // so `is_owner` alone never matches them here; `is_admin` recognizes the
+    // protected Owner role they actually hold.
+    if authz.is_admin() {
         return true;
     }
     if channel.owner_only == Some(true) {
@@ -75,6 +79,24 @@ mod tests {
     fn owner_can_always_post() {
         let chan = channel();
         assert!(can_post(&chan, &owner_authz(), "did:plc:owner"));
+    }
+
+    #[test]
+    fn admin_with_protected_role_can_always_post() {
+        // The real human owner holds the protected "Owner" role under their own
+        // DID (is_owner is false), yet must bypass both owner_only and the
+        // allow-lists.
+        let mut owner_role = crate::lib::test_fixtures::role("Owner", 100, vec![]);
+        owner_role.protected = Some(true);
+        let admin = member_authz("did:plc:owner-human", vec![owner_role]);
+
+        let mut chan = channel();
+        chan.owner_only = Some(true);
+        assert!(can_post(&chan, &admin, "did:plc:owner-human"));
+
+        let mut restricted = channel();
+        restricted.allowed_roles.push(String::from("some-other-role"));
+        assert!(can_post(&restricted, &admin, "did:plc:owner-human"));
     }
 
     #[test]

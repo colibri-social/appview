@@ -100,7 +100,14 @@ async fn list_channels_with(
                 ),
                 description: stored.description,
                 owner_only: stored.owner_only,
-                allowed_roles: stored.allowed_roles,
+                // Stored as bare rkeys; the client addresses roles by AT-URI.
+                allowed_roles: stored
+                    .allowed_roles
+                    .into_iter()
+                    .map(|rkey| {
+                        format!("at://{}/social.colibri.role/{}", community.authority, rkey)
+                    })
+                    .collect(),
                 allowed_members: stored.allowed_members,
             })
         })
@@ -187,7 +194,11 @@ mod tests {
             Some(String::from("where it all happens"))
         );
         assert_eq!(result.channels[0].owner_only, Some(true));
-        assert_eq!(result.channels[0].allowed_roles, vec!["role-a"]);
+        // Stored rkeys are surfaced to the client as full role AT-URIs.
+        assert_eq!(
+            result.channels[0].allowed_roles,
+            vec!["at://did:plc:owner/social.colibri.role/role-a"]
+        );
         assert_eq!(result.channels[0].allowed_members, vec!["did:plc:alice"]);
     }
 

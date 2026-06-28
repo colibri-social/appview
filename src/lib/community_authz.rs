@@ -20,6 +20,15 @@ pub struct ActorAuthz {
 }
 
 impl ActorAuthz {
+    /// Whether the actor is an admin: the community owner, or the holder of a
+    /// `protected` (system / admin-level) role. Mirrors the client's `isAdmin`
+    /// so server gating matches what the UI exposes — notably the owner-only
+    /// channel lock, which `is_owner` alone could never grant a human (the
+    /// community's own account DID is never a real caller).
+    pub fn is_admin(&self) -> bool {
+        self.is_owner || self.roles.iter().any(|r| r.protected == Some(true))
+    }
+
     /// Highest role position held by the actor, or `None` if the actor has no
     /// roles. The owner is considered to outrank every role and is represented
     /// as `Some(i64::MAX)`.
@@ -167,6 +176,50 @@ mod tests {
         assert!(authz.has(Permission::MemberBan, None));
         assert!(authz.has(Permission::MessageDelete, Some("chan-a")));
         assert_eq!(authz.highest_position(), Some(i64::MAX));
+    }
+
+    #[test]
+    fn is_admin_true_for_owner() {
+        let authz = ActorAuthz {
+            is_owner: true,
+            member: None,
+            roles: vec![],
+        };
+        assert!(authz.is_admin());
+    }
+
+    #[test]
+    fn is_admin_true_for_protected_role() {
+        let mut protected = role("Owner", 100, vec![]);
+        protected.protected = Some(true);
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:alice", vec!["owner"])),
+            roles: vec![protected],
+        };
+        assert!(authz.is_admin());
+    }
+
+    #[test]
+    fn is_admin_false_for_unprotected_role() {
+        // A high-ranking role with permissions but no `protected` flag is still
+        // not an admin for ownerOnly purposes.
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:alice", vec!["mod"])),
+            roles: vec![role("Moderator", 50, vec![Permission::ChannelUpdate])],
+        };
+        assert!(!authz.is_admin());
+    }
+
+    #[test]
+    fn is_admin_false_for_no_roles() {
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:alice", vec![])),
+            roles: vec![],
+        };
+        assert!(!authz.is_admin());
     }
 
     #[test]

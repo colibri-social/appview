@@ -187,23 +187,40 @@ async fn update_channel_with(
                 rec.description = Some(d);
             }
 
-            // Only the owner may toggle ownerOnly: it's a channel-wide lock
-            // that overrides every other restriction, so a non-owner editor
+            // Only an admin may toggle ownerOnly: it's a channel-wide lock
+            // that overrides every other restriction, so an ordinary editor
             // (even one with channel.update) shouldn't be able to flip it.
-            if owner_only.is_some() && !ctx.authz.is_owner {
+            if owner_only.is_some() && !ctx.authz.is_admin() {
                 return Err(forbidden_message(
-                    "Only the community owner may change ownerOnly.",
+                    "Only a community admin may change ownerOnly.",
                 ));
             }
             if let Some(o) = owner_only {
                 rec.owner_only = Some(o);
             }
 
+            // The client addresses roles by full AT-URI, but channel records
+            // store bare rkeys (so `can_post` can compare them against a
+            // member's stored role rkeys). Normalize incoming URIs to rkeys;
+            // anything that isn't a parseable AT-URI is passed through as-is.
+            let allowed_roles: Vec<String> = allowed_roles
+                .iter()
+                .map(|r| AtUri::parse(r).map(|u| u.rkey).unwrap_or_else(|| r.clone()))
+                .collect();
+
             // Hierarchy guard, same idea as Discord: an editor may only
             // add/remove roles strictly below their own highest role, and
             // only add/remove members who don't outrank them. Entries that
             // are present in both the old and new list are left alone even
             // if the editor couldn't have added them themselves.
+            //
+            // Admins (the owner, or a protected-role holder) bypass these
+            // guards entirely, mirroring `can_post` and the ownerOnly gate.
+            // The human owner acts under their own DID — `is_owner` never
+            // matches them — so without this they'd fail their own equal
+            // position check (e.g. adding themselves to allowedMembers, or
+            // adding the Owner role itself).
+            let is_admin = ctx.authz.is_admin();
             let old_allowed_roles = rec.allowed_roles.clone();
             let final_allowed_roles = if clear_allowed_roles == Some(true) {
                 vec![]
@@ -221,7 +238,7 @@ async fn update_channel_with(
                 let role: ColibriRole = serde_json::from_value(role_data).map_err(|e| {
                     invalid_request(format!("Cached role record is malformed: {e}"))
                 })?;
-                if !ctx.authz.outranks_position(role.position) {
+                if !is_admin && !ctx.authz.outranks_position(role.position) {
                     return Err(forbidden_message(format!(
                         "Cannot add or remove role {role_rkey}: it is not below your highest role."
                     )));
@@ -237,16 +254,18 @@ async fn update_channel_with(
             } else {
                 old_allowed_members.clone()
             };
-            for member_did in
-                channel_authz::touched_entries(&old_allowed_members, &final_allowed_members)
-            {
-                let target_authz =
-                    load_authz_fn(db.clone(), ctx.community_uri.clone(), member_did.clone())
-                        .await?;
-                if !ctx.authz.outranks(&target_authz) {
-                    return Err(forbidden_message(format!(
-                        "Cannot add or remove member {member_did}: they hold an equal or higher role."
-                    )));
+            if !is_admin {
+                for member_did in
+                    channel_authz::touched_entries(&old_allowed_members, &final_allowed_members)
+                {
+                    let target_authz =
+                        load_authz_fn(db.clone(), ctx.community_uri.clone(), member_did.clone())
+                            .await?;
+                    if !ctx.authz.outranks(&target_authz) {
+                        return Err(forbidden_message(format!(
+                            "Cannot add or remove member {member_did}: they hold an equal or higher role."
+                        )));
+                    }
                 }
             }
             rec.allowed_members = final_allowed_members;
@@ -377,4 +396,133 @@ pub async fn delete_channel(
         &load_authz_boxed,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lib::community_authz::ActorAuthz;
+    use crate::lib::test_fixtures::{member, role};
+    use crate::models::record_data;
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    fn channel_record() -> serde_json::Value {
+        serde_json::json!({
+            "$type": "social.colibri.channel",
+            "name": "General",
+            "type": "social.colibri.channel.text",
+            "category": "cat1",
+            "community": "self",
+        })
+    }
+
+    // A non-admin who holds `channel.update` (via an unprotected role) clears the
+    // permission gate but must still be refused when they try to flip ownerOnly —
+    // the gate that the always-send-ownerOnly client bug used to trip silently.
+    #[tokio::test]
+    async fn update_channel_rejects_owner_only_change_from_non_admin() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 1,
+                did: String::from("did:plc:owner"),
+                nsid: String::from(CHANNEL_NSID),
+                rkey: String::from("chan1"),
+                data: channel_record(),
+                indexed_at: String::new(),
+            }]])
+            .into_connection();
+
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:rando", vec!["mod"])),
+            roles: vec![role("Moderator", 10, vec![Permission::ChannelUpdate])],
+        };
+
+        let result = update_channel_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan1"),
+            None,
+            None,
+            Some(true),
+            vec![],
+            None,
+            vec![],
+            None,
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &move |_, _, _| {
+                let authz = authz.clone();
+                Box::pin(async move { Ok(authz) })
+            },
+        )
+        .await;
+
+        let body = result.err().expect("expected Forbidden").body.into_inner();
+        assert_eq!(body.error, "Forbidden");
+        assert!(body.message.contains("admin"));
+    }
+
+    // The community owner acts under their own DID (so `is_owner` is false; they
+    // hold a protected "Owner" role instead). Adding themselves to allowedMembers
+    // used to trip the member hierarchy guard — they compare equal against
+    // themselves, and `outranks` requires a strictly higher position. Admins now
+    // bypass the guard. The write itself needs un-mockable PDS credentials, so we
+    // only assert that the request gets *past* the hierarchy guard rather than
+    // being rejected with the Forbidden "equal or higher role" error.
+    #[tokio::test]
+    async fn update_channel_lets_owner_add_themselves_to_allowed_members() {
+        // The write path past the guard needs the at-rest key installed (a
+        // process global). Ignore the error if another test already set it.
+        let _ = crate::lib::crypto::install_master_key(vec![0u8; 32]);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 1,
+                did: String::from("did:plc:owner"),
+                nsid: String::from(CHANNEL_NSID),
+                rkey: String::from("chan1"),
+                data: channel_record(),
+                indexed_at: String::new(),
+            }]])
+            .into_connection();
+
+        let mut owner_role = role("Owner", 100, vec![Permission::ChannelUpdate]);
+        owner_role.protected = Some(true);
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:owner-human", vec!["owner"])),
+            roles: vec![owner_role],
+        };
+
+        let result = update_channel_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan1"),
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            vec![String::from("did:plc:owner-human")],
+            None,
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
+            &move |_, _, _| {
+                let authz = authz.clone();
+                Box::pin(async move { Ok(authz) })
+            },
+        )
+        .await;
+
+        // Either it succeeds, or it fails later (credentials/PDS) — but it must
+        // never be the hierarchy rejection.
+        if let Err(e) = result {
+            let body = e.body.into_inner();
+            assert!(
+                !body.message.contains("equal or higher role"),
+                "owner was wrongly rejected by the hierarchy guard: {}",
+                body.message
+            );
+        }
+    }
 }
