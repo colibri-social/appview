@@ -22,9 +22,11 @@ use crate::{
 };
 use ::serde::Serialize;
 use futures_util::{SinkExt, StreamExt};
+use rocket::request::{FromRequest, Outcome};
+use rocket::response::{self, Responder, Response};
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::tokio::sync::broadcast::{Receiver, Sender};
-use rocket::{State, get, serde::json::Json, tokio};
+use rocket::{Request, State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
 use std::collections::HashSet;
@@ -495,15 +497,73 @@ async fn run_event_loop(
     broadcast_state_change(&to_tap_broadcast, &did, &db).await;
 }
 
+/// Sentinel `Sec-WebSocket-Protocol` value that flags the *next* offered
+/// subprotocol as a service-auth token.
+const AUTH_SUBPROTOCOL: &str = "colibri.auth.bearer";
+
+/// The service-auth token offered via `Sec-WebSocket-Protocol`, if any.
+pub struct SubprotocolAuth {
+    token: Option<String>,
+}
+
+#[rocket::async_trait]
+impl<'r> FromRequest<'r> for SubprotocolAuth {
+    type Error = std::convert::Infallible;
+
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let token = req
+            .headers()
+            .get_one("Sec-WebSocket-Protocol")
+            .and_then(parse_auth_subprotocol)
+            .map(str::to_owned);
+        Outcome::Success(SubprotocolAuth { token })
+    }
+}
+
+/// Returns the token that follows the [`AUTH_SUBPROTOCOL`] sentinel in a
+/// comma-separated `Sec-WebSocket-Protocol` header value, or `None` if the
+/// sentinel is absent or has nothing after it.
+fn parse_auth_subprotocol(header: &str) -> Option<&str> {
+    let protocols: Vec<&str> = header.split(',').map(str::trim).collect();
+    let sentinel = protocols.iter().position(|&p| p == AUTH_SUBPROTOCOL)?;
+    protocols.get(sentinel + 1).copied()
+}
+
+/// Wraps a rocket_ws [`Channel`](rocket_ws::Channel) so the handshake response
+/// echoes the negotiated subprotocol.
+pub struct ChannelWithProtocol {
+    channel: rocket_ws::Channel<'static>,
+    protocol: Option<&'static str>,
+}
+
+impl<'r> Responder<'r, 'static> for ChannelWithProtocol {
+    fn respond_to(self, request: &'r Request<'_>) -> response::Result<'static> {
+        let mut response: Response<'static> = self.channel.respond_to(request)?;
+        if let Some(protocol) = self.protocol {
+            response.set_raw_header("Sec-WebSocket-Protocol", protocol);
+        }
+        Ok(response)
+    }
+}
+
 #[get("/xrpc/social.colibri.sync.subscribeEvents?<auth>")]
 pub async fn subscribe_events(
-    auth: &str,
+    auth: Option<&str>,
+    subprotocol_auth: SubprotocolAuth,
     ws: WebSocket,
     db: &State<DatabaseConnection>,
     bridge: &State<CommsBridge>,
     c2c_broadcast_channel: &State<(Sender<EventNotification>, Receiver<EventNotification>)>,
-) -> Result<rocket_ws::Channel<'static>, ErrorResponse> {
-    let did = service_auth::verify_service_auth(auth, "social.colibri.sync.subscribeEvents")
+) -> Result<ChannelWithProtocol, ErrorResponse> {
+    // Current clients smuggle the token through the subprotocol; the `?auth=`
+    // query parameter is kept as a transitional / local-dev fallback.
+    let used_subprotocol = subprotocol_auth.token.is_some();
+    let token = subprotocol_auth
+        .token
+        .or_else(|| auth.map(str::to_owned))
+        .unwrap_or_default();
+
+    let did = service_auth::verify_service_auth(&token, "social.colibri.sync.subscribeEvents")
         .await
         .map_err(|e| ErrorResponse {
             body: Json(ErrorBody {
@@ -527,7 +587,7 @@ pub async fn subscribe_events(
     let to_c2c_broadcast = c2c_broadcast_channel.0.clone();
     let from_c2c_broadcast = to_c2c_broadcast.subscribe();
 
-    Ok(ws.channel(move |io| {
+    let channel = ws.channel(move |io| {
         Box::pin(async move {
             run_event_loop(
                 io,
@@ -546,13 +606,22 @@ pub async fn subscribe_events(
             .await;
             Ok(())
         })
-    }))
+    });
+
+    Ok(ChannelWithProtocol {
+        channel,
+        // Only reflect the sentinel when the client actually used it, so the
+        // browser accepts the handshake. The legacy query-param path leaves the
+        // response untouched.
+        protocol: used_subprotocol.then_some(AUTH_SUBPROTOCOL),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        application_community_did, parse_client_event, scope_matches, serialize_typing_broadcast,
+        AUTH_SUBPROTOCOL, application_community_did, parse_auth_subprotocol, parse_client_event,
+        scope_matches, serialize_typing_broadcast,
     };
     use crate::EventNotification;
     use crate::lib::event_scope::EventScope;
@@ -596,6 +665,28 @@ mod tests {
             did,
             &communities
         ));
+    }
+
+    #[test]
+    fn parse_auth_subprotocol_reads_token_after_sentinel() {
+        assert_eq!(
+            parse_auth_subprotocol(&format!("{AUTH_SUBPROTOCOL}, jwt-token")),
+            Some("jwt-token")
+        );
+        // A realistic JWT (base64url, dot-separated) survives intact.
+        let jwt = "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJkaWQ6cGxjOmFiYyJ9.sig-_123";
+        assert_eq!(
+            parse_auth_subprotocol(&format!("{AUTH_SUBPROTOCOL},{jwt}")),
+            Some(jwt)
+        );
+    }
+
+    #[test]
+    fn parse_auth_subprotocol_rejects_missing_or_empty() {
+        // No sentinel at all.
+        assert_eq!(parse_auth_subprotocol("some.other.protocol"), None);
+        // Sentinel present but nothing follows it.
+        assert_eq!(parse_auth_subprotocol(AUTH_SUBPROTOCOL), None);
     }
 
     #[test]

@@ -262,6 +262,7 @@ async fn rocket() -> _ {
             ],
         )
         .mount("/", rocket_cors::catch_all_options_routes())
+        .attach(crate::lib::auth_bridge::ServiceAuthHeaderBridge)
         .attach(safe_cors.clone())
         .attach(init_seaorm(db))
         .manage(tap_bridge)
