@@ -62,7 +62,7 @@ pub async fn verify_service_auth(
         serde_json::from_slice(&claims_bytes).map_err(|_| ServiceAuthError::InvalidFormat)?;
 
     // Validate audience
-    if claims.aud != YOUR_APPVIEW_DID {
+    if !claims.aud.starts_with(YOUR_APPVIEW_DID) {
         return Err(ServiceAuthError::InvalidAudience);
     }
 
