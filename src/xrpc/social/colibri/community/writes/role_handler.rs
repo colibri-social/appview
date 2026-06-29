@@ -70,6 +70,7 @@ async fn resolve_position_conflicts(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_role_with(
     community_uri: String,
     name: String,
@@ -130,6 +131,7 @@ async fn create_role_with(
 #[post(
     "/xrpc/social.colibri.role.create?<community>&<name>&<color>&<permissions>&<position>&<hoisted>&<mentionable>&<auth>"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_role(
     community: &str,
     name: &str,
@@ -159,6 +161,7 @@ pub async fn create_role(
 
 // ---- role.update -----------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn update_role_with(
     role_uri: String,
     name: Option<String>,
@@ -234,6 +237,7 @@ async fn update_role_with(
 #[post(
     "/xrpc/social.colibri.role.update?<role>&<name>&<color>&<permissions>&<position>&<hoisted>&<mentionable>&<auth>"
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_role(
     role: &str,
     name: Option<&str>,

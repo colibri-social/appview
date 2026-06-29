@@ -134,7 +134,7 @@ pub async fn get_authorized_communities(
         return Ok(Vec::new());
     }
 
-    Ok(attach_ownership(db, user_did, rows).await?)
+    attach_ownership(db, user_did, rows).await
 }
 
 /// Resolves, for each authorized community, whether the caller is an owner —

@@ -768,6 +768,7 @@ fn upload_blob_boxed(
 /// images can't fit in a query string — with its MIME type declared via the
 /// `mimeType` query parameter. An empty body means "no picture".
 #[allow(non_snake_case)]
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     name: &str,
     description: Option<&str>,
@@ -934,6 +935,15 @@ mod tests {
     use rocket::tokio;
     use std::sync::{Arc, Mutex};
 
+    /// Captured `(collection, rkey, record)` tuples from a fake record writer
+    type CapturedRecords = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
+    /// Captured `(handle, did, password, invite)` from a fake credential store
+    type CapturedCredentials = Arc<Mutex<Option<(String, String, String, String)>>>;
+    /// Captured `(pds, identifier, password)` from a fake session opener
+    type CapturedSession = Arc<Mutex<Option<(String, String, String)>>>;
+    /// Captured `(bytes, mime)` from a fake blob uploader
+    type CapturedUpload = Arc<Mutex<Option<(Vec<u8>, String)>>>;
+
     fn input() -> CreateCommunityInput {
         CreateCommunityInput {
             name: String::from("Test"),
@@ -952,11 +962,9 @@ mod tests {
 
     #[tokio::test]
     async fn byo_bootstraps_on_supplied_did_without_minting() {
-        let created_records: Arc<Mutex<Vec<(String, Option<String>, Value)>>> =
-            Arc::new(Mutex::new(vec![]));
-        let credentials_captured: Arc<Mutex<Option<(String, String, String, String)>>> =
-            Arc::new(Mutex::new(None));
-        let session_args: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
+        let created_records: CapturedRecords = Arc::new(Mutex::new(vec![]));
+        let credentials_captured: CapturedCredentials = Arc::new(Mutex::new(None));
+        let session_args: CapturedSession = Arc::new(Mutex::new(None));
         let cr = created_records.clone();
         let cc = credentials_captured.clone();
         let sa = session_args.clone();
@@ -1060,10 +1068,8 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_writes_full_community_with_default_category_and_channel() {
-        let created_records: Arc<Mutex<Vec<(String, Option<String>, Value)>>> =
-            Arc::new(Mutex::new(vec![]));
-        let credentials_captured: Arc<Mutex<Option<(String, String, String, String)>>> =
-            Arc::new(Mutex::new(None));
+        let created_records: CapturedRecords = Arc::new(Mutex::new(vec![]));
+        let credentials_captured: CapturedCredentials = Arc::new(Mutex::new(None));
         let cr = created_records.clone();
         let cc = credentials_captured.clone();
 
@@ -1263,9 +1269,8 @@ mod tests {
 
     #[tokio::test]
     async fn uploads_picture_and_links_blob_into_community_record() {
-        let created_records: Arc<Mutex<Vec<(String, Option<String>, Value)>>> =
-            Arc::new(Mutex::new(vec![]));
-        let upload_captured: Arc<Mutex<Option<(Vec<u8>, String)>>> = Arc::new(Mutex::new(None));
+        let created_records: CapturedRecords = Arc::new(Mutex::new(vec![]));
+        let upload_captured: CapturedUpload = Arc::new(Mutex::new(None));
         let cr = created_records.clone();
         let uc = upload_captured.clone();
 

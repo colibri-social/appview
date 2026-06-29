@@ -458,7 +458,7 @@ mod tests {
         )
         .await;
 
-        let body = result.err().expect("expected Forbidden").body.into_inner();
+        let body = result.expect_err("expected Forbidden").body.into_inner();
         assert_eq!(body.error, "Forbidden");
         assert!(body.message.contains("admin"));
     }

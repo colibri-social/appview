@@ -109,7 +109,7 @@ mod tests {
 
         let ok_result = result.unwrap();
 
-        assert!(ok_result.did == String::from("did:web:api.bsky.app"))
+        assert!(ok_result.did == "did:web:api.bsky.app")
     }
 
     #[tokio::test]
@@ -120,7 +120,7 @@ mod tests {
 
         let ok_result = result.unwrap();
 
-        assert!(ok_result.did == String::from("did:plc:mprdjqjluoswa7awzggaggj3"))
+        assert!(ok_result.did == "did:plc:mprdjqjluoswa7awzggaggj3")
     }
 
     #[tokio::test]
@@ -131,6 +131,6 @@ mod tests {
 
         let ok_result = result.unwrap();
 
-        assert!(ok_result.did == String::from("did:plc:w64dlsa4zwjv2wljlvmymldc"))
+        assert!(ok_result.did == "did:plc:w64dlsa4zwjv2wljlvmymldc")
     }
 }

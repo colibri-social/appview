@@ -292,6 +292,8 @@ mod tests {
     use rocket::tokio;
     use std::sync::{Arc, Mutex};
 
+    type CapturedWrite = Arc<Mutex<Option<(String, String, Option<String>)>>>;
+
     fn sample_membership() -> ColibriMembership {
         ColibriMembership {
             r#type: String::from("social.colibri.membership"),
@@ -303,8 +305,7 @@ mod tests {
     #[tokio::test]
     async fn approves_membership_when_caller_has_permission() {
         let db = mock_db();
-        let captured: Arc<Mutex<Option<(String, String, Option<String>)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: CapturedWrite = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
         let broadcast_captured: Arc<Mutex<Option<ColibriServerEvent>>> = Arc::new(Mutex::new(None));
         let broadcast_clone = broadcast_captured.clone();

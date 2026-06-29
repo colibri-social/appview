@@ -87,6 +87,8 @@ pub struct EffectiveProfile {
     pub description: Option<String>,
     pub theme: Option<ColibriProfileTheme>,
     pub sync_bluesky: bool,
+    // Surfaced for callers/tests to distinguish onboarded users; unread in prod today
+    #[allow(dead_code)]
     pub has_colibri_profile: bool,
 }
 

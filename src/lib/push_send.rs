@@ -141,7 +141,7 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
 
     // Do Not Disturb: the recipient asked not to be interrupted.
     match get_state(recipient_did.clone(), &db).await {
-        Ok(state) if matches!(state, UserState::Dnd) => return,
+        Ok(UserState::Dnd) => return,
         Ok(_) => {}
         Err(e) => {
             log::warn!("push: failed to read state for {recipient_did}: {e}");

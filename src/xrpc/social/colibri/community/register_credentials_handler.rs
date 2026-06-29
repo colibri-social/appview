@@ -194,6 +194,9 @@ mod tests {
     use rocket::tokio;
     use std::sync::{Arc, Mutex};
 
+    /// Captured `(handle, did, password, invite)` from a fake credential store
+    type CapturedCredentials = Arc<Mutex<Option<(String, String, String, String)>>>;
+
     fn session_for(did: &str) -> PdsSession {
         PdsSession {
             access_jwt: String::from("jwt"),
@@ -204,8 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn stores_credentials_when_proof_of_control_succeeds() {
-        let captured: Arc<Mutex<Option<(String, String, String, String)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: CapturedCredentials = Arc::new(Mutex::new(None));
         let cap = captured.clone();
 
         let upsert = move |did: String,
