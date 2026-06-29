@@ -97,6 +97,14 @@ async fn rocket() -> _ {
         );
     }
 
+    // The GIF picker is optional
+    match std::env::var("KLIPY_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => log::info!("GIF picker enabled (Klipy key configured)."),
+        _ => {
+            log::warn!("GIF picker disabled: set KLIPY_API_KEY to enable the embed GIF endpoints.")
+        }
+    }
+
     let cors = CorsOptions::default()
         .allowed_origins(AllowedOrigins::all())
         .allowed_methods(
@@ -218,6 +226,9 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::channel::update_channel,
                 xrpc::social::colibri::embed::get_metadata,
                 xrpc::social::colibri::embed::get_image,
+                xrpc::social::colibri::embed::search_gifs,
+                xrpc::social::colibri::embed::trending_gifs,
+                xrpc::social::colibri::embed::gif_categories,
                 xrpc::social::colibri::community::approve_membership,
                 xrpc::social::colibri::community::ban_user,
                 xrpc::social::colibri::community::block_message,

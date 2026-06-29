@@ -2,3 +2,4 @@ target/
 .env
 .DS_STORE
 .claude/
+zsh.exe.stackdump

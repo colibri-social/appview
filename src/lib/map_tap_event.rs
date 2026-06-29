@@ -598,8 +598,7 @@ async fn map_tap_event_with(
             // that (matching `member_event`/`role_event`) — otherwise the
             // client's community-scope guard drops the event and nothing
             // updates live.
-            let community_uri =
-                format!("at://{}/social.colibri.community/self", event_record.did);
+            let community_uri = format!("at://{}/social.colibri.community/self", event_record.did);
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriCategory>(event_record)?;
                 Ok(scoped(
@@ -640,8 +639,7 @@ async fn map_tap_event_with(
             // that (matching `member_event`/`role_event`) — otherwise the
             // client's community-scope guard drops the event and nothing
             // updates live.
-            let community_uri =
-                format!("at://{}/social.colibri.community/self", event_record.did);
+            let community_uri = format!("at://{}/social.colibri.community/self", event_record.did);
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriChannel>(event_record)?;
                 Ok(scoped(
@@ -1075,6 +1073,8 @@ async fn map_tap_event_with(
         // Read cursors are handled directly in `tap.rs`, which emits the
         // cross-device read-state sync event. No server event maps here.
         "social.colibri.channel.read" => Ok(vec![]),
+        // GIF favorites are a purely client-owned PDS record
+        "social.colibri.actor.gifFavorites" => Ok(vec![]),
         "social.colibri.richtext.facet" => Err(serde_json::Error::custom("Facet")),
         _ => Err(serde_json::Error::custom("Unknown collection")),
     }
