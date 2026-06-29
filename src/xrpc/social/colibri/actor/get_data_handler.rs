@@ -68,9 +68,7 @@ pub fn actor_data_from_effective(
     status: ActorStatus,
 ) -> ActorData {
     ActorData {
-        display_name: effective
-            .display_name
-            .unwrap_or_else(|| handle.to_string()),
+        display_name: effective.display_name.unwrap_or_else(|| handle.to_string()),
         avatar: effective.avatar,
         banner: effective.banner,
         description: effective.description,

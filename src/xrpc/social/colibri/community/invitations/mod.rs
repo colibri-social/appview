@@ -368,10 +368,9 @@ async fn list_invitations_with(
             let codes = rows
                 .into_iter()
                 .map(|inv| {
-                    let created_by = creators
-                        .get(&inv.created_by)
-                        .cloned()
-                        .unwrap_or_else(|| build_actor(inv.created_by, None, None, None, None, None));
+                    let created_by = creators.get(&inv.created_by).cloned().unwrap_or_else(|| {
+                        build_actor(inv.created_by, None, None, None, None, None)
+                    });
                     InvitationProfileView {
                         code: inv.code,
                         community: inv.community_uri,

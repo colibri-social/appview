@@ -95,7 +95,9 @@ mod tests {
         assert!(can_post(&chan, &admin, "did:plc:owner-human"));
 
         let mut restricted = channel();
-        restricted.allowed_roles.push(String::from("some-other-role"));
+        restricted
+            .allowed_roles
+            .push(String::from("some-other-role"));
         assert!(can_post(&restricted, &admin, "did:plc:owner-human"));
     }
 

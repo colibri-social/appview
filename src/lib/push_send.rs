@@ -28,6 +28,62 @@ use crate::xrpc::social::colibri::actor::list_mutes_handler::fetch_mutes;
 use crate::xrpc::social::colibri::actor::set_state_handler::UserState;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
+const FACET_SPOILER_TYPE: &str = "social.colibri.richtext.facet#spoiler";
+
+/// Replaces every spoiler-covered range of `text` with a placeholder so hidden
+/// content never appears in a push preview
+fn redact_spoilers(text: &str, facets: &[serde_json::Value]) -> String {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for facet in facets {
+        let is_spoiler = facet
+            .get("features")
+            .and_then(|f| f.as_array())
+            .is_some_and(|features| {
+                features.iter().any(|feature| {
+                    feature.get("$type").and_then(|t| t.as_str()) == Some(FACET_SPOILER_TYPE)
+                })
+            });
+        if !is_spoiler {
+            continue;
+        }
+        let index = facet.get("index");
+        let start = index
+            .and_then(|i| i.get("byteStart"))
+            .and_then(serde_json::Value::as_u64);
+        let end = index
+            .and_then(|i| i.get("byteEnd"))
+            .and_then(serde_json::Value::as_u64);
+        let (Some(start), Some(end)) = (start, end) else {
+            continue;
+        };
+        let (start, end) = (start as usize, end as usize);
+        if start < end
+            && end <= text.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+        {
+            ranges.push((start, end));
+        }
+    }
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+    ranges.sort_by_key(|&(start, _)| start);
+
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for (start, end) in ranges {
+        // Skip ranges that overlap one already redacted (nested/duplicate)
+        if start < cursor {
+            continue;
+        }
+        out.push_str(&text[cursor..start]);
+        out.push_str("█████");
+        cursor = end;
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
 
 /// Routing hints the Service Worker uses on click.
 #[derive(Serialize)]
@@ -108,7 +164,7 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
     };
     let payload = PushPayload {
         title: String::from(title),
-        body: notification.message.text.clone(),
+        body: redact_spoilers(&notification.message.text, &notification.message.facets),
         tag: notification.row.message_uri.clone(),
         data: PushData {
             channel_uri: channel_uri.clone(),
@@ -238,5 +294,48 @@ mod tests {
     #[test]
     fn empty_mutes_never_match() {
         assert!(!is_muted(&[], CHANNEL));
+    }
+
+    fn spoiler(byte_start: u64, byte_end: u64) -> serde_json::Value {
+        json!({
+            "index": { "byteStart": byte_start, "byteEnd": byte_end },
+            "features": [{ "$type": FACET_SPOILER_TYPE }],
+        })
+    }
+
+    #[test]
+    fn redacts_spoiler_range() {
+        // "psst secret bye" — spoiler covers "secret" at bytes [5, 11).
+        assert_eq!(
+            redact_spoilers("psst secret bye", &[spoiler(5, 11)]),
+            "psst █████ bye"
+        );
+    }
+
+    #[test]
+    fn leaves_text_without_spoilers_untouched() {
+        let facets = vec![json!({
+            "index": { "byteStart": 0, "byteEnd": 4 },
+            "features": [{ "$type": "social.colibri.richtext.facet#bold" }],
+        })];
+        assert_eq!(redact_spoilers("bold text", &facets), "bold text");
+        assert_eq!(redact_spoilers("plain", &[]), "plain");
+    }
+
+    #[test]
+    fn redacts_multiple_and_respects_char_boundaries() {
+        // "café x y" — "café " is 6 bytes (é is 2); spoiler over "x" [6,7) and
+        // "y" [8,9).
+        assert_eq!(
+            redact_spoilers("café x y", &[spoiler(6, 7), spoiler(8, 9)]),
+            "café █████ █████"
+        );
+    }
+
+    #[test]
+    fn ignores_out_of_bounds_or_misaligned_ranges() {
+        // é spans bytes [3,5); a range ending at 4 is mid-char → left as-is.
+        assert_eq!(redact_spoilers("café", &[spoiler(3, 4)]), "café");
+        assert_eq!(redact_spoilers("hi", &[spoiler(0, 99)]), "hi");
     }
 }
