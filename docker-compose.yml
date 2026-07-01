@@ -57,7 +57,7 @@ services:
       TAP_DATABASE_URL: ${DATABASE_URL}
       TAP_SIGNAL_COLLECTION: social.colibri.actor.data
       TAP_COLLECTION_FILTERS: social.colibri.*,app.bsky.actor.profile
-      TAP_RELAY_URL: https://relay1.eurosky.network
+      TAP_RELAY_URL: https://relay1.us-east.bsky.network
     depends_on:
       postgres:
         condition: service_healthy
