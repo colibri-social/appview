@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::lib::http::HTTP;
+
 #[derive(Debug, Error)]
 pub enum PdsError {
     #[error("http error: {0}")]
@@ -117,7 +119,7 @@ pub async fn create_session(
         password,
     };
 
-    let resp = reqwest::Client::new().post(url).json(&body).send().await?;
+    let resp = HTTP.clone().post(url).json(&body).send().await?;
     handle_response::<PdsSession>(resp).await
 }
 
@@ -143,7 +145,7 @@ pub async fn get_record(
         "{}/xrpc/com.atproto.repo.getRecord?repo={repo}&collection={collection}&rkey={rkey}",
         pds_endpoint.trim_end_matches('/')
     );
-    let resp = reqwest::Client::new().get(url).send().await?;
+    let resp = HTTP.clone().get(url).send().await?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -184,7 +186,8 @@ pub async fn create_record(
         record,
     };
 
-    let resp = reqwest::Client::new()
+    let resp = HTTP
+        .clone()
         .post(url)
         .bearer_auth(access_jwt)
         .json(&body)
@@ -216,7 +219,8 @@ pub async fn put_record(
         record,
     };
 
-    let resp = reqwest::Client::new()
+    let resp = HTTP
+        .clone()
         .post(url)
         .bearer_auth(access_jwt)
         .json(&body)
@@ -244,7 +248,8 @@ pub async fn delete_record(
         rkey,
     };
 
-    let resp = reqwest::Client::new()
+    let resp = HTTP
+        .clone()
         .post(url)
         .bearer_auth(access_jwt)
         .json(&body)
@@ -273,7 +278,8 @@ pub async fn upload_blob(
         pds_endpoint.trim_end_matches('/')
     );
 
-    let resp = reqwest::Client::new()
+    let resp = HTTP
+        .clone()
         .post(url)
         .bearer_auth(access_jwt)
         .header(reqwest::header::CONTENT_TYPE, mime_type)
@@ -312,9 +318,7 @@ pub async fn create_account(
 
     let invite_code_body = InviteCodeBody { use_count: 1 };
 
-    let mut invite_code_req = reqwest::Client::new()
-        .post(invite_code_url)
-        .json(&invite_code_body);
+    let mut invite_code_req = HTTP.clone().post(invite_code_url).json(&invite_code_body);
 
     if let Some(pass) = admin_password {
         invite_code_req = invite_code_req.basic_auth("admin", Some(pass));
@@ -337,7 +341,7 @@ pub async fn create_account(
         invite_code: &invite_code_resp.code,
     };
 
-    let req = reqwest::Client::new().post(url).json(&body);
+    let req = HTTP.clone().post(url).json(&body);
 
     let resp = req.send().await?;
     handle_response::<CreatedAccount>(resp).await
@@ -367,7 +371,8 @@ pub async fn admin_delete_account(
     );
     let body = DeleteAccountBody { did };
 
-    let resp = reqwest::Client::new()
+    let resp = HTTP
+        .clone()
         .post(url)
         .basic_auth("admin", Some(admin_password))
         .json(&body)

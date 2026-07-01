@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use rocket::tokio::sync::Mutex as AsyncMutex;
 use rocket::{get, serde::json::Json};
 
+use crate::lib::http::HTTP;
 use crate::lib::{
     did_document::DidDocument,
     responses::{ErrorBody, ErrorResponse},
@@ -42,6 +44,18 @@ fn did_cache_put(did: &str, doc: &DidDocument) {
         .insert(did.to_string(), (doc.clone(), Instant::now()));
 }
 
+static DID_LOCKS: LazyLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn did_lock(did: &str) -> Arc<AsyncMutex<()>> {
+    DID_LOCKS
+        .lock()
+        .unwrap()
+        .entry(did.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
+
 #[get("/xrpc/com.atproto.identity.resolveDid?<did>")]
 /// Resolves a DID (did:web or did:plc) to a DID document, backed by a
 /// short-TTL process-wide cache (see [`DID_CACHE_TTL`]).
@@ -59,15 +73,24 @@ pub async fn resolve_did(did: &str) -> Result<Json<DidDocument>, ErrorResponse> 
         return Ok(Json(doc));
     }
 
+    let lock = did_lock(did);
+    let _guard = lock.lock().await;
+
+    if let Some(doc) = did_cache_get(did) {
+        return Ok(Json(doc));
+    }
+
     let resp = if did.starts_with("did:web:") {
         let host = did.replace("did:web:", "");
 
-        reqwest::get(format!("https://{host}/.well-known/did.json"))
+        HTTP.get(format!("https://{host}/.well-known/did.json"))
+            .send()
             .await?
             .json::<DidDocument>()
             .await?
     } else {
-        reqwest::get(format!("https://plc.directory/{did}"))
+        HTTP.get(format!("https://plc.directory/{did}"))
+            .send()
             .await?
             .json::<DidDocument>()
             .await?

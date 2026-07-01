@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
 use rocket::get;
 use rocket::serde::json::Json;
 
@@ -6,9 +10,34 @@ use futures::future::{BoxFuture, select_ok};
 use serde::{Deserialize, Serialize};
 
 use crate::lib::did_document::DidDocument;
+use crate::lib::http::HTTP;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::*;
+
+const HANDLE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+static HANDLE_CACHE: LazyLock<Mutex<HashMap<String, (String, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn handle_cache_get(handle: &str) -> Option<String> {
+    let mut cache = HANDLE_CACHE.lock().unwrap();
+    match cache.get(handle) {
+        Some((did, stored_at)) if stored_at.elapsed() < HANDLE_CACHE_TTL => Some(did.clone()),
+        Some(_) => {
+            cache.remove(handle);
+            None
+        }
+        None => None,
+    }
+}
+
+fn handle_cache_put(handle: &str, did: &str) {
+    HANDLE_CACHE
+        .lock()
+        .unwrap()
+        .insert(handle.to_string(), (did.to_string(), Instant::now()));
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct DidResponse {
@@ -19,12 +48,20 @@ pub struct DidResponse {
 /// Resolves an atproto handle to a DID
 pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResponse> {
     let handle = handle.to_string();
+
+    if let Some(did) = handle_cache_get(&handle) {
+        return Ok(Json(DidResponse { did }));
+    }
+
     let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
 
     let did_json_future: BoxFuture<'_, Result<String, ErrorResponse>> = {
         let handle = handle.clone();
         async move {
-            let resp = reqwest::get(format!("https://{handle}/.well-known/did.json")).await?;
+            let resp = HTTP
+                .get(format!("https://{handle}/.well-known/did.json"))
+                .send()
+                .await?;
             let doc = resp.json::<DidDocument>().await?;
             Ok(doc.id)
         }
@@ -34,7 +71,10 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
     let atproto_did_future: BoxFuture<'_, Result<String, ErrorResponse>> = {
         let handle = handle.clone();
         async move {
-            let resp = reqwest::get(format!("https://{handle}/.well-known/atproto-did")).await?;
+            let resp = HTTP
+                .get(format!("https://{handle}/.well-known/atproto-did"))
+                .send()
+                .await?;
             let text = resp.text().await?;
             if text.starts_with("did:") {
                 Ok(text)
@@ -92,6 +132,7 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
         }
     };
 
+    handle_cache_put(&handle, &did);
     Ok(Json(DidResponse { did }))
 }
 
