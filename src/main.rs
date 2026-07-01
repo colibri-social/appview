@@ -219,6 +219,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::actor::set_state,
                 xrpc::social::colibri::channel::create_channel,
                 xrpc::social::colibri::channel::delete_channel,
+                xrpc::social::colibri::channel::get_channel_view,
                 xrpc::social::colibri::channel::get_read_cursor,
                 xrpc::social::colibri::channel::list_messages,
                 xrpc::social::colibri::channel::list_reactions,

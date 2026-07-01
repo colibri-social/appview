@@ -518,7 +518,18 @@ async fn list_messages_with(
 
     let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
     let page = assemble_fn(db, channel, effective_limit, cursor, include_hidden).await?;
+    Ok(Json(message_list_from_page(
+        page,
+        &channel_uri,
+        effective_limit,
+    )))
+}
 
+pub fn message_list_from_page(
+    page: MessagePage,
+    channel_uri: &str,
+    effective_limit: u64,
+) -> MessageList {
     let next_cursor = if (page.records.len() as u64) == effective_limit {
         page.records.last().map(|r| r.rkey.clone())
     } else {
@@ -546,7 +557,7 @@ async fn list_messages_with(
                     uri: format!("at://{}/{}/{}", pr.did, pr.nsid, pr.rkey),
                     text: ps.text,
                     facets: ps.facets.unwrap_or_default(),
-                    channel: channel_uri.clone(),
+                    channel: channel_uri.to_string(),
                     community: page.community_uri.clone(),
                     author: parent_author,
                     attachments: ps.attachments.unwrap_or_default(),
@@ -570,7 +581,7 @@ async fn list_messages_with(
                 .unwrap_or_default();
             build_message(
                 record,
-                &channel_uri,
+                channel_uri,
                 &page.community_uri,
                 author,
                 parent,
@@ -579,10 +590,28 @@ async fn list_messages_with(
         })
         .collect();
 
-    Ok(Json(MessageList {
+    MessageList {
         cursor: next_cursor,
         messages,
-    }))
+    }
+}
+
+pub async fn build_message_list(
+    db: &DatabaseConnection,
+    channel_uri: &str,
+    limit: Option<u64>,
+    cursor: Option<&str>,
+    include_hidden: bool,
+) -> Result<MessageList, ErrorResponse> {
+    let channel = AtUri::parse(channel_uri).ok_or_else(|| ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("InvalidRequest"),
+            message: String::from("Invalid channel AT-URI."),
+        }),
+    })?;
+    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+    let page = assemble_message_page(db, &channel, effective_limit, cursor, include_hidden).await?;
+    Ok(message_list_from_page(page, channel_uri, effective_limit))
 }
 
 fn assemble_message_page_boxed(
