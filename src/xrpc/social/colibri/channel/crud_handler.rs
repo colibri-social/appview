@@ -43,6 +43,8 @@ async fn create_channel_with(
     name: String,
     channel_type: String,
     description: Option<String>,
+    allowed_roles: Vec<String>,
+    allowed_members: Vec<String>,
     auth: String,
     db: DatabaseConnection,
     verify_auth_fn: &VerifyAuthFn,
@@ -64,6 +66,46 @@ async fn create_channel_with(
             let channel_rkey = generate_tid();
             let category_rkey = &category.rkey;
 
+            // The client addresses roles by full AT-URI, but channel records
+            // store bare rkeys (mirrors channel.update).
+            let allowed_roles: Vec<String> = allowed_roles
+                .iter()
+                .map(|r| AtUri::parse(r).map(|u| u.rkey).unwrap_or_else(|| r.clone()))
+                .collect();
+
+            // Hierarchy guard, same rule as channel.update but with an empty
+            // "before" list so every entry counts as an addition: a non-admin
+            // creator may only grant posting access to roles strictly below
+            // their own highest role, and to members they outrank. Admins (the
+            // owner or a protected-role holder) bypass the guard.
+            let is_admin = ctx.authz.is_admin();
+            for role_rkey in &allowed_roles {
+                let role_data =
+                    community_write::read_cached(&db, community_did, ROLE_NSID, role_rkey)
+                        .await?
+                        .ok_or_else(|| invalid_request(format!("Role {role_rkey} not found.")))?;
+                let role: ColibriRole = serde_json::from_value(role_data).map_err(|e| {
+                    invalid_request(format!("Cached role record is malformed: {e}"))
+                })?;
+                if !is_admin && !ctx.authz.outranks_position(role.position) {
+                    return Err(forbidden_message(format!(
+                        "Cannot add role {role_rkey}: it is not below your highest role."
+                    )));
+                }
+            }
+            if !is_admin {
+                for member_did in &allowed_members {
+                    let target_authz =
+                        load_authz_fn(db.clone(), ctx.community_uri.clone(), member_did.clone())
+                            .await?;
+                    if !ctx.authz.outranks(&target_authz) {
+                        return Err(forbidden_message(format!(
+                            "Cannot add member {member_did}: they hold an equal or higher role."
+                        )));
+                    }
+                }
+            }
+
             // Build and write the new channel record.
             let channel = ColibriChannel {
                 r#type: CHANNEL_NSID.to_string(),
@@ -73,8 +115,8 @@ async fn create_channel_with(
                 category: category_rkey.clone(),
                 community: COMMUNITY_RKEY.to_string(),
                 owner_only: None,
-                allowed_roles: vec![],
-                allowed_members: vec![],
+                allowed_roles,
+                allowed_members,
             };
             let chan_data = serde_json::to_value(&channel)
                 .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
@@ -111,14 +153,17 @@ async fn create_channel_with(
 }
 
 #[post(
-    "/xrpc/social.colibri.channel.create?<community>&<category>&<name>&<type>&<description>&<auth>"
+    "/xrpc/social.colibri.channel.create?<community>&<category>&<name>&<type>&<description>&<allowedRoles>&<allowedMembers>&<auth>"
 )]
+#[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn create_channel(
     community: &str,
     category: &str,
     name: &str,
     r#type: &str,
     description: Option<&str>,
+    allowedRoles: Vec<String>,
+    allowedMembers: Vec<String>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
@@ -128,6 +173,8 @@ pub async fn create_channel(
         name.to_string(),
         r#type.to_string(),
         description.map(str::to_string),
+        allowedRoles,
+        allowedMembers,
         auth.to_string(),
         db.inner().clone(),
         &verify_auth_boxed,
@@ -461,6 +508,52 @@ mod tests {
         let body = result.expect_err("expected Forbidden").body.into_inner();
         assert_eq!(body.error, "Forbidden");
         assert!(body.message.contains("admin"));
+    }
+
+    // A non-admin creator holding `channel.create` may not grant posting access
+    // to a role at or above their own highest role — same hierarchy guard as
+    // channel.update, enforced at creation so a restricted channel can't be
+    // born with an allow-list the creator couldn't otherwise set.
+    #[tokio::test]
+    async fn create_channel_rejects_role_above_creator() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 1,
+                did: String::from("did:plc:owner"),
+                nsid: String::from(ROLE_NSID),
+                rkey: String::from("admin"),
+                data: serde_json::to_value(role("Admin", 50, vec![])).unwrap(),
+                indexed_at: String::new(),
+            }]])
+            .into_connection();
+
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:rando", vec!["mod"])),
+            roles: vec![role("Moderator", 10, vec![Permission::ChannelCreate])],
+        };
+
+        let result = create_channel_with(
+            String::from("at://did:plc:owner/social.colibri.community/self"),
+            String::from("at://did:plc:owner/social.colibri.category/cat1"),
+            String::from("Restricted"),
+            String::from("social.colibri.channel.text"),
+            None,
+            vec![String::from("at://did:plc:owner/social.colibri.role/admin")],
+            vec![],
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &move |_, _, _| {
+                let authz = authz.clone();
+                Box::pin(async move { Ok(authz) })
+            },
+        )
+        .await;
+
+        let body = result.expect_err("expected Forbidden").body.into_inner();
+        assert_eq!(body.error, "Forbidden");
+        assert!(body.message.contains("not below your highest role"));
     }
 
     // The community owner acts under their own DID (so `is_owner` is false; they
