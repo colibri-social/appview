@@ -51,10 +51,10 @@ impl SeenSet {
         if self.ids.contains(id) {
             return false;
         }
-        if self.order.len() >= self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.ids.remove(&old);
-            }
+        if self.order.len() >= self.capacity
+            && let Some(old) = self.order.pop_front()
+        {
+            self.ids.remove(&old);
         }
         self.order.push_back(id.to_string());
         self.ids.insert(id.to_string());

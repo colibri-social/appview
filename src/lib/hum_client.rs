@@ -171,7 +171,7 @@ async fn resolve_outbound(
 ) -> Option<(String, HumEvent, Vec<(String, String)>)> {
     match item {
         OutboundHum::Presence { did } => {
-            let event = HumEvent::User(presence_payload(db, &did).await);
+            let event = HumEvent::User(Box::new(presence_payload(db, &did).await));
             let targets = presence_targets(db, &did).await;
             Some((did, event, targets))
         }

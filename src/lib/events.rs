@@ -406,7 +406,7 @@ impl ColibriServerEvent {
 #[serde(tag = "type", content = "data")]
 pub enum HumEvent {
     #[serde(rename = "user_event")]
-    User(UserEventData),
+    User(Box<UserEventData>),
     #[serde(rename = "typing_event")]
     Typing(TypingEventData),
     #[serde(rename = "voice_presence_event")]

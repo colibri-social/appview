@@ -522,7 +522,7 @@ mod tests {
             ttl,
             subject: subject.to_string(),
             community: COMMUNITY.to_string(),
-            event: HumEvent::User(UserEventData {
+            event: HumEvent::User(Box::new(UserEventData {
                 did: String::from("did:plc:peer-claimed-victim"),
                 status: None,
                 profile: UserEventProfile {
@@ -534,7 +534,7 @@ mod tests {
                     handle: String::from("spoofed.handle"),
                     theme: None,
                 },
-            }),
+            })),
         }
     }
 
