@@ -52,6 +52,11 @@ pub fn did_json() -> Json<DidDocument> {
                 service_endpoint: endpoint.clone(),
                 service_type: String::from("ColibriNotificationService"),
             },
+            Service {
+                id: String::from("#colibri_hum"),
+                service_endpoint: endpoint.clone(),
+                service_type: String::from("ColibriHummingService"),
+            },
         ],
     })
 }
@@ -73,6 +78,7 @@ mod tests {
         assert_eq!(did.id, "did:web:api.colibri.social");
         assert_eq!(did.verification_method.len(), 1);
         assert!(did.verification_method[0].public_key_multibase.is_some());
-        assert_eq!(did.service.len(), 2);
+        assert_eq!(did.service.len(), 3);
+        assert!(did.service.iter().any(|s| s.id == "#colibri_hum"));
     }
 }

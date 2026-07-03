@@ -59,13 +59,13 @@ const CONN_STOP_POLL_SECS: u64 = 10;
 static HUM_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Whether Humming (cross-AppView off-protocol presence relay) is enabled.
-/// **Off by default** — a deployment opts in with `HUMMING_ENABLED=true` (also
-/// accepts `1`/`yes`). When false the inbound endpoints reject, the manager task
-/// is never spawned, and the local hooks never enqueue.
+/// **On by default** — a deployment opts out with `HUMMING_ENABLED=false` (also
+/// accepts `0`/`no`). When disabled the inbound endpoints reject, the manager
+/// task is never spawned, and the local hooks never enqueue.
 pub fn humming_enabled() -> bool {
     std::env::var("HUMMING_ENABLED")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no"))
+        .unwrap_or(true)
 }
 
 /// A local off-protocol change the manager should propagate to the relevant
@@ -327,13 +327,15 @@ async fn run_egress_reconciler(
     loop {
         ticker.tick().await;
 
-        let desired = match desired_remote_hubs(&db).await {
+        let mut desired = match desired_remote_hubs(&db).await {
             Ok(map) => map,
             Err(e) => {
                 log::warn!("hub reconcile query failed: {e}");
                 continue;
             }
         };
+
+        cap_remote_hubs(&mut desired, crate::lib::hum_guard::max_peers());
 
         // Drop connections whose hub is gone, or whose community set changed —
         // the latter reconnect below with the updated declared-interest list.
@@ -360,6 +362,23 @@ async fn run_egress_reconciler(
                 stop,
             ));
         }
+    }
+}
+
+/// Caps the desired remote-hub set at `max` hubs (`HUM_MAX_PEERS`), dropping the
+/// excess deterministically (hubs sorted by DID, keep the first `max`) so the
+/// kept set is stable across reconciles and doesn't flap. Presence for a dropped
+/// hub's communities simply doesn't cross instances — a graceful degrade. `0`
+/// means unbounded.
+fn cap_remote_hubs(hubs: &mut HashMap<String, HashSet<String>>, max: usize) {
+    if max == 0 || hubs.len() <= max {
+        return;
+    }
+    let mut names: Vec<String> = hubs.keys().cloned().collect();
+    names.sort();
+    for hub in names.into_iter().skip(max) {
+        hubs.remove(&hub);
+        log::warn!("HUM_MAX_PEERS ({max}) reached; not connecting to hub {hub}");
     }
 }
 
@@ -529,6 +548,31 @@ mod tests {
             build_subscribe_url("h", &HashSet::new()),
             "wss://h/xrpc/social.colibri.sync.subscribeHums"
         );
+    }
+
+    #[test]
+    fn cap_remote_hubs_keeps_sorted_prefix() {
+        let mut hubs: HashMap<String, HashSet<String>> = ["did:web:c", "did:web:a", "did:web:b"]
+            .into_iter()
+            .map(|h| (h.to_string(), HashSet::new()))
+            .collect();
+
+        cap_remote_hubs(&mut hubs, 2);
+        assert_eq!(hubs.len(), 2);
+        // Deterministic: the two lowest-sorted hubs survive.
+        assert!(hubs.contains_key("did:web:a"));
+        assert!(hubs.contains_key("did:web:b"));
+        assert!(!hubs.contains_key("did:web:c"));
+    }
+
+    #[test]
+    fn cap_remote_hubs_zero_is_unbounded() {
+        let mut hubs: HashMap<String, HashSet<String>> = ["did:web:a", "did:web:b"]
+            .into_iter()
+            .map(|h| (h.to_string(), HashSet::new()))
+            .collect();
+        cap_remote_hubs(&mut hubs, 0);
+        assert_eq!(hubs.len(), 2);
     }
 
     #[test]

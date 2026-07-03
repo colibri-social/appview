@@ -213,6 +213,19 @@ pub async fn subscribe_hums(
             }),
         })?;
 
+    // Cap concurrent inbound streams so a community that unexpectedly spans many
+    // AppViews can't exhaust a small self-hosted hub. The slot is released when
+    // the connection ends (guard dropped inside the channel task).
+    let slot = crate::lib::hum_guard::SubscriberSlot::try_acquire(
+        crate::lib::hum_guard::max_subscribers(),
+    )
+    .ok_or_else(|| ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("TooManySubscribers"),
+            message: String::from("hub is at its subscribeHums connection limit"),
+        }),
+    })?;
+
     let declared: HashSet<String> = communities.into_iter().collect();
     log::info!(
         "Peer AppView subscribed to social.colibri.sync.subscribeHums: {peer_did} ({} declared communities)",
@@ -224,6 +237,7 @@ pub async fn subscribe_hums(
 
     let channel = ws.channel(move |io| {
         Box::pin(async move {
+            let _slot = slot;
             run_hum_egress_loop(io, from_hums, db, peer_did, declared).await;
             Ok(())
         })

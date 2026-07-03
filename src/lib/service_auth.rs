@@ -71,8 +71,12 @@ pub async fn verify_service_auth(
     let claims: ServiceAuthClaims =
         serde_json::from_slice(&claims_bytes).map_err(|_| ServiceAuthError::InvalidFormat)?;
 
-    // Validate audience
-    if !claims.aud.starts_with(&appview_did()) {
+    // Validate audience. The `aud` may carry a `#service` fragment (e.g.
+    // `did:web:api.colibri.social#colibri_appview`); match the base DID exactly
+    // rather than by prefix, so `did:web:api.colibri.social.evil.com` can never
+    // satisfy the check.
+    let aud_base = claims.aud.split('#').next().unwrap_or(claims.aud.as_str());
+    if aud_base != appview_did() {
         return Err(ServiceAuthError::InvalidAudience);
     }
 
@@ -224,7 +228,13 @@ async fn resolve_did_key_bytes(did: &str) -> Result<Vec<u8>, ServiceAuthError> {
 
     if let Some(multibase) = vm.public_key_multibase {
         let bytes = multibase_decode(&multibase).map_err(ServiceAuthError::DidResolution)?;
-        // Strip 2-byte multicodec prefix to get raw SEC1 key bytes
+        // Strip the 2-byte multicodec prefix to get raw SEC1 key bytes. Guard
+        // the slice so a malformed (<2-byte) key is a clean error, not a panic.
+        if bytes.len() < 2 {
+            return Err(ServiceAuthError::DidResolution(
+                "multibase key too short".into(),
+            ));
+        }
         Ok(bytes[2..].to_vec())
     } else if let Some(jwk) = vm.public_key_jwk {
         jwk_to_sec1(&jwk).map_err(ServiceAuthError::DidResolution)
@@ -289,6 +299,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidAudience));
+    }
+
+    #[tokio::test]
+    async fn rejects_audience_that_only_prefixes_the_appview_did() {
+        // A look-alike host that starts with the AppView DID must be rejected —
+        // the audience check is an exact match on the base DID, not a prefix.
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social.evil.com",
+            "exp": 4102444800u64
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidAudience));
+    }
+
+    #[tokio::test]
+    async fn accepts_audience_with_service_fragment() {
+        // `aud` with a `#service` fragment matches on the base DID. This gets
+        // past the audience check to the expiry check (short exp → Expired),
+        // proving the fragment didn't cause an audience rejection.
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social#colibri_appview",
+            "exp": 1u64
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::Expired));
     }
 
     #[tokio::test]

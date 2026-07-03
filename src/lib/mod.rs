@@ -23,6 +23,7 @@ pub mod get_state;
 pub mod handler;
 pub mod http;
 pub mod hum_client;
+pub mod hum_guard;
 pub mod klipy;
 pub mod list_atproto_records;
 pub mod map_tap_event;

@@ -59,15 +59,24 @@ type LoadMembershipFn =
     dyn Fn(String, String) -> BoxFuture<'static, Result<bool, DbErr>> + Send + Sync;
 type BuildUserEventFn =
     dyn Fn(String, UserEventStatus) -> BoxFuture<'static, ColibriServerEvent> + Send + Sync;
+/// Records a Hum id and reports whether it is new (true) or a duplicate to drop
+/// (false). Shared by both ingest paths so a Hum arriving over more than one
+/// relay is injected once.
+type DedupFn = dyn Fn(String) -> bool + Send + Sync;
+/// Reports whether an inbound `sendHum` from `peer_did` is within its rate
+/// budget (true) or should be dropped (false).
+type RateOkFn = dyn Fn(String) -> bool + Send + Sync;
 
 #[allow(clippy::too_many_arguments)]
 async fn receive_hum_with(
     auth: String,
     envelope: HumEnvelope,
     verify_auth_fn: &VerifyAuthFn,
+    rate_ok_fn: &RateOkFn,
     load_presence_service_fn: &LoadPresenceFn,
     load_membership_fn: &LoadMembershipFn,
     build_user_event_fn: &BuildUserEventFn,
+    dedup_fn: &DedupFn,
     broadcast_tx: &Sender<SharedScopedEvent>,
     c2c_tx: &Sender<EventNotification>,
     hums_tx: &Sender<HumEnvelope>,
@@ -75,6 +84,13 @@ async fn receive_hum_with(
     let peer_did = verify_auth_fn(auth, String::from("social.colibri.sync.sendHum"))
         .await
         .map_err(auth_error)?;
+
+    // Per-peer rate limit (presence/typing are low-rate). Checked on the
+    // authenticated peer so a flood from one AppView can't amplify past its
+    // budget; the trusted egress-in path is a single stream and isn't limited.
+    if !rate_ok_fn(peer_did.clone()) {
+        return Err(rate_limited());
+    }
 
     // A peer may only relay Hums it is itself the origin of. The rest of the
     // trust checks (origin must be an AppView, presenceService, membership, …)
@@ -92,6 +108,7 @@ async fn receive_hum_with(
         load_presence_service_fn,
         load_membership_fn,
         build_user_event_fn,
+        dedup_fn,
         broadcast_tx,
         c2c_tx,
         Some(hums_tx),
@@ -111,6 +128,7 @@ async fn ingest_hum_with(
     load_presence_service_fn: &LoadPresenceFn,
     load_membership_fn: &LoadMembershipFn,
     build_user_event_fn: &BuildUserEventFn,
+    dedup_fn: &DedupFn,
     broadcast_tx: &Sender<SharedScopedEvent>,
     c2c_tx: &Sender<EventNotification>,
     relay_to: Option<&Sender<HumEnvelope>>,
@@ -127,6 +145,14 @@ async fn ingest_hum_with(
     // forge our DID with a valid signature, and the hub relays our own Hums back
     // to us over egress-in, so this fires on that echo.
     if envelope.origin == service_auth::appview_did() {
+        return Ok(());
+    }
+
+    // Dedup on the envelope id: a Hum can reach us over more than one relay
+    // path (e.g. two hub connections for overlapping communities). Injecting it
+    // once keeps a duplicate from double-counting presence. Runs before the DB
+    // authorization work so repeats are cheap to discard.
+    if !dedup_fn(envelope.id.clone()) {
         return Ok(());
     }
 
@@ -322,6 +348,7 @@ fn prod_deps(
     Box<LoadPresenceFn>,
     Box<LoadMembershipFn>,
     Box<BuildUserEventFn>,
+    Box<DedupFn>,
 ) {
     let db_presence = db.clone();
     let load_presence: Box<LoadPresenceFn> = Box::new(
@@ -352,7 +379,9 @@ fn prod_deps(
         },
     );
 
-    (load_presence, load_membership, build_user_event)
+    let dedup: Box<DedupFn> = Box::new(move |id: String| crate::lib::hum_guard::seen_or_new(&id));
+
+    (load_presence, load_membership, build_user_event, dedup)
 }
 
 /// Authorizes and injects a Hum received over an already-authenticated
@@ -365,12 +394,13 @@ pub(crate) async fn ingest_trusted_hum(
     broadcast_tx: &Sender<SharedScopedEvent>,
     c2c_tx: &Sender<EventNotification>,
 ) -> Result<(), ErrorResponse> {
-    let (load_presence, load_membership, build_user_event) = prod_deps(db);
+    let (load_presence, load_membership, build_user_event, dedup) = prod_deps(db);
     ingest_hum_with(
         envelope,
         &*load_presence,
         &*load_membership,
         &*build_user_event,
+        &*dedup,
         broadcast_tx,
         c2c_tx,
         None,
@@ -392,6 +422,15 @@ fn not_enabled() -> ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("NotEnabled"),
             message: String::from("Humming is disabled on this AppView"),
+        }),
+    }
+}
+
+fn rate_limited() -> ErrorResponse {
+    ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("RateLimited"),
+            message: String::from("peer exceeded the sendHum rate limit"),
         }),
     }
 }
@@ -444,15 +483,19 @@ pub async fn send_hum(
         return Err(not_enabled());
     }
 
-    let (load_presence, load_membership, build_user_event) = prod_deps(db.inner().clone());
+    let (load_presence, load_membership, build_user_event, dedup) = prod_deps(db.inner().clone());
+    let rate_ok: Box<RateOkFn> =
+        Box::new(move |peer: String| crate::lib::hum_guard::rate_ok(&peer));
 
     receive_hum_with(
         auth.to_string(),
         body.into_inner(),
         &verify_auth_boxed,
+        &*rate_ok,
         &*load_presence,
         &*load_membership,
         &*build_user_event,
+        &*dedup,
         &bridge.broadcast,
         &c2c_broadcast_channel.0,
         &bridge.hums,
@@ -513,6 +556,16 @@ mod tests {
         move |_, _| Box::pin(async move { Ok(is_member) })
     }
 
+    /// A rate check with the given verdict for every peer.
+    fn rate(ok: bool) -> impl Fn(String) -> bool {
+        move |_| ok
+    }
+
+    /// A dedup that reports every id as new (never a duplicate).
+    fn fresh() -> impl Fn(String) -> bool {
+        |_| true
+    }
+
     /// Stand-in for the production `build_presence_user_event`: attributes the
     /// event to the DID it is *called with* (the authorized subject) and stamps
     /// a fixed locally-derived handle, so a test can prove the peer's identity
@@ -550,9 +603,11 @@ mod tests {
             String::from("token"),
             user_envelope("did:web:peer", "did:plc:subject", 1),
             &ok_verify("did:web:peer"),
+            &rate(true),
             &presence(Some("did:web:peer")),
             &member(true),
             &build_ue(),
+            &fresh(),
             &broadcast_tx,
             &c2c_tx,
             &hums_tx,
@@ -582,9 +637,11 @@ mod tests {
             // Envelope claims did:plc:peer-claimed-victim / spoofed.handle inside.
             user_envelope("did:web:peer", "did:plc:subject", 0),
             &ok_verify("did:web:peer"),
+            &rate(true),
             &presence(Some("did:web:peer")),
             &member(true),
             &build_ue(),
+            &fresh(),
             &broadcast_tx,
             &c2c_tx,
             &hums_tx,
@@ -618,9 +675,11 @@ mod tests {
             String::from("token"),
             envelope,
             &ok_verify("did:web:peer"),
+            &rate(true),
             &presence(Some("did:web:peer")),
             &member(true),
             &build_ue(),
+            &fresh(),
             &broadcast_tx,
             &c2c_tx,
             &hums_tx,
@@ -660,9 +719,11 @@ mod tests {
             String::from("token"),
             envelope,
             &verify,
+            &rate(true),
             &presence_fn,
             &member_fn,
             &build_ue(),
+            &fresh(),
             &broadcast_tx,
             &c2c_tx,
             &hums_tx,
@@ -753,9 +814,11 @@ mod tests {
             String::from("token"),
             user_envelope("did:web:peer", "did:plc:subject", 0),
             &ok_verify("did:web:peer"),
+            &rate(true),
             &presence(Some("did:web:peer")),
             &member(true),
             &build_ue(),
+            &fresh(),
             &broadcast_tx,
             &c2c_tx,
             &hums_tx,
@@ -763,6 +826,62 @@ mod tests {
         .await
         .unwrap();
 
+        assert!(hums_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_when_peer_is_rate_limited() {
+        let error = {
+            let (broadcast_tx, _) = broadcast::channel::<SharedScopedEvent>(4);
+            let (c2c_tx, _) = broadcast::channel::<EventNotification>(4);
+            let (hums_tx, _) = broadcast::channel::<HumEnvelope>(4);
+            receive_hum_with(
+                String::from("token"),
+                user_envelope("did:web:peer", "did:plc:subject", 1),
+                &ok_verify("did:web:peer"),
+                &rate(false),
+                &presence(Some("did:web:peer")),
+                &member(true),
+                &build_ue(),
+                &fresh(),
+                &broadcast_tx,
+                &c2c_tx,
+                &hums_tx,
+            )
+            .await
+            .err()
+            .unwrap()
+            .body
+            .into_inner()
+            .error
+        };
+        assert_eq!(error, "RateLimited");
+    }
+
+    #[tokio::test]
+    async fn drops_duplicate_hum_without_broadcasting() {
+        let (broadcast_tx, mut broadcast_rx) = broadcast::channel::<SharedScopedEvent>(4);
+        let (c2c_tx, _c2c_rx) = broadcast::channel::<EventNotification>(4);
+        let (hums_tx, mut hums_rx) = broadcast::channel::<HumEnvelope>(4);
+
+        // Dedup reports the id as already-seen → injection is skipped entirely.
+        receive_hum_with(
+            String::from("token"),
+            user_envelope("did:web:peer", "did:plc:subject", 1),
+            &ok_verify("did:web:peer"),
+            &rate(true),
+            &presence(Some("did:web:peer")),
+            &member(true),
+            &build_ue(),
+            &(|_| false),
+            &broadcast_tx,
+            &c2c_tx,
+            &hums_tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(broadcast_rx.try_recv().is_err());
         assert!(hums_rx.try_recv().is_err());
     }
 }

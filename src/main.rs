@@ -210,7 +210,7 @@ async fn rocket() -> _ {
 
     // Outbound Humming manager: propagates local off-protocol changes to remote
     // community hubs and pulls remote presence via supervised `subscribeHums`
-    // connections. Opt-in — only spawned when `HUMMING_ENABLED` is set.
+    // connections. On by default — skipped only when `HUMMING_ENABLED=false`.
     if crate::lib::hum_client::humming_enabled() {
         let hum_db = db.clone();
         let hum_broadcast = from_tap_broadcast.clone();
@@ -227,7 +227,7 @@ async fn rocket() -> _ {
             .await;
         });
     } else {
-        log::info!("Humming disabled (set HUMMING_ENABLED=true to enable cross-AppView presence).");
+        log::info!("Humming disabled via HUMMING_ENABLED=false (no cross-AppView presence).");
     }
 
     rocket::build()
