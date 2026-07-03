@@ -319,6 +319,8 @@ async fn bootstrap_community(
         category_order: vec![category_rkey.clone()],
         requires_approval_to_join: input.requires_approval_to_join,
         picture: picture_blob,
+        migrated_to: None,
+        migrated_from: None,
     };
     let community_ref = write_record_logged(
         create_record_fn,
@@ -366,6 +368,7 @@ async fn bootstrap_community(
         owner_only: None,
         allowed_roles: vec![],
         allowed_members: vec![],
+        migrated_from: None,
     };
     let channel_ref = write_record_logged(
         create_record_fn,

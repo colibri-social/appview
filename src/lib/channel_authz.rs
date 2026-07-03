@@ -72,6 +72,7 @@ mod tests {
             owner_only: None,
             allowed_roles: vec![],
             allowed_members: vec![],
+            migrated_from: None,
         }
     }
 

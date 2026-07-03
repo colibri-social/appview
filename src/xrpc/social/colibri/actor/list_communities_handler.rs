@@ -94,6 +94,13 @@ pub async fn get_authorized_communities(
     // `is_legacy` is derived purely from the rkey.
     let rows = record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq("social.colibri.community"))
+        // REMOVABLE MIGRATION SCAFFOLDING: a legacy community stamped with
+        // `migratedTo` has been replaced, hide it from everyone (its owner via
+        // branch 1, its members via branches 2/3). The replacement surfaces
+        // via the member records the migration wrote.
+        .filter(Expr::cust(
+            r#""record_data"."data"->>'migratedTo' IS NULL"#,
+        ))
         .filter(
             Condition::any()
                 .add(record_data::Column::Did.eq(user_did))

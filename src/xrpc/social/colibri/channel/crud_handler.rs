@@ -117,6 +117,7 @@ async fn create_channel_with(
                 owner_only: None,
                 allowed_roles,
                 allowed_members,
+                migrated_from: None,
             };
             let chan_data = serde_json::to_value(&channel)
                 .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;

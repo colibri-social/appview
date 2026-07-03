@@ -106,6 +106,37 @@ struct StoredMessage {
 #[derive(Deserialize)]
 struct StoredChannel {
     community: String,
+    /// REMOVABLE MIGRATION SCAFFOLDING: set on a channel cloned from a legacy
+    /// community. When present, messages that targeted the legacy channel are
+    /// surfaced here too (see `channel_match_condition`).
+    #[serde(rename = "migratedFrom", default)]
+    migrated_from: Option<String>,
+}
+
+/// Builds the "this message targets this channel" predicate. A message stores
+/// its channel as either the full channel AT-URI (new) or a bare rkey (legacy),
+/// so both are matched. REMOVABLE MIGRATION SCAFFOLDING: when the channel was
+/// cloned from a legacy channel (`legacy` = its `(uri, rkey)`), old messages
+/// that still point at the legacy channel are matched as well, so history
+/// surfaces in the migrated channel without rewriting any PDS records.
+fn channel_match_condition(
+    channel_uri: &str,
+    channel_rkey: &str,
+    legacy: Option<(&str, &str)>,
+) -> Condition {
+    let mut targets = vec![channel_uri.to_string(), channel_rkey.to_string()];
+    if let Some((uri, rkey)) = legacy {
+        targets.push(uri.to_string());
+        targets.push(rkey.to_string());
+    }
+    let mut any = Condition::any();
+    for target in targets {
+        any = any.add(Expr::cust_with_values(
+            r#""record_data"."data"->>'channel' = $1"#,
+            vec![sea_orm::Value::from(target)],
+        ));
+    }
+    any
 }
 
 /// Fetches the channel record so the response can include a fully-qualified
@@ -132,17 +163,16 @@ pub async fn fetch_message_page(
     db: &DatabaseConnection,
     channel_uri: &str,
     channel_rkey: &str,
+    legacy_channel: Option<(&str, &str)>,
     limit: u64,
     cursor: Option<&str>,
 ) -> Result<Vec<record_data::Model>, DbErr> {
     let mut condition = Condition::all()
         .add(record_data::Column::Nsid.eq(MESSAGE_NSID))
-        .add(Expr::cust_with_values(
-            r#"("record_data"."data"->>'channel' = $1 OR "record_data"."data"->>'channel' = $2)"#,
-            vec![
-                sea_orm::Value::from(channel_uri.to_string()),
-                sea_orm::Value::from(channel_rkey.to_string()),
-            ],
+        .add(channel_match_condition(
+            channel_uri,
+            channel_rkey,
+            legacy_channel,
         ));
     if let Some(c) = cursor {
         condition = condition.add(record_data::Column::Rkey.lt(c));
@@ -197,6 +227,7 @@ async fn fetch_legacy_parent_records(
     db: &DatabaseConnection,
     channel_uri: &str,
     channel_rkey: &str,
+    legacy_channel: Option<(&str, &str)>,
     parent_rkeys: &[String],
 ) -> Result<HashMap<String, record_data::Model>, DbErr> {
     if parent_rkeys.is_empty() {
@@ -205,12 +236,10 @@ async fn fetch_legacy_parent_records(
     let parents = record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq(MESSAGE_NSID))
         .filter(record_data::Column::Rkey.is_in(parent_rkeys.to_vec()))
-        .filter(Expr::cust_with_values(
-            r#"("record_data"."data"->>'channel' = $1 OR "record_data"."data"->>'channel' = $2)"#,
-            vec![
-                sea_orm::Value::from(channel_uri.to_string()),
-                sea_orm::Value::from(channel_rkey.to_string()),
-            ],
+        .filter(channel_match_condition(
+            channel_uri,
+            channel_rkey,
+            legacy_channel,
         ))
         .all(db)
         .await?;
@@ -307,9 +336,11 @@ pub async fn assemble_message_page(
     cursor: Option<&str>,
     include_hidden: bool,
 ) -> Result<MessagePage, DbErr> {
-    let channel_record = fetch_channel_record(db, &channel.authority, &channel.rkey).await?;
-    let community_uri = channel_record
-        .and_then(|r| serde_json::from_value::<StoredChannel>(r.data).ok())
+    let stored_channel = fetch_channel_record(db, &channel.authority, &channel.rkey)
+        .await?
+        .and_then(|r| serde_json::from_value::<StoredChannel>(r.data).ok());
+    let community_uri = stored_channel
+        .as_ref()
         .map(|c| {
             format!(
                 "at://{}/{}/{}",
@@ -317,6 +348,17 @@ pub async fn assemble_message_page(
             )
         })
         .unwrap_or_default();
+
+    // REMOVABLE MIGRATION SCAFFOLDING: if this channel was cloned from a legacy
+    // channel, resolve the legacy channel's (uri, rkey) so old messages that
+    // still target it are folded into this channel's history.
+    let legacy_channel = stored_channel
+        .as_ref()
+        .and_then(|c| c.migrated_from.as_deref())
+        .and_then(|uri| AtUri::parse(uri).map(|p| (uri.to_string(), p.rkey)));
+    let legacy_channel_ref = legacy_channel
+        .as_ref()
+        .map(|(uri, rkey)| (uri.as_str(), rkey.as_str()));
 
     // Single scan of the moderation log yields both banned authors and hidden
     // message URIs. Banned authors are always filtered; hidden messages are
@@ -330,7 +372,15 @@ pub async fn assemble_message_page(
         "at://{}/{}/{}",
         channel.authority, channel.collection, channel.rkey
     );
-    let raw_records = fetch_message_page(db, &channel_uri, &channel.rkey, limit, cursor).await?;
+    let raw_records = fetch_message_page(
+        db,
+        &channel_uri,
+        &channel.rkey,
+        legacy_channel_ref,
+        limit,
+        cursor,
+    )
+    .await?;
     let records: Vec<record_data::Model> = raw_records
         .into_iter()
         .filter(|r| !banned.contains(&r.did) && !is_hidden(r))
@@ -358,11 +408,16 @@ pub async fn assemble_message_page(
             .filter(|(_, r)| !banned.contains(&r.did) && !is_hidden(r))
             .collect();
 
-    let legacy_records =
-        fetch_legacy_parent_records(db, &channel_uri, &channel.rkey, &legacy_parent_rkeys)
-            .await?
-            .into_iter()
-            .filter(|(_, r)| !banned.contains(&r.did) && !is_hidden(r));
+    let legacy_records = fetch_legacy_parent_records(
+        db,
+        &channel_uri,
+        &channel.rkey,
+        legacy_channel_ref,
+        &legacy_parent_rkeys,
+    )
+    .await?
+    .into_iter()
+    .filter(|(_, r)| !banned.contains(&r.did) && !is_hidden(r));
     parent_records.extend(legacy_records);
 
     // Fetch reactions for page messages and their parents in one round-trip.

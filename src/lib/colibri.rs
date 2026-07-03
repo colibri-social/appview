@@ -156,6 +156,17 @@ pub struct ColibriCommunity {
     /// Optional image for the community.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
+
+    /// Set on a legacy community once it has been migrated. Points at the new
+    /// community record that replaces it. Consumers treat this community as
+    /// retired and hide it. Format: at-uri.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrated_to: Option<String>,
+
+    /// Set on a community created by migrating a legacy one. Points at the
+    /// legacy community record it replaces. Format: at-uri.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrated_from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -216,6 +227,12 @@ pub struct ColibriChannel {
     /// to `allowed_roles`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_members: Vec<String>,
+
+    /// Set on a channel created by migrating a legacy community. Points at the
+    /// legacy channel record it replaces, so its message history can be
+    /// surfaced here at read time. Format: at-uri.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrated_from: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
