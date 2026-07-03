@@ -149,6 +149,9 @@ async fn rocket() -> _ {
 
     let (hums_broadcast, _) = broadcast::channel::<crate::lib::events::HumEnvelope>(128);
 
+    let (hum_outbox_tx, hum_outbox_rx) =
+        tokio::sync::mpsc::channel::<crate::lib::hum_client::OutboundHum>(1024);
+
     let tap_bridge = CommsBridge {
         broadcast: from_tap_broadcast.clone(),
         notifications: notification_broadcast.clone(),
@@ -157,6 +160,7 @@ async fn rocket() -> _ {
         mute: mute_broadcast.clone(),
         progress: progress_broadcast.clone(),
         hums: hums_broadcast.clone(),
+        hum_outbox: hum_outbox_tx,
     };
 
     let db = match init_db().await {
@@ -202,6 +206,28 @@ async fn rocket() -> _ {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         });
+    }
+
+    // Outbound Humming manager: propagates local off-protocol changes to remote
+    // community hubs and pulls remote presence via supervised `subscribeHums`
+    // connections. Opt-in — only spawned when `HUMMING_ENABLED` is set.
+    if crate::lib::hum_client::humming_enabled() {
+        let hum_db = db.clone();
+        let hum_broadcast = from_tap_broadcast.clone();
+        let hum_c2c = c2c_broadcast_channel.0.clone();
+        let hum_hums = hums_broadcast.clone();
+        tokio::spawn(async move {
+            crate::lib::hum_client::run_hum_manager(
+                hum_db,
+                hum_broadcast,
+                hum_c2c,
+                hum_hums,
+                hum_outbox_rx,
+            )
+            .await;
+        });
+    } else {
+        log::info!("Humming disabled (set HUMMING_ENABLED=true to enable cross-AppView presence).");
     }
 
     rocket::build()

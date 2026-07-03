@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::lib::event_scope::SharedScopedEvent;
+use crate::lib::hum_client::OutboundHum;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth;
 use crate::lib::state::broadcast_state_change;
@@ -10,6 +11,7 @@ use crate::models::user_states::{self, ActiveModel as UserStatesModel, Entity as
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::tokio::sync::broadcast::Sender;
+use rocket::tokio::sync::mpsc;
 use rocket::{State, post};
 use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, sea_query};
 use serde::Serialize;
@@ -69,11 +71,13 @@ pub async fn save_state(db: &DatabaseConnection, did: String, state: String) {
     .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn set_state_with<VA, SV>(
     state: String,
     auth: String,
     db: DatabaseConnection,
     to_tap_broadcast: Sender<SharedScopedEvent>,
+    hum_outbox: mpsc::Sender<OutboundHum>,
     verify_auth_fn: VA,
     save_state_fn: SV,
 ) -> Result<Json<SetStateResponse>, ErrorResponse>
@@ -106,7 +110,7 @@ where
     let verified_state = maybe_state.unwrap().to_string();
 
     save_state_fn(db.clone(), did.clone(), verified_state.clone()).await;
-    broadcast_state_change(&to_tap_broadcast, &did, &db).await;
+    broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
 
     Ok(Json(SetStateResponse {
         online_state: verified_state,
@@ -137,6 +141,7 @@ pub async fn set_state(
         auth.to_string(),
         db.inner().clone(),
         bridge.broadcast.clone(),
+        bridge.hum_outbox.clone(),
         verify_auth_boxed,
         save_state_boxed,
     )
@@ -172,11 +177,13 @@ mod tests {
         let captured_clone = captured.clone();
 
         let (tx, _rx) = broadcast::channel(4);
+        let (hum_tx, _hum_rx) = mpsc::channel(4);
         let result = set_state_with(
             String::from("away"),
             String::from("token"),
             db,
             tx,
+            hum_tx,
             |_, _| Box::pin(async { Ok(String::from("did:plc:abc")) }),
             move |_, did, state| {
                 let captured_clone = captured_clone.clone();
@@ -199,11 +206,13 @@ mod tests {
     async fn set_state_with_rejects_invalid_state() {
         let db = mock_db();
         let (tx, _rx) = broadcast::channel(4);
+        let (hum_tx, _hum_rx) = mpsc::channel(4);
         let result = set_state_with(
             String::from("invalid"),
             String::from("token"),
             db,
             tx,
+            hum_tx,
             |_, _| Box::pin(async { Ok(String::from("did:plc:abc")) }),
             |_, _, _| Box::pin(async {}),
         )

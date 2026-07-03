@@ -1,10 +1,12 @@
 use crate::lib::author_cache::AuthorCache;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
 use crate::lib::get_atproto_record::get_atproto_record;
+use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::tap::TapMessageRecord;
 use crate::models::user_states::{self, Entity as UserStates};
 use rocket::tokio::sync::broadcast::Sender;
+use rocket::tokio::sync::mpsc;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
 use serde_json::Value;
 use std::sync::Arc;
@@ -20,6 +22,7 @@ pub async fn broadcast_state_change(
     broadcast: &Sender<SharedScopedEvent>,
     did: &str,
     db: &DatabaseConnection,
+    hum_outbox: &mpsc::Sender<OutboundHum>,
 ) {
     let actor_data = get_atproto_record::<Value>(
         did.to_string(),
@@ -67,6 +70,15 @@ pub async fn broadcast_state_change(
             log::error!("Unable to map state change for {did}: {e}");
         }
     }
+
+    // Propagate the presence change to the user's communities hosted on other
+    // AppViews (no-op unless Humming is enabled).
+    hum_client::enqueue(
+        hum_outbox,
+        OutboundHum::Presence {
+            did: did.to_string(),
+        },
+    );
 }
 
 pub async fn join_vc(did: String, vc: String, community: String, db: &DatabaseConnection) {

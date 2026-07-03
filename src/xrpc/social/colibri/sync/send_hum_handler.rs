@@ -76,6 +76,45 @@ async fn receive_hum_with(
         .await
         .map_err(auth_error)?;
 
+    // A peer may only relay Hums it is itself the origin of. The rest of the
+    // trust checks (origin must be an AppView, presenceService, membership, …)
+    // are shared with the trusted egress-in path and live in `ingest_hum_with`.
+    if peer_did != envelope.origin {
+        return Err(forbidden(
+            "envelope origin does not match the authenticated peer",
+        ));
+    }
+
+    // Received via `sendHum` in our hub role → relay onward to `subscribeHums`
+    // peers (subject to ttl).
+    ingest_hum_with(
+        envelope,
+        load_presence_service_fn,
+        load_membership_fn,
+        build_user_event_fn,
+        broadcast_tx,
+        c2c_tx,
+        Some(hums_tx),
+    )
+    .await
+}
+
+/// Authorizes an off-protocol Hum against the subject's own repo and injects it
+/// into the local realtime fan-out, optionally relaying it onward. Shared by the
+/// authenticated `sendHum` handler (hub role: `relay_to = Some`) and the trusted
+/// `subscribeHums` egress-in path (leaf role: `relay_to = None` — leaves never
+/// re-forward). The caller is responsible for authenticating *who sent* the Hum;
+/// this function authorizes *what it may claim*.
+#[allow(clippy::too_many_arguments)]
+async fn ingest_hum_with(
+    envelope: HumEnvelope,
+    load_presence_service_fn: &LoadPresenceFn,
+    load_membership_fn: &LoadMembershipFn,
+    build_user_event_fn: &BuildUserEventFn,
+    broadcast_tx: &Sender<SharedScopedEvent>,
+    c2c_tx: &Sender<EventNotification>,
+    relay_to: Option<&Sender<HumEnvelope>>,
+) -> Result<(), ErrorResponse> {
     // A Hum originates from an AppView, identified by `did:web`. Rejecting other
     // DID methods stops a user from minting a service-auth token (`iss` = their
     // own `did:plc`) and becoming their own presence origin, which — absent the
@@ -84,26 +123,21 @@ async fn receive_hum_with(
         return Err(forbidden("hum origin must be an AppView (did:web)"));
     }
 
-    if peer_did != envelope.origin {
-        return Err(forbidden(
-            "envelope origin does not match the authenticated peer",
-        ));
-    }
-
     // Loop guard: a Hum we originated must never be re-ingested. A peer can't
-    // forge our DID with a valid signature, so this only fires on a self-echo.
+    // forge our DID with a valid signature, and the hub relays our own Hums back
+    // to us over egress-in, so this fires on that echo.
     if envelope.origin == service_auth::appview_did() {
         return Ok(());
     }
 
-    // The peer may only speak for a subject that named it as their presence
+    // The origin may only speak for a subject that named it as their presence
     // origin. This is the sole authority a valid signature grants — it says who
     // sent the Hum, not who they may represent.
     match load_presence_service_fn(envelope.subject.clone())
         .await
         .map_err(|e| internal_error(format!("presence lookup failed: {e}")))?
     {
-        Some(ps) if ps == peer_did => {}
+        Some(ps) if ps == envelope.origin => {}
         _ => {
             return Err(forbidden(
                 "origin is not the subject's declared presenceService",
@@ -145,9 +179,12 @@ async fn receive_hum_with(
     )
     .await;
 
-    // Hub role: forward to peer `subscribeHums` streams, decrementing the hop
-    // budget. A Hum at ttl 0 is delivered locally (above) but never relayed.
-    if envelope.ttl > 0 {
+    // Hub role only: forward to peer `subscribeHums` streams, decrementing the
+    // hop budget. A Hum at ttl 0 is delivered locally (above) but never relayed;
+    // a leaf (egress-in) passes `None` and never forwards.
+    if let Some(hums_tx) = relay_to
+        && envelope.ttl > 0
+    {
         let mut relayed = envelope;
         relayed.ttl -= 1;
         let _ = hums_tx.send(relayed);
@@ -276,11 +313,85 @@ async fn is_community_member(
     Ok(row.is_some())
 }
 
+/// Builds the production authorization/injection closures over a database
+/// handle, shared by the `sendHum` handler and the trusted egress-in path so the
+/// two agree on how presence, membership, and identity are resolved.
+fn prod_deps(
+    db: DatabaseConnection,
+) -> (
+    Box<LoadPresenceFn>,
+    Box<LoadMembershipFn>,
+    Box<BuildUserEventFn>,
+) {
+    let db_presence = db.clone();
+    let load_presence: Box<LoadPresenceFn> = Box::new(
+        move |subject: String| -> BoxFuture<'static, Result<Option<String>, DbErr>> {
+            let db = db_presence.clone();
+            Box::pin(async move { presence_service_for(&db, &subject).await })
+        },
+    );
+
+    let db_member = db.clone();
+    let load_membership: Box<LoadMembershipFn> = Box::new(
+        move |subject: String, community: String| -> BoxFuture<'static, Result<bool, DbErr>> {
+            let db = db_member.clone();
+            Box::pin(async move { is_community_member(&db, &community, &subject).await })
+        },
+    );
+
+    let build_user_event: Box<BuildUserEventFn> = Box::new(
+        move |subject: String, status: UserEventStatus| -> BoxFuture<'static, ColibriServerEvent> {
+            let db = db.clone();
+            Box::pin(async move {
+                // A throwaway per-Hum author cache is fine: presence is
+                // low-frequency, so re-deriving identity on each event is cheap
+                // relative to a status change, and it never serves stale identity.
+                let cache = AuthorCache::new();
+                build_presence_user_event(&subject, status, &db, &cache).await
+            })
+        },
+    );
+
+    (load_presence, load_membership, build_user_event)
+}
+
+/// Authorizes and injects a Hum received over an already-authenticated
+/// `subscribeHums` stream (leaf/egress-in role). The peer hub authenticated the
+/// transport; this still re-authorizes the claim against the subject's own repo
+/// and never relays onward.
+pub(crate) async fn ingest_trusted_hum(
+    envelope: HumEnvelope,
+    db: DatabaseConnection,
+    broadcast_tx: &Sender<SharedScopedEvent>,
+    c2c_tx: &Sender<EventNotification>,
+) -> Result<(), ErrorResponse> {
+    let (load_presence, load_membership, build_user_event) = prod_deps(db);
+    ingest_hum_with(
+        envelope,
+        &*load_presence,
+        &*load_membership,
+        &*build_user_event,
+        broadcast_tx,
+        c2c_tx,
+        None,
+    )
+    .await
+}
+
 fn auth_error(err: ServiceAuthError) -> ErrorResponse {
     ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("AuthRequired"),
             message: err.to_string(),
+        }),
+    }
+}
+
+fn not_enabled() -> ErrorResponse {
+    ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("NotEnabled"),
+            message: String::from("Humming is disabled on this AppView"),
         }),
     }
 }
@@ -329,40 +440,19 @@ pub async fn send_hum(
     bridge: &State<CommsBridge>,
     c2c_broadcast_channel: &State<(Sender<EventNotification>, Receiver<EventNotification>)>,
 ) -> Result<(), ErrorResponse> {
-    let db_for_lookup = db.inner().clone();
-    let load_presence_service =
-        move |subject: String| -> BoxFuture<'static, Result<Option<String>, DbErr>> {
-            let db = db_for_lookup.clone();
-            Box::pin(async move { presence_service_for(&db, &subject).await })
-        };
+    if !crate::lib::hum_client::humming_enabled() {
+        return Err(not_enabled());
+    }
 
-    let db_for_membership = db.inner().clone();
-    let load_membership =
-        move |subject: String, community: String| -> BoxFuture<'static, Result<bool, DbErr>> {
-            let db = db_for_membership.clone();
-            Box::pin(async move { is_community_member(&db, &community, &subject).await })
-        };
-
-    let db_for_build = db.inner().clone();
-    let build_user_event =
-        move |subject: String, status: UserEventStatus| -> BoxFuture<'static, ColibriServerEvent> {
-            let db = db_for_build.clone();
-            Box::pin(async move {
-                // A throwaway per-Hum author cache is fine: presence is
-                // low-frequency, so re-deriving identity on each event is cheap
-                // relative to a status change, and it never serves stale identity.
-                let cache = AuthorCache::new();
-                build_presence_user_event(&subject, status, &db, &cache).await
-            })
-        };
+    let (load_presence, load_membership, build_user_event) = prod_deps(db.inner().clone());
 
     receive_hum_with(
         auth.to_string(),
         body.into_inner(),
         &verify_auth_boxed,
-        &load_presence_service,
-        &load_membership,
-        &build_user_event,
+        &*load_presence,
+        &*load_membership,
+        &*build_user_event,
         &bridge.broadcast,
         &c2c_broadcast_channel.0,
         &bridge.hums,

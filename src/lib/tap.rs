@@ -11,6 +11,7 @@ use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent}
 use crate::lib::events::{
     CommunityCreationProgressEvent, HumEnvelope, MuteEvent, MuteEventData, SeenEvent, SeenEventData,
 };
+use crate::lib::hum_client::OutboundHum;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
@@ -237,6 +238,11 @@ pub struct CommsBridge {
     /// forwards it onward. Not derived from tap — Hums are the AppView-to-AppView
     /// presence channel.
     pub hums: broadcast::Sender<HumEnvelope>,
+    /// Outbound queue for local off-protocol changes (presence/typing/voice) the
+    /// Humming manager propagates to each community's hub. When Humming is
+    /// disabled the manager task is never spawned, so nothing drains this and
+    /// `hum_client::enqueue` no-ops.
+    pub hum_outbox: mpsc::Sender<OutboundHum>,
 }
 
 /// Runs the tap-connection event loop:

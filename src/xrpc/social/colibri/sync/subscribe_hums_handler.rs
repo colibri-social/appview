@@ -90,6 +90,22 @@ fn community_authorized(community_uri: &str, authorized: &HashSet<String>) -> bo
     AtUri::parse(community_uri).is_some_and(|uri| authorized.contains(&uri.authority))
 }
 
+/// Narrows the peer's authorized communities to those it declared interest in
+/// (Option A). `authorized` is the security boundary — the intersection can only
+/// shrink it, never grant a community the peer isn't authorized for. An empty
+/// declaration means "no filter": stream everything authorized (back-compat for
+/// peers that don't declare).
+fn narrow(authorized: HashSet<String>, declared: &HashSet<String>) -> HashSet<String> {
+    if declared.is_empty() {
+        authorized
+    } else {
+        authorized
+            .into_iter()
+            .filter(|c| declared.contains(c))
+            .collect()
+    }
+}
+
 /// Forwards one relayed Hum to the peer iff they are authorized for its
 /// community. Returns false only when the stream has closed.
 async fn forward_hum(
@@ -124,16 +140,21 @@ async fn run_hum_egress_loop(
     from_hums: Receiver<HumEnvelope>,
     db: DatabaseConnection,
     peer_did: String,
+    declared: HashSet<String>,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
     let mut from_hums = from_hums;
 
-    let mut authorized = authorized_hum_communities(&db, &peer_did)
-        .await
-        .unwrap_or_else(|e| {
-            log::warn!("initial authorized-community load failed for {peer_did}: {e}");
-            HashSet::new()
-        });
+    let load = |db: DatabaseConnection, peer: String| async move {
+        authorized_hum_communities(&db, &peer)
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("authorized-community load failed for {peer}: {e}");
+                HashSet::new()
+            })
+    };
+
+    let mut authorized = narrow(load(db.clone(), peer_did.clone()).await, &declared);
 
     let mut refresh = rocket::tokio::time::interval(Duration::from_secs(AUTHZ_REFRESH_SECS));
     // The first tick fires immediately; consume it so the periodic cadence
@@ -144,10 +165,7 @@ async fn run_hum_egress_loop(
         let connected = rocket::tokio::select! {
             hum = from_hums.recv() => forward_hum(&mut ws_sink, hum, &authorized, &peer_did).await,
             _ = refresh.tick() => {
-                match authorized_hum_communities(&db, &peer_did).await {
-                    Ok(set) => authorized = set,
-                    Err(e) => log::warn!("authorized-community refresh failed for {peer_did}: {e}"),
-                }
+                authorized = narrow(load(db.clone(), peer_did.clone()).await, &declared);
                 true
             }
             // Egress-only: the peer sends nothing meaningful. Watch only for the
@@ -161,14 +179,24 @@ async fn run_hum_egress_loop(
     }
 }
 
-#[get("/xrpc/social.colibri.sync.subscribeHums?<auth>")]
+#[get("/xrpc/social.colibri.sync.subscribeHums?<auth>&<communities>")]
 pub async fn subscribe_hums(
     auth: Option<&str>,
+    communities: Vec<String>,
     subprotocol_auth: SubprotocolAuth,
     ws: WebSocket,
     db: &State<DatabaseConnection>,
     bridge: &State<CommsBridge>,
 ) -> Result<ChannelWithProtocol, ErrorResponse> {
+    if !crate::lib::hum_client::humming_enabled() {
+        return Err(ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("NotEnabled"),
+                message: String::from("Humming is disabled on this AppView"),
+            }),
+        });
+    }
+
     let used_subprotocol = subprotocol_auth.token().is_some();
     let token = subprotocol_auth
         .token()
@@ -185,14 +213,18 @@ pub async fn subscribe_hums(
             }),
         })?;
 
-    log::info!("Peer AppView subscribed to social.colibri.sync.subscribeHums: {peer_did}");
+    let declared: HashSet<String> = communities.into_iter().collect();
+    log::info!(
+        "Peer AppView subscribed to social.colibri.sync.subscribeHums: {peer_did} ({} declared communities)",
+        declared.len()
+    );
 
     let from_hums = bridge.hums.subscribe();
     let db = db.inner().clone();
 
     let channel = ws.channel(move |io| {
         Box::pin(async move {
-            run_hum_egress_loop(io, from_hums, db, peer_did).await;
+            run_hum_egress_loop(io, from_hums, db, peer_did, declared).await;
             Ok(())
         })
     });
@@ -236,5 +268,21 @@ mod tests {
             "at://did:plc:community-a/social.colibri.community/self",
             &authorized
         ));
+    }
+
+    #[test]
+    fn narrow_intersects_with_declared_interest() {
+        let authorized: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+
+        // Declared narrows to the intersection...
+        let declared: HashSet<String> = ["b", "z"].iter().map(|s| s.to_string()).collect();
+        let narrowed = narrow(authorized.clone(), &declared);
+        assert_eq!(narrowed, ["b"].iter().map(|s| s.to_string()).collect());
+
+        // ...and can never widen beyond authorized (declared-only "z" is dropped).
+        assert!(!narrowed.contains("z"));
+
+        // Empty declaration = no filter.
+        assert_eq!(narrow(authorized.clone(), &HashSet::new()), authorized);
     }
 }
