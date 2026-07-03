@@ -143,6 +143,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
     async fn resolve_handle_handles_did_json() {
         let result = resolve_handle("api.bsky.app").await;
 
@@ -154,6 +155,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
     async fn resolve_handle_handles_atproto_did() {
         let result = resolve_handle("colibri.social").await;
 
@@ -165,6 +167,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
     async fn resolve_handle_handles_dns_record() {
         let result = resolve_handle("lou.gg").await;
 

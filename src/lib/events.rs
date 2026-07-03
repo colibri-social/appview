@@ -257,6 +257,13 @@ pub struct TypingEventData {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VoicePresenceEventData {
+    pub event: String,
+    pub channel: String,
+    pub did: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NotificationEventMessage {
     pub text: String,
     #[serde(default)]
@@ -367,6 +374,7 @@ pub enum ColibriServerEventData {
     Reaction(ReactionEventData),
     User(UserEventData),
     Typing(TypingEventData),
+    VoicePresence(VoicePresenceEventData),
     Notification(NotificationEventData),
     Seen(SeenEventData),
     Mute(MuteEventData),
@@ -385,6 +393,38 @@ impl ColibriServerEvent {
     pub fn serialize(&self) -> String {
         serde_json::to_string(self).unwrap()
     }
+}
+
+// -- AppView <-> AppView (Humming)
+
+/// The only event payloads a Hum may carry — the off-protocol subset. Tagged on
+/// the same `type`/`data` shape as a server event, so an on-protocol event
+/// (message/member/role/…) fails to deserialize into this enum and is rejected
+/// before it can be relayed. This is the structural guard that keeps a forged
+/// Hum from ever manufacturing on-protocol state.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", content = "data")]
+pub enum HumEvent {
+    #[serde(rename = "user_event")]
+    User(Box<UserEventData>),
+    #[serde(rename = "typing_event")]
+    Typing(TypingEventData),
+    #[serde(rename = "voice_presence_event")]
+    VoicePresence(VoicePresenceEventData),
+}
+
+/// An off-protocol event relayed between AppViews. Authenticated via
+/// inter-service auth (the JWT issuer must equal `origin`, and `origin` must
+/// equal `subject`'s declared `presenceService`). See the `sendHum` /
+/// `subscribeHums` handlers.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HumEnvelope {
+    pub origin: String,
+    pub id: String,
+    pub ttl: u8,
+    pub subject: String,
+    pub community: String,
+    pub event: HumEvent,
 }
 
 // -- Client -> Server
@@ -416,4 +456,33 @@ pub struct ColibriClientEvent {
     /// of `event_type`. Callers deserialize into the concrete struct their
     /// `event_type` arm expects.
     pub data: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hum_event_accepts_offprotocol_types() {
+        let json = r#"{"type":"typing_event","data":{"event":"start","channel":"at://c/social.colibri.channel/x","did":"did:plc:me"}}"#;
+        let ev: HumEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(ev, HumEvent::Typing(_)));
+    }
+
+    #[test]
+    fn hum_event_rejects_onprotocol_types() {
+        // A message_event must never deserialize into a HumEvent — the structural
+        // guard that stops a forged Hum from injecting on-protocol state.
+        let json = r#"{"type":"message_event","data":{"event":"upsert","uri":"at://x","channel":"at://c"}}"#;
+        assert!(serde_json::from_str::<HumEvent>(json).is_err());
+    }
+
+    #[test]
+    fn hum_envelope_roundtrips() {
+        let json = r#"{"origin":"did:web:a","id":"abc","ttl":1,"subject":"did:plc:me","community":"at://did:plc:c/social.colibri.community/self","event":{"type":"user_event","data":{"did":"did:plc:me","profile":{"isBot":false,"handle":"me.test"}}}}"#;
+        let envelope: HumEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.origin, "did:web:a");
+        assert_eq!(envelope.ttl, 1);
+        assert!(matches!(envelope.event, HumEvent::User(_)));
+    }
 }

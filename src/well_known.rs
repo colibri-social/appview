@@ -13,30 +13,49 @@ pub fn did_json() -> Json<DidDocument> {
     let verifying_key = VerifyingKey::from(&signing_key);
     let compressed_point = verifying_key.to_encoded_point(true);
 
+    // Publish the secp256k1 public key as proper multibase (z-base58btc of the
+    // multicodec-prefixed compressed point), matching what `service_auth`'s
+    // verifier decodes. A peer AppView resolves this doc to verify Hums we sign.
+    let mut multicodec = vec![0xe7, 0x01];
+    multicodec.extend_from_slice(compressed_point.as_bytes());
+    let public_key_multibase = format!("z{}", bs58::encode(multicodec).into_string());
+
+    let appview_did = crate::lib::service_auth::appview_did();
+    let host = appview_did
+        .strip_prefix("did:web:")
+        .unwrap_or("api.colibri.social")
+        .replace("%3A", ":");
+    let endpoint = format!("https://{host}");
+
     Json(DidDocument {
         context: vec![
             String::from("https://www.w3.org/ns/did/v1"),
             String::from("https://w3id.org/security/multikey/v1"),
         ],
-        id: String::from("did:web:api.colibri.social"),
+        id: appview_did.clone(),
         also_known_as: None,
         verification_method: vec![VerificationMethod {
-            id: String::from("did:web:api.colibri.social#atproto"),
+            id: format!("{appview_did}#atproto"),
             verification_type: String::from("Multikey"),
-            controller: String::from("did:web:api.colibri.social"),
-            public_key_multibase: Some(hex::encode(compressed_point)),
+            controller: appview_did.clone(),
+            public_key_multibase: Some(public_key_multibase),
             public_key_jwk: None,
         }],
         service: vec![
             Service {
                 id: String::from("#colibri_appview"),
-                service_endpoint: String::from("https://api.colibri.social"),
+                service_endpoint: endpoint.clone(),
                 service_type: String::from("ColibriAppView"),
             },
             Service {
                 id: String::from("#colibri_notif"),
-                service_endpoint: String::from("https://api.colibri.social"),
+                service_endpoint: endpoint.clone(),
                 service_type: String::from("ColibriNotificationService"),
+            },
+            Service {
+                id: String::from("#colibri_hum"),
+                service_endpoint: endpoint.clone(),
+                service_type: String::from("ColibriHummingService"),
             },
         ],
     })
@@ -59,6 +78,7 @@ mod tests {
         assert_eq!(did.id, "did:web:api.colibri.social");
         assert_eq!(did.verification_method.len(), 1);
         assert!(did.verification_method[0].public_key_multibase.is_some());
-        assert_eq!(did.service.len(), 2);
+        assert_eq!(did.service.len(), 3);
+        assert!(did.service.iter().any(|s| s.id == "#colibri_hum"));
     }
 }

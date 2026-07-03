@@ -1,4 +1,5 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -26,11 +27,20 @@ pub enum ServiceAuthError {
     InvalidLxm,
     #[error("could not resolve DID: {0}")]
     DidResolution(String),
+    #[error("signing error: {0}")]
+    Signing(String),
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
 }
 
-const YOUR_APPVIEW_DID: &str = "did:web:api.colibri.social";
+const DEFAULT_APPVIEW_DID: &str = "did:web:api.colibri.social";
+
+/// The `did:web` this AppView identifies as. Configurable via `APPVIEW_DID` so
+/// self-hosted deployments verify service-auth `aud` (and sign outbound tokens)
+/// against their own identity rather than the canonical one.
+pub fn appview_did() -> String {
+    std::env::var("APPVIEW_DID").unwrap_or_else(|_| DEFAULT_APPVIEW_DID.to_string())
+}
 
 /// Verifies a service auth key issued by the user's PDS for the Colibri AppView. Returns the DID if successful.
 pub async fn verify_service_auth(
@@ -61,8 +71,12 @@ pub async fn verify_service_auth(
     let claims: ServiceAuthClaims =
         serde_json::from_slice(&claims_bytes).map_err(|_| ServiceAuthError::InvalidFormat)?;
 
-    // Validate audience
-    if !claims.aud.starts_with(YOUR_APPVIEW_DID) {
+    // Validate audience. The `aud` may carry a `#service` fragment (e.g.
+    // `did:web:api.colibri.social#colibri_appview`); match the base DID exactly
+    // rather than by prefix, so `did:web:api.colibri.social.evil.com` can never
+    // satisfy the check.
+    let aud_base = claims.aud.split('#').next().unwrap_or(claims.aud.as_str());
+    if aud_base != appview_did() {
         return Err(ServiceAuthError::InvalidAudience);
     }
 
@@ -102,6 +116,58 @@ pub async fn verify_service_auth(
     }
 
     Ok(claims.iss)
+}
+
+/// Verifies an inter-service auth JWT issued by a *peer AppView* (Humming).
+/// Verification is identical to [`verify_service_auth`]; the returned DID is the
+/// peer AppView's identity (`iss`). Callers MUST treat it only as the origin
+/// AppView and perform a separate authorization check (e.g. matching it against
+/// a user's declared `presenceService`) before acting on any claim it makes
+/// about a user — a valid signature proves who sent the Hum, not who they may
+/// speak for.
+pub async fn verify_appview_auth(
+    token: &str,
+    expected_lxm: &str,
+) -> Result<String, ServiceAuthError> {
+    verify_service_auth(token, expected_lxm).await
+}
+
+/// Mints an inter-service auth JWT signed by this AppView's `K256_PRIVATE_KEY`
+/// (ES256K), for calling a peer AppView. `iss` is this AppView's `did:web`,
+/// `aud` the peer's DID, `lxm` the target method NSID. Short-lived (60s).
+pub fn mint_appview_auth(aud: &str, lxm: &str) -> Result<String, ServiceAuthError> {
+    let raw_key = std::env::var("K256_PRIVATE_KEY")
+        .map_err(|_| ServiceAuthError::Signing("K256_PRIVATE_KEY not set".into()))?;
+    let bytes = hex::decode(raw_key).map_err(|e| ServiceAuthError::Signing(e.to_string()))?;
+    let signing_key =
+        SigningKey::from_slice(&bytes).map_err(|e| ServiceAuthError::Signing(e.to_string()))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256K","typ":"JWT"}"#);
+    let claims = ServiceAuthClaims {
+        iss: appview_did(),
+        aud: aud.to_string(),
+        exp: now + 60,
+        lxm: Some(lxm.to_string()),
+    };
+    let claims_b64 = URL_SAFE_NO_PAD.encode(
+        serde_json::to_string(&claims).map_err(|e| ServiceAuthError::Signing(e.to_string()))?,
+    );
+
+    let signing_input = format!("{header_b64}.{claims_b64}");
+    let hash = Sha256::digest(signing_input.as_bytes());
+    let signature: k256::ecdsa::Signature = signing_key
+        .sign_prehash(&hash)
+        .map_err(|e| ServiceAuthError::Signing(e.to_string()))?;
+    // atproto expects low-S normalized signatures.
+    let signature = signature.normalize_s().unwrap_or(signature);
+    let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+    Ok(format!("{signing_input}.{sig_b64}"))
 }
 
 /// Verifies an ES256K-signed key.
@@ -162,7 +228,13 @@ async fn resolve_did_key_bytes(did: &str) -> Result<Vec<u8>, ServiceAuthError> {
 
     if let Some(multibase) = vm.public_key_multibase {
         let bytes = multibase_decode(&multibase).map_err(ServiceAuthError::DidResolution)?;
-        // Strip 2-byte multicodec prefix to get raw SEC1 key bytes
+        // Strip the 2-byte multicodec prefix to get raw SEC1 key bytes. Guard
+        // the slice so a malformed (<2-byte) key is a clean error, not a panic.
+        if bytes.len() < 2 {
+            return Err(ServiceAuthError::DidResolution(
+                "multibase key too short".into(),
+            ));
+        }
         Ok(bytes[2..].to_vec())
     } else if let Some(jwk) = vm.public_key_jwk {
         jwk_to_sec1(&jwk).map_err(ServiceAuthError::DidResolution)
@@ -230,6 +302,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_audience_that_only_prefixes_the_appview_did() {
+        // A look-alike host that starts with the AppView DID must be rejected —
+        // the audience check is an exact match on the base DID, not a prefix.
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social.evil.com",
+            "exp": 4102444800u64
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidAudience));
+    }
+
+    #[tokio::test]
+    async fn accepts_audience_with_service_fragment() {
+        // `aud` with a `#service` fragment matches on the base DID. This gets
+        // past the audience check to the expiry check (short exp → Expired),
+        // proving the fragment didn't cause an audience rejection.
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social#colibri_appview",
+            "exp": 1u64
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::Expired));
+    }
+
+    #[tokio::test]
     async fn rejects_expired_token_before_network_lookup() {
         let token = make_token(json!({
             "iss":"did:plc:abc",
@@ -263,6 +368,25 @@ mod tests {
         let raw = vec![0xe7, 0x01, 0x01, 0x02, 0x03];
         let encoded = format!("z{}", bs58::encode(raw.clone()).into_string());
         assert_eq!(multibase_decode(&encoded).unwrap(), raw);
+    }
+
+    #[test]
+    fn mint_signature_roundtrips_with_es256k_verifier() {
+        // The signing path used by `mint_appview_auth` must produce a signature
+        // the inbound verifier (`verify_es256k`) accepts against the SEC1 public
+        // key a peer would recover from our published DID doc.
+        let sk = SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let signing_input = "eyJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJkaWQ6d2ViOmEifQ";
+        let hash = Sha256::digest(signing_input.as_bytes());
+        let sig: k256::ecdsa::Signature = sk.sign_prehash(&hash).unwrap();
+        let sig = sig.normalize_s().unwrap_or(sig);
+
+        let pub_sec1 = sk.verifying_key().to_encoded_point(false);
+        assert!(verify_es256k(
+            signing_input,
+            &sig.to_bytes(),
+            pub_sec1.as_bytes()
+        ));
     }
 
     #[test]

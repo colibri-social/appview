@@ -107,6 +107,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
     async fn resolve_did_handles_web_did() {
         let result = resolve_did("did:web:api.bsky.app").await;
 
@@ -118,6 +119,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
     async fn resolve_did_handles_plc_did() {
         let result = resolve_did("did:plc:w64dlsa4zwjv2wljlvmymldc").await;
 

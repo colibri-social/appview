@@ -16,11 +16,17 @@ use rocket::{State, post};
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 
+use sea_orm::DbErr;
+use serde_json::Value;
+
 use crate::lib::community_credentials::{self, SOURCE_BYO};
+use crate::lib::community_write;
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError, PdsSession};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
+
+const COMMUNITY_NSID: &str = "social.colibri.community";
 
 #[derive(Serialize, Debug)]
 pub struct RegisterCredentialsResponse {
@@ -128,6 +134,41 @@ fn create_session_boxed(
     Box::pin(async move { pds_client::create_session(&pds_endpoint, &identifier, &password).await })
 }
 
+/// Best-effort: stamp `appview = APPVIEW_DID` onto the BYO community's `self`
+/// record so peers discover this AppView as the community's off-protocol hub
+/// (Humming relay + voice SFU). Requires the community record to already exist —
+/// BYO callers provision their own records, so if it isn't present yet this is a
+/// no-op and the canonical fallback applies until it is written or credentials
+/// are re-registered. Never fails registration.
+async fn stamp_appview_on_community(
+    db: &sea_orm::DatabaseConnection,
+    community_did: &str,
+) -> Result<(), DbErr> {
+    let (endpoint, _jwt) = community_write::community_session(db, community_did).await?;
+
+    let existing = pds_client::get_record(&endpoint, community_did, COMMUNITY_NSID, "self")
+        .await
+        .map_err(community_write::pds_err_to_db)?;
+
+    let Some(mut record) = existing else {
+        log::info!(
+            "BYO community {community_did} has no {COMMUNITY_NSID}/self record yet; skipping appview stamp"
+        );
+        return Ok(());
+    };
+
+    let appview_did = service_auth::appview_did();
+    if record.get("appview").and_then(|v| v.as_str()) == Some(appview_did.as_str()) {
+        return Ok(());
+    }
+    let Some(obj) = record.as_object_mut() else {
+        return Ok(());
+    };
+    obj.insert(String::from("appview"), Value::String(appview_did));
+
+    community_write::put_record(db, community_did, COMMUNITY_NSID, "self", record).await
+}
+
 #[post(
     "/xrpc/social.colibri.community.registerCredentials?<did>&<pds>&<identifier>&<password>&<auth>"
 )]
@@ -184,6 +225,16 @@ pub async fn register_credentials(
     // trip on the env-var reads (`TAP_HOSTNAME`, `TAP_ADMIN_PASSWORD`)
     // inside `register_dids`.
     crate::lib::tap::register_dids(vec![response.did.clone()]).await;
+
+    // Mark this AppView as the community's off-protocol hub. Best-effort and
+    // non-fatal: a BYO community whose record isn't provisioned yet keeps the
+    // canonical fallback until it is (or creds are re-registered).
+    if let Err(e) = stamp_appview_on_community(db.inner(), &response.did).await {
+        log::warn!(
+            "failed to stamp appview on BYO community {}: {e}",
+            response.did
+        );
+    }
 
     Ok(response)
 }

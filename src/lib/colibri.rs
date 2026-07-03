@@ -75,6 +75,13 @@ pub struct ColibriActorProfile {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ColibriProfileTheme>,
+
+    /// DID of the AppView authorized to emit this user's off-protocol presence
+    /// (status/typing/voice) across instances via Humming. A receiving AppView
+    /// drops any Hum about this user whose authenticated origin is not this
+    /// value. Absent means the user has not opted into cross-instance presence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_service: Option<String>,
 }
 
 /// The profile a viewer should see for a user, after applying the Colibri
@@ -167,6 +174,27 @@ pub struct ColibriCommunity {
     /// legacy community record it replaces. Format: at-uri.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrated_from: Option<String>,
+
+    /// DID of the AppView that administers this community and acts as its
+    /// off-protocol hub (Humming relay + voice SFU host). Written by the
+    /// credential-holding AppView. Read via `community_hub_did`, which applies
+    /// the legacy fallback for records predating this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appview: Option<String>,
+}
+
+/// The DID of the AppView that hubs a community's off-protocol traffic (Humming
+/// presence relay and, in future, the voice SFU). Falls back to the canonical
+/// `did:web:api.colibri.social` for records written before the `appview` field
+/// existed — those communities live on colibri.social, so that is their real
+/// hub. Never defaults to the reading AppView's own identity.
+pub fn community_hub_did(community: &ColibriCommunity) -> String {
+    community
+        .appview
+        .as_deref()
+        .filter(|d| !d.is_empty())
+        .unwrap_or("did:web:api.colibri.social")
+        .to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

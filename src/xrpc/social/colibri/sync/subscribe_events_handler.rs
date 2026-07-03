@@ -7,6 +7,7 @@ use crate::lib::events::{
     VoiceChannelData,
 };
 use crate::lib::get_state::get_did_states;
+use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, view_channel};
 use crate::lib::tap::CommsBridge;
@@ -26,6 +27,7 @@ use rocket::request::{FromRequest, Outcome};
 use rocket::response::{self, Responder, Response};
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::tokio::sync::broadcast::{Receiver, Sender};
+use rocket::tokio::sync::mpsc;
 use rocket::{Request, State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
@@ -42,6 +44,7 @@ async fn parse_client_event(
     text: &str,
     did: String,
     to_c2c_broadcast: &Sender<EventNotification>,
+    hum_outbox: &mpsc::Sender<OutboundHum>,
     db: &DatabaseConnection,
 ) -> Option<String> {
     let user_message = serde_json::from_str::<ColibriClientEvent>(text).ok()?;
@@ -60,6 +63,14 @@ async fn parse_client_event(
             let typing_msg_data: TypingMessageData =
                 serde_json::from_value(user_message.data?).ok()?;
 
+            hum_client::enqueue(
+                hum_outbox,
+                OutboundHum::Typing {
+                    did: did.clone(),
+                    channel: typing_msg_data.channel.clone(),
+                },
+            );
+
             let _ = to_c2c_broadcast.send(EventNotification {
                 event_type: String::from("typing"),
                 data: vec![did, typing_msg_data.channel],
@@ -77,12 +88,35 @@ async fn parse_client_event(
         "voice_join" => {
             let vc_msg_data: VoiceChannelData = serde_json::from_value(user_message.data?).ok()?;
 
+            hum_client::enqueue(
+                hum_outbox,
+                OutboundHum::Voice {
+                    did: did.clone(),
+                    channel: vc_msg_data.channel.clone(),
+                    event: String::from("join"),
+                },
+            );
+
             join_vc(did, vc_msg_data.channel, vc_msg_data.community, db).await;
 
             None
         }
         "voice_leave" => {
-            // TODO: Get current VC before removing, notify others
+            // Resolve the channel being left before we clear it, so the outbound
+            // Hum can carry it (the leave event has no payload of its own).
+            if let Ok(states) = get_did_states(did.clone(), db).await
+                && let Some(channel) = states.vc
+            {
+                hum_client::enqueue(
+                    hum_outbox,
+                    OutboundHum::Voice {
+                        did: did.clone(),
+                        channel,
+                        event: String::from("leave"),
+                    },
+                );
+            }
+
             leave_vc(did, db).await;
             None
         }
@@ -211,13 +245,14 @@ async fn handle_client_message(
     msg: Option<Result<WsMessage, rocket_ws::result::Error>>,
     did: String,
     to_c2c_broadcast: &Sender<EventNotification>,
+    hum_outbox: &mpsc::Sender<OutboundHum>,
     db: &DatabaseConnection,
 ) -> bool {
     match msg {
         Some(Ok(WsMessage::Close(_))) | None => false,
         Some(Ok(WsMessage::Text(text))) => {
             if let Some(serialized_ack_res) =
-                parse_client_event(&text, did, to_c2c_broadcast, db).await
+                parse_client_event(&text, did, to_c2c_broadcast, hum_outbox, db).await
             {
                 let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
             }
@@ -457,6 +492,7 @@ async fn run_event_loop(
     from_seen: Receiver<SeenEvent>,
     from_mute: Receiver<MuteEvent>,
     from_progress: Receiver<CommunityCreationProgressEvent>,
+    hum_outbox: mpsc::Sender<OutboundHum>,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
     let mut from_tap = from_tap;
@@ -469,7 +505,7 @@ async fn run_event_loop(
 
     save_state(&db, did.clone(), String::from("online")).await;
     register_dids(vec![did.clone()]).await;
-    broadcast_state_change(&to_tap_broadcast, &did, &db).await;
+    broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
 
     // The communities this user belongs to, used to route `Community`-scoped
     // events. Refreshed whenever the user's own membership changes (see
@@ -479,7 +515,7 @@ async fn run_event_loop(
     loop {
         let connected = tokio::select! {
             msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, &did, &mut communities, &db).await,
-            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &db).await,
+            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &hum_outbox, &db).await,
             msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
             msg = from_notifications.recv() => handle_notification_msg(&mut ws_sink, msg, &did).await,
             msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg, &communities).await,
@@ -494,16 +530,23 @@ async fn run_event_loop(
     }
 
     save_state(&db, did.clone(), String::from("offline")).await;
-    broadcast_state_change(&to_tap_broadcast, &did, &db).await;
+    broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
 }
 
 /// Sentinel `Sec-WebSocket-Protocol` value that flags the *next* offered
 /// subprotocol as a service-auth token.
-const AUTH_SUBPROTOCOL: &str = "colibri.auth.bearer";
+pub const AUTH_SUBPROTOCOL: &str = "colibri.auth.bearer";
 
 /// The service-auth token offered via `Sec-WebSocket-Protocol`, if any.
 pub struct SubprotocolAuth {
     token: Option<String>,
+}
+
+impl SubprotocolAuth {
+    /// The token offered after the [`AUTH_SUBPROTOCOL`] sentinel, if any.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
 }
 
 #[rocket::async_trait]
@@ -534,6 +577,14 @@ fn parse_auth_subprotocol(header: &str) -> Option<&str> {
 pub struct ChannelWithProtocol {
     channel: rocket_ws::Channel<'static>,
     protocol: Option<&'static str>,
+}
+
+impl ChannelWithProtocol {
+    /// Wraps a channel, echoing `protocol` as the negotiated subprotocol in the
+    /// handshake response when present.
+    pub fn new(channel: rocket_ws::Channel<'static>, protocol: Option<&'static str>) -> Self {
+        Self { channel, protocol }
+    }
 }
 
 impl<'r> Responder<'r, 'static> for ChannelWithProtocol {
@@ -586,6 +637,7 @@ pub async fn subscribe_events(
 
     let to_c2c_broadcast = c2c_broadcast_channel.0.clone();
     let from_c2c_broadcast = to_c2c_broadcast.subscribe();
+    let hum_outbox = bridge.hum_outbox.clone();
 
     let channel = ws.channel(move |io| {
         Box::pin(async move {
@@ -602,6 +654,7 @@ pub async fn subscribe_events(
                 from_seen,
                 from_mute,
                 from_progress,
+                hum_outbox,
             )
             .await;
             Ok(())
@@ -626,12 +679,20 @@ mod tests {
     use crate::EventNotification;
     use crate::lib::event_scope::EventScope;
     use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
+    use crate::lib::hum_client::OutboundHum;
     use crate::lib::test_fixtures::mock_db;
     use crate::models::user_states;
     use rocket::tokio;
-    use rocket::tokio::sync::broadcast;
+    use rocket::tokio::sync::{broadcast, mpsc};
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::collections::HashSet;
+
+    /// A throwaway Hum outbox for tests. Humming is disabled unless
+    /// `HUMMING_ENABLED` is set, so `enqueue` no-ops regardless — this just
+    /// satisfies the `parse_client_event` signature.
+    fn hum_outbox() -> mpsc::Sender<OutboundHum> {
+        mpsc::channel::<OutboundHum>(4).0
+    }
 
     #[test]
     fn scope_matches_routes_each_scope() {
@@ -717,6 +778,7 @@ mod tests {
             r#"{"type":"heartbeat","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &hum_outbox(),
             &db,
         )
         .await
@@ -733,6 +795,7 @@ mod tests {
             r#"{"type":"typing","data":{"channel":"community-1"}}"#,
             String::from("did:plc:me"),
             &tx,
+            &hum_outbox(),
             &db,
         )
         .await;
@@ -751,6 +814,7 @@ mod tests {
             r#"{"type":"typing","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &hum_outbox(),
             &db,
         )
         .await;
@@ -779,6 +843,7 @@ mod tests {
             r#"{"type":"view","data":{"channel":"community-1"}}"#,
             String::from("did:plc:me"),
             &tx,
+            &hum_outbox(),
             &db,
         )
         .await;
@@ -800,6 +865,7 @@ mod tests {
             r#"{"type":"unknown","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &hum_outbox(),
             &db,
         )
         .await;

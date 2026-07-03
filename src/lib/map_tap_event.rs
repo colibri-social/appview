@@ -95,6 +95,59 @@ fn build_user_event_global(
     )
 }
 
+/// Builds a `user_event` for `did` whose **identity** (handle, display name,
+/// avatar, banner, description, theme, `is_bot`) is re-derived from this
+/// AppView's own view of the subject's repo — never from caller-supplied data —
+/// while carrying the supplied ephemeral `status` (online-state + custom status).
+///
+/// This is the trust boundary for injecting a Hummed presence event: a peer
+/// AppView authorized for a user's *presence* must not be able to redefine that
+/// user's *identity* to a community. Identity comes from the local cache (with
+/// the usual live-PDS fallback in `fetch_record_value`); only the ephemeral
+/// state, which is genuinely off-protocol and thus the Hum's reason to exist, is
+/// taken from the caller.
+pub async fn build_presence_user_event(
+    did: &str,
+    status: UserEventStatus,
+    db: &DatabaseConnection,
+    author_cache: &AuthorCache,
+) -> ColibriServerEvent {
+    let AuthorEnrichment {
+        profile,
+        colibri_profile,
+        ..
+    } = cached_enrichment(
+        did,
+        db,
+        &|d, n, r, db| Box::pin(fetch_record_value(d, n, r, db)),
+        author_cache,
+    )
+    .await;
+
+    let is_bot = profile.as_ref().is_some_and(ActorProfile::is_bot);
+    let effective = resolve_effective_profile(colibri_profile.as_ref(), profile.as_ref());
+    let handle = resolve_handle_for_did(did.to_string())
+        .await
+        .unwrap_or_else(|_| did.to_string());
+
+    ColibriServerEvent {
+        event_type: String::from("user_event"),
+        data: Some(ColibriServerEventData::User(UserEventData {
+            did: did.to_string(),
+            profile: UserEventProfile {
+                avatar: effective.avatar,
+                banner: effective.banner,
+                description: effective.description,
+                display_name: effective.display_name,
+                is_bot,
+                handle,
+                theme: effective.theme,
+            },
+            status: Some(status),
+        })),
+    }
+}
+
 async fn fetch_record_value(
     did: String,
     nsid: String,

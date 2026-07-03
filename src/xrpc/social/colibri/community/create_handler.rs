@@ -321,6 +321,7 @@ async fn bootstrap_community(
         picture: picture_blob,
         migrated_to: None,
         migrated_from: None,
+        appview: Some(crate::lib::service_auth::appview_did()),
     };
     let community_ref = write_record_logged(
         create_record_fn,
