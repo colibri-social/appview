@@ -259,6 +259,7 @@ pub fn plan_structure(
         picture: None,
         migrated_to: None,
         migrated_from: Some(source_uri.to_string()),
+        appview: Some(crate::lib::service_auth::appview_did()),
     };
 
     PlannedStructure {
@@ -923,6 +924,7 @@ mod tests {
             picture: None,
             migrated_to: None,
             migrated_from: None,
+            appview: None,
         }
     }
 
