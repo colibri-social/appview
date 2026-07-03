@@ -499,11 +499,18 @@ async fn run_event_loop(
 
 /// Sentinel `Sec-WebSocket-Protocol` value that flags the *next* offered
 /// subprotocol as a service-auth token.
-const AUTH_SUBPROTOCOL: &str = "colibri.auth.bearer";
+pub const AUTH_SUBPROTOCOL: &str = "colibri.auth.bearer";
 
 /// The service-auth token offered via `Sec-WebSocket-Protocol`, if any.
 pub struct SubprotocolAuth {
     token: Option<String>,
+}
+
+impl SubprotocolAuth {
+    /// The token offered after the [`AUTH_SUBPROTOCOL`] sentinel, if any.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
 }
 
 #[rocket::async_trait]
@@ -534,6 +541,14 @@ fn parse_auth_subprotocol(header: &str) -> Option<&str> {
 pub struct ChannelWithProtocol {
     channel: rocket_ws::Channel<'static>,
     protocol: Option<&'static str>,
+}
+
+impl ChannelWithProtocol {
+    /// Wraps a channel, echoing `protocol` as the negotiated subprotocol in the
+    /// handshake response when present.
+    pub fn new(channel: rocket_ws::Channel<'static>, protocol: Option<&'static str>) -> Self {
+        Self { channel, protocol }
+    }
 }
 
 impl<'r> Responder<'r, 'static> for ChannelWithProtocol {

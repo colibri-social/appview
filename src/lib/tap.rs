@@ -9,7 +9,7 @@ use crate::lib::community_record::fetch_community_record;
 use crate::lib::community_write;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
 use crate::lib::events::{
-    CommunityCreationProgressEvent, MuteEvent, MuteEventData, SeenEvent, SeenEventData,
+    CommunityCreationProgressEvent, HumEnvelope, MuteEvent, MuteEventData, SeenEvent, SeenEventData,
 };
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
@@ -231,6 +231,12 @@ pub struct CommsBridge {
     /// filters by `recipient_did`). Emitted by `community.create` while
     /// bootstrapping a BYO community on a (possibly slow) external PDS.
     pub progress: broadcast::Sender<CommunityCreationProgressEvent>,
+    /// Fan-out of off-protocol Hums this AppView relays in its hub role. The
+    /// `sendHum` handler injects an inbound Hum locally and, when its `ttl`
+    /// permits, republishes it here; every connected `subscribeHums` peer stream
+    /// forwards it onward. Not derived from tap — Hums are the AppView-to-AppView
+    /// presence channel.
+    pub hums: broadcast::Sender<HumEnvelope>,
 }
 
 /// Runs the tap-connection event loop:

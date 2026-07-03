@@ -147,6 +147,8 @@ async fn rocket() -> _ {
     let (progress_broadcast, _) =
         broadcast::channel::<crate::lib::events::CommunityCreationProgressEvent>(128);
 
+    let (hums_broadcast, _) = broadcast::channel::<crate::lib::events::HumEnvelope>(128);
+
     let tap_bridge = CommsBridge {
         broadcast: from_tap_broadcast.clone(),
         notifications: notification_broadcast.clone(),
@@ -154,6 +156,7 @@ async fn rocket() -> _ {
         seen: seen_broadcast.clone(),
         mute: mute_broadcast.clone(),
         progress: progress_broadcast.clone(),
+        hums: hums_broadcast.clone(),
     };
 
     let db = match init_db().await {
@@ -272,6 +275,8 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::notification::update_seen,
                 xrpc::social::colibri::notification::update_seen_for_message,
                 xrpc::social::colibri::sync::subscribe_events,
+                xrpc::social::colibri::sync::send_hum,
+                xrpc::social::colibri::sync::subscribe_hums,
                 xrpc::social::colibri::server::describe_server,
             ],
         )

@@ -1,7 +1,11 @@
 pub mod sync {
+    pub mod send_hum_handler;
     pub mod subscribe_events_handler;
+    pub mod subscribe_hums_handler;
 
+    pub use send_hum_handler::send_hum;
     pub use subscribe_events_handler::subscribe_events;
+    pub use subscribe_hums_handler::subscribe_hums;
 }
 
 pub mod actor {

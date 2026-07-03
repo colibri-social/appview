@@ -75,6 +75,13 @@ pub struct ColibriActorProfile {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ColibriProfileTheme>,
+
+    /// DID of the AppView authorized to emit this user's off-protocol presence
+    /// (status/typing/voice) across instances via Humming. A receiving AppView
+    /// drops any Hum about this user whose authenticated origin is not this
+    /// value. Absent means the user has not opted into cross-instance presence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presence_service: Option<String>,
 }
 
 /// The profile a viewer should see for a user, after applying the Colibri
