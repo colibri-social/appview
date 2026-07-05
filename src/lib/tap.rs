@@ -19,7 +19,7 @@ use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
-use rocket::tokio::sync::{broadcast, mpsc};
+use rocket::tokio::sync::{Notify, broadcast, mpsc};
 use rocket::tokio::{net::TcpStream, sync::mpsc::Sender};
 use sea_orm::{
     ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, sea_query,
@@ -120,12 +120,18 @@ pub async fn register_dids(dids: Vec<String>) {
 ///
 /// For `delete` events the local `record_data` row is removed for any NSID,
 /// keeping the cache consistent with the source repo.
+///
+/// Returns `true` only when an ack was actually enqueued to the writer. A
+/// database persist failure returns `false` *without* acking, so the event
+/// stays in tap's outbox and is redelivered for another attempt (tap uses
+/// at-least-once delivery — an acked event is deleted upstream). Callers use
+/// this to decide whether the event is genuinely done or must be retried.
 pub async fn ack_tap_msg(
     db: &DatabaseConnection,
     to_tap: &mut Sender<String>,
     text: String,
     save_in_db: bool,
-) {
+) -> bool {
     let msg_data: TapMessage = serde_json::from_str(text.as_str()).unwrap();
 
     if let Some(safe_record) = msg_data.record
@@ -141,7 +147,7 @@ pub async fn ack_tap_msg(
 
             if let Err(res) = delete_result {
                 log::error!("Unable to delete record from database: {}", res);
-                return;
+                return false;
             }
         } else {
             let json_data: Value = serde_json::to_value(&safe_record.record).unwrap();
@@ -169,7 +175,7 @@ pub async fn ack_tap_msg(
             if let Err(res) = insert_result {
                 log::error!("Unable to save record in database: {}", res);
 
-                return;
+                return false;
             }
         }
     }
@@ -184,13 +190,21 @@ pub async fn ack_tap_msg(
     let ack_res = to_tap.send(serialized_ack).await;
 
     if let Err(res_err) = ack_res {
+        // The writer task's receiver is gone — the connection is tearing down.
+        // Report failure so the caller doesn't record the event as done; tap
+        // will redeliver it on the next connection.
         log::error!(
             "Unable to acknowledge event with ID {}: {}",
             msg_data.id,
             res_err
         );
+        false
     } else {
-        log::debug!("Acknowledged tap event with ID {}", msg_data.id);
+        // NB: this only means the ack was queued to the writer task, not that it
+        // reached tap. The writer transmits it; if that fails the writer tears
+        // down the connection (see `run_connection`).
+        log::debug!("Queued ack for tap event with ID {}", msg_data.id);
+        true
     }
 }
 
@@ -299,6 +313,16 @@ pub async fn run_connection(
     // through (see `process_event`). Shared across all workers.
     let author_cache = std::sync::Arc::new(AuthorCache::new());
 
+    // Dedup against tap's at-least-once redelivery. Tap re-sends any event it
+    // hasn't seen an ack for within `TAP_RETRY_TIMEOUT` (default 60s), reusing
+    // the same event id; without this a redelivery re-runs the whole pipeline
+    // (re-indexing notifications, re-broadcasting, re-writing member records)
+    // and, because it re-hashes to the same shard, piles onto an already-backed-
+    // up queue during backfill and amplifies the backlog. Shared across workers
+    // and the dispatcher. Per-connection: a reconnect starts fresh (tap resends
+    // unacked events and we process them once), which is fine.
+    let dedup = std::sync::Arc::new(TapDedup::new());
+
     let worker_count = tap_worker_count();
 
     // Outbound ack channel. Acks are produced inside the workers and drained to
@@ -308,14 +332,29 @@ pub async fn run_connection(
 
     let (mut sink, mut stream) = socket.split();
 
+    // Signalled when the writer task can no longer transmit. Acks flow through
+    // the writer, so if it dies the dispatcher must stop too — otherwise it
+    // keeps reading and "acking" into a channel nothing drains, black-holing
+    // every ack while tap redelivers forever. The dispatcher selects on this.
+    let writer_dead = std::sync::Arc::new(Notify::new());
+
     // Writer task: drains acks to the socket independently of socket reads.
-    let writer = rocket::tokio::spawn(async move {
-        while let Some(msg) = rx_outbound.recv().await {
-            if sink.send(TungMessage::Text(msg.into())).await.is_err() {
-                break;
+    let writer = {
+        let writer_dead = writer_dead.clone();
+        rocket::tokio::spawn(async move {
+            while let Some(msg) = rx_outbound.recv().await {
+                if let Err(e) = sink.send(TungMessage::Text(msg.into())).await {
+                    // A failed send means the socket's write half is gone;
+                    // signal the dispatcher to tear down so the supervisor
+                    // reconnects (and tap resends the unacked backlog) instead
+                    // of silently dropping every subsequent ack.
+                    log::error!("tap ack writer send failed; tearing down connection: {e}");
+                    writer_dead.notify_one();
+                    break;
+                }
             }
-        }
-    });
+        })
+    };
 
     // Spawn the shard workers. Each owns a bounded queue and processes its
     // events sequentially; the dispatcher routes by `hash(did) % worker_count`.
@@ -333,10 +372,11 @@ pub async fn run_connection(
         let notifications_tx = notifications_tx.clone();
         let seen_tx = seen_tx.clone();
         let mute_tx = mute_tx.clone();
+        let dedup = dedup.clone();
 
         worker_handles.push(rocket::tokio::spawn(async move {
             while let Some(item) = rx.recv().await {
-                process_event(
+                let acked = process_event(
                     item.record,
                     item.text,
                     &db,
@@ -349,6 +389,18 @@ pub async fn run_connection(
                     &mute_tx,
                 )
                 .await;
+
+                // Update dedup state now the event is done. On success mark it
+                // completed so a redelivery is re-acked without reprocessing; on
+                // failure (no ack sent) just release the in-flight mark so tap's
+                // redelivery is treated as new and retried from scratch.
+                if let Some(id) = item.id {
+                    if acked {
+                        dedup.complete(id);
+                    } else {
+                        dedup.release(id);
+                    }
+                }
             }
         }));
     }
@@ -361,8 +413,20 @@ pub async fn run_connection(
     // `rx_outbound.recv()` resolves to `None` and it exits cleanly.
     drop(to_tap);
 
-    // Dispatcher: read the socket and route records to shard workers.
-    while let Some(msg) = stream.next().await {
+    // Dispatcher: read the socket and route records to shard workers. Stops if
+    // the writer dies (acks would otherwise be black-holed) or the socket ends.
+    loop {
+        let msg = rocket::tokio::select! {
+            biased;
+            _ = writer_dead.notified() => {
+                log::warn!("tap ack writer ended; ending dispatcher to reconnect");
+                break;
+            }
+            msg = stream.next() => msg,
+        };
+
+        let Some(msg) = msg else { break };
+
         let text = match msg {
             Ok(TungMessage::Text(text)) => text.to_string(),
             // Ping/pong/binary/close frames carry no records; ignore non-text
@@ -383,18 +447,49 @@ pub async fn run_connection(
             }
         };
 
+        // Tap event ids are monotonic `uint`s reused across redeliveries. Track
+        // by id to drop/handle duplicates below; if it somehow isn't an integer
+        // we skip dedup and process it (correctness over dedup).
+        let event_id = tap_msg.id.as_u64();
+
         let Some(record) = tap_msg.record else {
             // Event does not carry a record — ack immediately, no DB work.
             ack_tap_msg(&db, &mut dispatcher_to_tap, text, false).await;
             continue;
         };
 
+        // Deduplicate tap's at-least-once redelivery before doing any work.
+        if let Some(id) = event_id {
+            match dedup.admit(id) {
+                Admit::New => {}
+                Admit::InFlight => {
+                    // The original delivery is still queued/processing and will
+                    // ack it; drop this copy so it doesn't re-enter the shard
+                    // queue and amplify the backlog.
+                    log::debug!("dropping redelivered in-flight tap event ID {id}");
+                    continue;
+                }
+                Admit::AlreadyDone => {
+                    // Already processed and acked once, but tap redelivered
+                    // (our earlier ack was lost or slow). Re-ack without
+                    // reprocessing or re-writing the cache.
+                    log::debug!("re-acking already-processed tap event ID {id}");
+                    ack_tap_msg(&db, &mut dispatcher_to_tap, text, false).await;
+                    continue;
+                }
+            }
+        }
+
         let shard = shard_for(&record.did, &record.collection, &record.rkey, worker_count);
 
         log::debug!("Processing Tap event ID {} on shard {}", tap_msg.id, shard);
 
         if shard_txs[shard]
-            .send(WorkItem { record, text })
+            .send(WorkItem {
+                record,
+                text,
+                id: event_id,
+            })
             .await
             .is_err()
         {
@@ -416,10 +511,101 @@ pub async fn run_connection(
 
 /// A single tap record routed to a shard worker. Carries both the parsed
 /// `record` (for enrichment) and the original `text` (which [`ack_tap_msg`]
-/// re-serializes for the cache write + ack).
+/// re-serializes for the cache write + ack). `id` is the tap event id (when it
+/// parsed as an integer) so the worker can update [`TapDedup`] once done.
 struct WorkItem {
     record: TapMessageRecord,
     text: String,
+    id: Option<u64>,
+}
+
+/// Outcome of admitting a tap event id into [`TapDedup`].
+enum Admit {
+    /// First time we've seen this id (now marked in-flight) — process it.
+    New,
+    /// A redelivery of an event still queued/processing — drop it; the original
+    /// delivery will ack it.
+    InFlight,
+    /// A redelivery of an event already processed and acked — re-ack it without
+    /// reprocessing.
+    AlreadyDone,
+}
+
+/// Upper bound on remembered completed event ids. Redeliveries arrive roughly
+/// `TAP_RETRY_TIMEOUT` apart, so this only needs to cover the ids seen within a
+/// backfill burst window; ids are monotonic, so one old enough to fall out of
+/// the window is old enough to forget. Overridable via `TAP_DEDUP_CAPACITY`.
+const DEFAULT_DEDUP_CAPACITY: usize = 16384;
+
+fn dedup_capacity() -> usize {
+    std::env::var("TAP_DEDUP_CAPACITY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_DEDUP_CAPACITY)
+}
+
+/// Guards against tap's at-least-once redelivery. Tracks the ids currently
+/// in-flight (queued or processing) and a capacity-bounded FIFO of recently
+/// completed ids. Shared across the dispatcher and all shard workers; its short
+/// critical sections make a plain `Mutex` the right fit.
+struct TapDedup {
+    inner: std::sync::Mutex<TapDedupInner>,
+}
+
+struct TapDedupInner {
+    capacity: usize,
+    /// Ids handed to a worker but not yet finished.
+    inflight: std::collections::HashSet<u64>,
+    /// Recently completed ids, in insertion order for eviction.
+    done_order: std::collections::VecDeque<u64>,
+    done_ids: std::collections::HashSet<u64>,
+}
+
+impl TapDedup {
+    fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(TapDedupInner {
+                capacity: dedup_capacity(),
+                inflight: std::collections::HashSet::new(),
+                done_order: std::collections::VecDeque::new(),
+                done_ids: std::collections::HashSet::new(),
+            }),
+        }
+    }
+
+    /// Decides how to handle an incoming event id, marking it in-flight when new.
+    fn admit(&self, id: u64) -> Admit {
+        let mut g = self.inner.lock().unwrap();
+        if g.done_ids.contains(&id) {
+            Admit::AlreadyDone
+        } else if !g.inflight.insert(id) {
+            Admit::InFlight
+        } else {
+            Admit::New
+        }
+    }
+
+    /// Marks an in-flight id as fully processed and acked: moves it into the
+    /// bounded completed set so redeliveries are re-acked rather than reprocessed.
+    fn complete(&self, id: u64) {
+        let mut g = self.inner.lock().unwrap();
+        g.inflight.remove(&id);
+        if g.done_ids.insert(id) {
+            g.done_order.push_back(id);
+            while g.done_order.len() > g.capacity
+                && let Some(old) = g.done_order.pop_front()
+            {
+                g.done_ids.remove(&old);
+            }
+        }
+    }
+
+    /// Releases an in-flight id that failed to process (no ack sent) without
+    /// recording it as done, so tap's redelivery is retried from scratch.
+    fn release(&self, id: u64) {
+        self.inner.lock().unwrap().inflight.remove(&id);
+    }
 }
 
 /// Outbound ack channel capacity. Acks are small and drained promptly by the
@@ -475,6 +661,9 @@ fn shard_for(did: &str, collection: &str, rkey: &str, worker_count: usize) -> us
 /// broadcast → `ack_tap_msg` (cache write + ack). Notifications are indexed
 /// before the ack so a crash never drops a durable notification for an acked
 /// event.
+///
+/// Returns whether the event was acked (see [`ack_tap_msg`]): `true` when it's
+/// genuinely done, `false` when a persist failure left it for tap to redeliver.
 #[allow(clippy::too_many_arguments)]
 async fn process_event(
     record: TapMessageRecord,
@@ -487,7 +676,7 @@ async fn process_event(
     notifications_tx: &broadcast::Sender<IndexedNotification>,
     seen_tx: &broadcast::Sender<SeenEvent>,
     mute_tx: &broadcast::Sender<MuteEvent>,
-) {
+) -> bool {
     // Author enrichment invalidation: a change to the author's Bluesky profile,
     // Colibri profile, or actor.data must drop their cached enrichment so
     // subsequent messages pick up the new values. The Colibri profile feeds the
@@ -538,8 +727,7 @@ async fn process_event(
                     record.rkey,
                     message.channel
                 );
-                ack_tap_msg(db, to_tap, text, false).await;
-                return;
+                return ack_tap_msg(db, to_tap, text, false).await;
             }
             Ok(_) => {}
             Err(e) => log::warn!(
@@ -690,7 +878,7 @@ async fn process_event(
         }
     }
 
-    ack_tap_msg(db, to_tap, text, true).await;
+    ack_tap_msg(db, to_tap, text, true).await
 }
 
 /// Processes a `social.colibri.membership` create event. Parses the payload,
@@ -959,6 +1147,54 @@ mod tests {
             "expected one repo's records to spread across shards, only hit {}",
             seen.len()
         );
+    }
+
+    #[test]
+    fn dedup_admits_new_then_dedups_in_flight_and_done() {
+        let dedup = TapDedup::new();
+
+        // First sighting: process it.
+        assert!(matches!(dedup.admit(5), Admit::New));
+        // Redelivery while still in flight: drop it.
+        assert!(matches!(dedup.admit(5), Admit::InFlight));
+
+        // Once completed, a redelivery is re-acked, not reprocessed.
+        dedup.complete(5);
+        assert!(matches!(dedup.admit(5), Admit::AlreadyDone));
+
+        // A distinct id is unaffected.
+        assert!(matches!(dedup.admit(8), Admit::New));
+    }
+
+    #[test]
+    fn dedup_release_allows_reprocessing() {
+        let dedup = TapDedup::new();
+
+        assert!(matches!(dedup.admit(5), Admit::New));
+        // Processing failed (no ack): release so tap's redelivery is retried.
+        dedup.release(5);
+        assert!(matches!(dedup.admit(5), Admit::New));
+    }
+
+    #[test]
+    fn dedup_evicts_oldest_completed_beyond_capacity() {
+        let dedup = TapDedup::new();
+        {
+            // Shrink capacity for the test without depending on the env default.
+            let mut g = dedup.inner.lock().unwrap();
+            g.capacity = 2;
+        }
+
+        for id in [1u64, 2, 3] {
+            assert!(matches!(dedup.admit(id), Admit::New));
+            dedup.complete(id);
+        }
+
+        // id 1 was evicted (capacity 2), so it's treated as new again; 2 and 3
+        // are still remembered as done.
+        assert!(matches!(dedup.admit(1), Admit::New));
+        assert!(matches!(dedup.admit(2), Admit::AlreadyDone));
+        assert!(matches!(dedup.admit(3), Admit::AlreadyDone));
     }
 
     /// `process_event` runs the full pipeline for a record and acks it back to

@@ -1,61 +1,61 @@
 # appview
 
-The app view that sits behind [colibri.social](https://colibri.social).
+The AT Protocol Application View (AppView) that sits behind [colibri.social](https://colibri.social). See the docs at <https://colibri.social/docs>.
 
-## Development
+## Getting started
 
-- ENVs (SENTRY_DSN)
-- Min rust version
-- Start command
+### Prerequisites
 
-### Web Push (VAPID)
+- Rust (`1.93`+).
+- Docker + Docker Compose, for Postgres and Tap
+- On **Windows**, two extra build tools for OpenSSL. See [Building on Windows](#building-on-windows).
 
-Background push notifications (delivered to the web client's service worker when
-the app is closed) require a VAPID keypair. Generate one with:
+### 1. Configure environment
+
+Config is read from a `.env` file in the repo root. Copy `.env.example` to `.env` to create one.
+
+### 2. Start dependencies
+
+Bring up Postgres and Tap with the dev compose file:
+
+```sh
+docker compose -f docker-compose.dev.yml up
+```
+
+### 3. Run the AppView
+
+Migrations run automatically on boot, so you just need:
+
+```sh
+cargo run
+```
+
+The service listens on `http://127.0.0.1:8000`. Hit `/` for the landing banner. API endpoints live under `/xrpc/`.
+
+## Web Push (VAPID)
+
+Background push notifications (delivered to the client's service worker when the app is closed) require a VAPID keypair. Generate one with:
 
 ```sh
 npx web-push generate-vapid-keys
 ```
 
-Then set these env vars (see `.env`):
+When these are unset, background Web Push is disabled.
 
-| Var                 | Description                                                            |
-| ------------------- | ---------------------------------------------------------------------- |
-| `VAPID_PUBLIC_KEY`  | Base64url public key. **Must match** the website's `PUBLIC_VAPID_KEY`. |
-| `VAPID_PRIVATE_KEY` | Base64url private key. Keep secret.                                    |
-| `VAPID_SUBJECT`     | Contact URI for the push service, e.g. `mailto:pds@colibri.social`.    |
+## Building on Windows
 
-When these are unset, background Web Push is disabled (the AppView still emits
-the live WebSocket `notification_event`); the boot log says which mode is active.
+Web Push pulls in OpenSSL. On Linux/Docker the system `libssl` is used. Windows has no system OpenSSL to link against, so `Cargo.toml` builds it from source there. That build needs two tools on your `PATH`:
 
-### Building on Windows
-
-Web Push pulls in OpenSSL (via the transitive `ece` crate). On Linux/Docker the
-system `libssl` is used (the Dockerfile installs `libssl-dev`). Windows has no
-system OpenSSL to link against, so `Cargo.toml` builds it from source there
-(`openssl` with the `vendored` feature, Windows-only). That build needs two
-tools on your `PATH`:
-
-- **Strawberry Perl**: <https://strawberryperl.com/>
-- **NASM**: <https://www.nasm.us/> (the installer does _not_ add itself to `PATH`; add its install folder manually)
+- Strawberry Perl: <https://strawberryperl.com/>
+- NASM: <https://www.nasm.us/> (the installer does _not_ add itself to `PATH`. Add its install folder manually)
 
 With [Chocolatey](https://chocolatey.org/install): `choco install strawberryperl nasm -y`.
 
-Open a fresh terminal afterwards so the updated `PATH` is picked up
-(`perl --version` / `nasm --version` to confirm), then `cargo run`. The first
-build compiles OpenSSL from source (a few minutes); it's cached afterwards and
-statically linked, so there's no `OPENSSL_DIR` to set and no runtime DLLs.
+Open a fresh terminal afterwards so the updated `PATH` is picked up (`perl --version` / `nasm --version` to confirm), then `cargo run`. The first build compiles OpenSSL from source, which might take up to 15 minutes.
 
-If the OpenSSL build fails with `Can't locate Locale/Maketext/Simple.pm`, the
-wrong Perl is being used. Most often Git Bash's bundled MSYS Perl
-(`C:\Program Files\Git\usr\bin\perl.exe`), which lacks modules OpenSSL's
-`Configure` needs and shadows Strawberry Perl on `PATH`. Point the OpenSSL build
-at Strawberry Perl explicitly (works in any shell; add it to your `~/.bashrc` to
-make it stick):
+## Deployment
 
-```sh
-export OPENSSL_SRC_PERL="C:/Strawberry/perl/bin/perl.exe"
-```
+`docker-compose.yml` builds the release image (`Dockerfile`) and runs it alongside Postgres and Tap. Provide the same env vars as above.
 
 ## Tap
 
