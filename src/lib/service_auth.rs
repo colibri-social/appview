@@ -39,7 +39,10 @@ const DEFAULT_APPVIEW_DID: &str = "did:web:api.colibri.social";
 /// self-hosted deployments verify service-auth `aud` (and sign outbound tokens)
 /// against their own identity rather than the canonical one.
 pub fn appview_did() -> String {
-    std::env::var("APPVIEW_DID").unwrap_or_else(|_| DEFAULT_APPVIEW_DID.to_string())
+    std::env::var("APPVIEW_DID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_APPVIEW_DID.to_string())
 }
 
 /// Verifies a service auth key issued by the user's PDS for the Colibri AppView. Returns the DID if successful.
