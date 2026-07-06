@@ -10,9 +10,13 @@ use sea_orm::{
     sea_query,
 };
 use serde::Serialize;
+use serde_json::Value;
 
+use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
-use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
+use crate::lib::colibri::{
+    ColibriActorData, ColibriActorProfile, ColibriCommunity, resolve_effective_profile,
+};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -26,18 +30,41 @@ use crate::models::{record_data, repos, user_states};
 use crate::xrpc::social::colibri::actor::get_data_handler::{
     Actor, ActorStatus, actor_data_from_effective,
 };
+use crate::xrpc::social::colibri::community::reads::list_members_handler::fetch_member_aggregate;
 
+/// An invitation hydrated with the invited community's public
+/// details (name, picture, member/online counts, join policy) so the invite
+/// accept screen can render without a follow-up fetch. Used by `getInvitation`.
 #[derive(Serialize, Debug)]
-pub struct InvitationView {
+pub struct InvitationResolvedView {
     pub code: String,
     pub community: String,
     #[serde(rename = "createdBy")]
     pub created_by: String,
     pub active: bool,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picture: Option<Value>,
+    #[serde(rename = "memberCount")]
+    pub member_count: u64,
+    #[serde(rename = "onlineCount")]
+    pub online_count: u64,
+    #[serde(rename = "requiresApprovalToJoin")]
+    pub requires_approval_to_join: bool,
 }
 
-/// Like [`InvitationView`], but `createdBy` is hydrated into the full creator
-/// profile rather than a bare DID. Used by `listInvitations`.
+/// The invited community's public details, resolved from its record and member
+/// aggregate.
+pub struct InvitationCommunity {
+    pub name: String,
+    pub picture: Option<Value>,
+    pub requires_approval_to_join: bool,
+    pub member_count: u64,
+    pub online_count: u64,
+}
+
+/// An invitation with `createdBy` hydrated into the full creator profile
+/// rather than a bare DID. Used by `listInvitations`.
 #[derive(Serialize, Debug)]
 pub struct InvitationProfileView {
     pub code: String,
@@ -55,17 +82,6 @@ pub struct InvitationListResponse {
 #[derive(Serialize, Debug)]
 pub struct DeleteInvitationResponse {
     pub code: String,
-}
-
-impl From<Invitation> for InvitationView {
-    fn from(value: Invitation) -> Self {
-        InvitationView {
-            code: value.code,
-            community: value.community_uri,
-            created_by: value.created_by,
-            active: value.active,
-        }
-    }
 }
 
 const CODE_LENGTH: usize = 16;
@@ -198,17 +214,84 @@ async fn create_invitation_with(
 type FetchByCodeFn =
     dyn Fn(String) -> BoxFuture<'static, Result<Option<Invitation>, DbErr>> + Send + Sync;
 
+/// Resolves a community AT-URI to the public details the invite screen needs.
+/// Returns `None` when the community record is missing (e.g. deleted after the
+/// invitation was minted).
+type FetchInvitationCommunityFn =
+    dyn Fn(String) -> BoxFuture<'static, Result<Option<InvitationCommunity>, DbErr>> + Send + Sync;
+
+/// Reads the community record for `community_uri` plus its member aggregate and
+/// distils the public details the invite accept screen renders.
+pub async fn fetch_invitation_community(
+    db: &DatabaseConnection,
+    community_uri: &str,
+) -> Result<Option<InvitationCommunity>, DbErr> {
+    let community = AtUri::parse(community_uri)
+        .ok_or_else(|| DbErr::Custom(format!("invalid community AT-URI: {community_uri}")))?;
+
+    let record = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&community.authority))
+        .filter(record_data::Column::Nsid.eq("social.colibri.community"))
+        .filter(record_data::Column::Rkey.eq(&community.rkey))
+        .one(db)
+        .await?;
+
+    let Some(record) = record else {
+        return Ok(None);
+    };
+
+    let stored = serde_json::from_value::<ColibriCommunity>(record.data)
+        .map_err(|e| DbErr::Custom(format!("failed to parse community record: {e}")))?;
+
+    let aggregate = fetch_member_aggregate(db, community_uri).await?;
+    let member_count = aggregate.member_dids.len() as u64;
+    let online_count = aggregate
+        .states
+        .values()
+        .filter(|state| state.as_str() != "offline")
+        .count() as u64;
+
+    Ok(Some(InvitationCommunity {
+        name: stored.name,
+        picture: stored.picture,
+        requires_approval_to_join: stored.requires_approval_to_join,
+        member_count,
+        online_count,
+    }))
+}
+
 async fn get_invitation_with(
     code: String,
     fetch_fn: &FetchByCodeFn,
-) -> Result<Json<InvitationView>, ErrorResponse> {
+    fetch_community_fn: &FetchInvitationCommunityFn,
+) -> Result<Json<InvitationResolvedView>, ErrorResponse> {
     let row = fetch_fn(code.clone()).await?.ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("NotFound"),
             message: format!("Invitation '{code}' not found."),
         }),
     })?;
-    Ok(Json(row.into()))
+
+    let community = fetch_community_fn(row.community_uri.clone())
+        .await?
+        .ok_or_else(|| ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("NotFound"),
+                message: format!("Community for invitation '{code}' not found."),
+            }),
+        })?;
+
+    Ok(Json(InvitationResolvedView {
+        code: row.code,
+        community: row.community_uri,
+        created_by: row.created_by,
+        active: row.active,
+        name: community.name,
+        picture: community.picture,
+        member_count: community.member_count,
+        online_count: community.online_count,
+        requires_approval_to_join: community.requires_approval_to_join,
+    }))
 }
 
 // ---- Profile hydration ---------------------------------------------------
@@ -499,13 +582,21 @@ pub async fn create_invitation(
 pub async fn get_invitation(
     code: &str,
     db: &State<DatabaseConnection>,
-) -> Result<Json<InvitationView>, ErrorResponse> {
+) -> Result<Json<InvitationResolvedView>, ErrorResponse> {
     let db = db.inner().clone();
-    let fetch = move |c: String| -> BoxFuture<'static, Result<Option<Invitation>, DbErr>> {
+    let fetch = {
         let db = db.clone();
-        Box::pin(async move { fetch_invitation(&db, &c).await })
+        move |c: String| -> BoxFuture<'static, Result<Option<Invitation>, DbErr>> {
+            let db = db.clone();
+            Box::pin(async move { fetch_invitation(&db, &c).await })
+        }
     };
-    get_invitation_with(code.to_string(), &fetch).await
+    let fetch_community =
+        move |uri: String| -> BoxFuture<'static, Result<Option<InvitationCommunity>, DbErr>> {
+            let db = db.clone();
+            Box::pin(async move { fetch_invitation_community(&db, &uri).await })
+        };
+    get_invitation_with(code.to_string(), &fetch, &fetch_community).await
 }
 
 #[post("/xrpc/social.colibri.community.listInvitations?<uri>&<auth>")]
@@ -621,18 +712,37 @@ mod tests {
         assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
     }
 
+    fn invitation_community() -> InvitationCommunity {
+        InvitationCommunity {
+            name: String::from("Test Community"),
+            picture: Some(serde_json::json!({ "ref": "pic" })),
+            requires_approval_to_join: true,
+            member_count: 42,
+            online_count: 7,
+        }
+    }
+
     #[tokio::test]
-    async fn get_invitation_returns_view() {
-        let result = get_invitation_with(String::from("CODE"), &|c| {
-            Box::pin(async move {
-                Ok(Some(invite(
-                    &c,
-                    "at://did:plc:owner/social.colibri.community/c1",
-                    "did:plc:owner",
-                    true,
-                )))
-            })
-        })
+    async fn get_invitation_returns_hydrated_view() {
+        let result = get_invitation_with(
+            String::from("CODE"),
+            &|c| {
+                Box::pin(async move {
+                    Ok(Some(invite(
+                        &c,
+                        "at://did:plc:owner/social.colibri.community/c1",
+                        "did:plc:owner",
+                        true,
+                    )))
+                })
+            },
+            &|uri| {
+                Box::pin(async move {
+                    assert_eq!(uri, "at://did:plc:owner/social.colibri.community/c1");
+                    Ok(Some(invitation_community()))
+                })
+            },
+        )
         .await
         .unwrap();
 
@@ -642,12 +752,43 @@ mod tests {
             "at://did:plc:owner/social.colibri.community/c1"
         );
         assert!(result.active);
+        assert_eq!(result.name, "Test Community");
+        assert_eq!(result.member_count, 42);
+        assert_eq!(result.online_count, 7);
+        assert!(result.requires_approval_to_join);
+        assert!(result.picture.is_some());
     }
 
     #[tokio::test]
     async fn get_invitation_returns_not_found_when_missing() {
-        let result =
-            get_invitation_with(String::from("NOPE"), &|_| Box::pin(async { Ok(None) })).await;
+        let result = get_invitation_with(
+            String::from("NOPE"),
+            &|_| Box::pin(async { Ok(None) }),
+            &|_| Box::pin(async { panic!("should not resolve community when invitation missing") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().body.into_inner().error, "NotFound");
+    }
+
+    #[tokio::test]
+    async fn get_invitation_returns_not_found_when_community_missing() {
+        let result = get_invitation_with(
+            String::from("CODE"),
+            &|c| {
+                Box::pin(async move {
+                    Ok(Some(invite(
+                        &c,
+                        "at://did:plc:owner/social.colibri.community/c1",
+                        "did:plc:owner",
+                        true,
+                    )))
+                })
+            },
+            &|_| Box::pin(async { Ok(None) }),
+        )
+        .await;
 
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().body.into_inner().error, "NotFound");
