@@ -18,6 +18,7 @@ use sea_orm::DatabaseConnection;
 mod lib;
 #[allow(dead_code)]
 mod models;
+mod sfu;
 mod well_known;
 mod xrpc;
 
@@ -104,6 +105,8 @@ async fn rocket() -> _ {
             log::warn!("GIF picker disabled: set KLIPY_API_KEY to enable the embed GIF endpoints.")
         }
     }
+
+    log::info!("Voice SFU: {}", sfu::status());
 
     let cors = CorsOptions::default()
         .allowed_origins(AllowedOrigins::all())
@@ -230,7 +233,11 @@ async fn rocket() -> _ {
         log::info!("Humming disabled via HUMMING_ENABLED=false (no cross-AppView presence).");
     }
 
-    rocket::build()
+    #[cfg(not(windows))]
+    let voice_sfu = std::sync::Arc::new(sfu::Sfu::new().await);
+
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut rocket = rocket::build()
         .mount(
             "/",
             routes![
@@ -314,5 +321,14 @@ async fn rocket() -> _ {
         .manage(c2c_broadcast_channel)
         .manage(crate::lib::embed_cache::EmbedCache::default())
         .manage(crate::lib::blob_cache::BlobCache::from_env())
-        .manage(safe_cors)
+        .manage(safe_cors);
+
+    #[cfg(not(windows))]
+    {
+        rocket = rocket
+            .mount("/", routes![xrpc::social::colibri::voice::signal])
+            .manage(voice_sfu);
+    }
+
+    rocket
 }

@@ -42,3 +42,6 @@ bytes = "1"
 lru = "0.12"
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(not(windows))'.dependencies]
+mediasoup = "0.22"

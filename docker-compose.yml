@@ -2,24 +2,11 @@ services:
   app:
     build: .
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      TAP_WORKERS: ${TAP_WORKERS:-12}
-      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-24}
-      DATABASE_URL: ${DATABASE_URL}
-      K256_PRIVATE_KEY: ${K256_PRIVATE_KEY}
       ROCKET_ADDRESS: 0.0.0.0
       ROCKET_PORT: 8000
-      RUST_LOG: ${RUST_LOG:-colibri_appview=info,rocket=info}
-      JETSTREAM_URL: ${JETSTREAM_URL:-}
-      TAP_HOSTNAME: ${TAP_HOSTNAME}
-      TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
-      APPVIEW_DID: ${APPVIEW_DID}
-      INVITE_API_KEY: ${INVITE_API_KEY}
-      PDS_LOC: ${PDS_LOC}
-      PDS_ADMIN_PASS: ${PDS_ADMIN_PASS}
-      APPVIEW_HANDLE_DOMAIN: ${APPVIEW_HANDLE_DOMAIN}
-      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
-      KLIPY_API_KEY: ${KLIPY_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy

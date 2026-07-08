@@ -1,4 +1,25 @@
 services:
+  app:
+    build: .
+    profiles: ["app"]
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://root:colibri@postgres:5432/colibri
+      TAP_HOSTNAME: tap:2480
+      ROCKET_ADDRESS: 0.0.0.0
+      ROCKET_PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tap:
+        condition: service_started
+    networks:
+      - internal
+
   postgres:
     image: postgres:latest
     container_name: postgres

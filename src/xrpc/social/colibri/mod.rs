@@ -30,3 +30,11 @@ pub mod channel;
 pub mod community;
 pub mod embed;
 pub mod notification;
+
+#[cfg(not(windows))]
+pub mod voice {
+    pub mod messages;
+    pub mod signal_handler;
+
+    pub use signal_handler::signal;
+}
