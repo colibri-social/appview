@@ -19,6 +19,7 @@ services:
       PDS_ADMIN_PASS: ${PDS_ADMIN_PASS}
       APPVIEW_HANDLE_DOMAIN: ${APPVIEW_HANDLE_DOMAIN}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
+      KLIPY_API_KEY: ${KLIPY_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
