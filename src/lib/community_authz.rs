@@ -151,6 +151,12 @@ pub async fn load_actor_authz(
         role_records
             .into_iter()
             .filter_map(|r| serde_json::from_value::<ColibriRole>(r.data).ok())
+            .map(|mut role| {
+                if role.protected == Some(true) {
+                    role.permissions = Permission::all_strings();
+                }
+                role
+            })
             .collect()
     };
 

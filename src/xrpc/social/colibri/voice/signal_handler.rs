@@ -23,6 +23,17 @@ type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
 const LXM: &str = "social.colibri.voice.signal";
 
+struct LocalProducer {
+    producer: Producer,
+    source: String,
+}
+
+impl LocalProducer {
+    fn is_mic(&self) -> bool {
+        self.producer.kind() == MediaKind::Audio && self.source == "mic"
+    }
+}
+
 fn ice_servers() -> serde_json::Value {
     std::env::var("SFU_ICE_SERVERS")
         .ok()
@@ -98,9 +109,11 @@ async fn handle_client_message(
     producer_transport: &WebRtcTransport,
     consumer_transport: &WebRtcTransport,
     client_rtp_capabilities: &mut Option<RtpCapabilities>,
-    producers: &mut Vec<Producer>,
+    producers: &mut Vec<LocalProducer>,
     consumers: &mut HashMap<ConsumerId, Consumer>,
     my_producer_ids: &mut Vec<ProducerId>,
+    server_muted: bool,
+    server_deafened: bool,
 ) {
     let message = match serde_json::from_str::<ClientMessage>(text) {
         Ok(message) => message,
@@ -152,9 +165,16 @@ async fn handle_client_message(
                 if kind == MediaKind::Audio {
                     channel.observe_audio(id).await;
                 }
+                let local = LocalProducer {
+                    producer,
+                    source: source.clone(),
+                };
+                if server_muted && local.is_mic() {
+                    let _ = local.producer.pause().await;
+                }
                 channel.add_producer(id, did.to_string(), kind, source);
                 my_producer_ids.push(id);
-                producers.push(producer);
+                producers.push(local);
                 send(ws_sink, &ServerMessage::Produced { id }).await;
             }
             Err(e) => {
@@ -230,6 +250,9 @@ async fn handle_client_message(
             }
         }
         ClientMessage::ConsumerResume { id } => {
+            if server_deafened {
+                return;
+            }
             if let Some(consumer) = consumers.get(&id).cloned()
                 && let Err(e) = consumer.resume().await
             {
@@ -237,7 +260,10 @@ async fn handle_client_message(
             }
         }
         ClientMessage::CloseProducer { producer_id } => {
-            if let Some(index) = producers.iter().position(|p| p.id() == producer_id) {
+            if let Some(index) = producers
+                .iter()
+                .position(|p| p.producer.id() == producer_id)
+            {
                 let _ = producers.remove(index);
                 my_producer_ids.retain(|id| *id != producer_id);
                 channel.remove_producer(&producer_id);
@@ -276,6 +302,9 @@ async fn forward_room_event(
         }
         RoomEvent::ActiveSpeakers { dids } => ServerMessage::ActiveSpeakers { dids },
         RoomEvent::Silence => ServerMessage::ActiveSpeakers { dids: Vec::new() },
+        RoomEvent::ForceMute { .. }
+        | RoomEvent::ForceDeafen { .. }
+        | RoomEvent::ForceDisconnect { .. } => return true,
     };
     send(ws_sink, &message).await
 }
@@ -317,9 +346,23 @@ async fn run_voice_loop(
     }
 
     let mut client_rtp_capabilities: Option<RtpCapabilities> = None;
-    let mut producers: Vec<Producer> = Vec::new();
+    let mut producers: Vec<LocalProducer> = Vec::new();
     let mut consumers: HashMap<ConsumerId, Consumer> = HashMap::new();
     let mut my_producer_ids: Vec<ProducerId> = Vec::new();
+
+    let (initial_muted, initial_deafened) = channel.snapshot_moderation(&did);
+    let mut server_muted = initial_muted;
+    let mut server_deafened = initial_deafened;
+    if server_muted {
+        send(&mut ws_sink, &ServerMessage::ServerMuted { muted: true }).await;
+    }
+    if server_deafened {
+        send(
+            &mut ws_sink,
+            &ServerMessage::ServerDeafened { deafened: true },
+        )
+        .await;
+    }
 
     loop {
         let connected = tokio::select! {
@@ -336,6 +379,8 @@ async fn run_voice_loop(
                         &mut producers,
                         &mut consumers,
                         &mut my_producer_ids,
+                        server_muted,
+                        server_deafened,
                     )
                     .await;
                     true
@@ -345,8 +390,65 @@ async fn run_voice_loop(
                 Some(Err(_)) => false,
             },
             event = events_rx.recv() => match event {
+                Ok(RoomEvent::ForceMute { did: target, muted }) if target == did => {
+                    server_muted = muted;
+                    for local in producers.iter().filter(|p| p.is_mic()) {
+                        let _ = if muted {
+                            local.producer.pause().await
+                        } else {
+                            local.producer.resume().await
+                        };
+                    }
+                    send(&mut ws_sink, &ServerMessage::ServerMuted { muted }).await
+                }
+                Ok(RoomEvent::ForceDeafen { did: target, deafened }) if target == did => {
+                    server_deafened = deafened;
+                    for consumer in consumers.values() {
+                        let _ = if deafened {
+                            consumer.pause().await
+                        } else {
+                            consumer.resume().await
+                        };
+                    }
+                    send(&mut ws_sink, &ServerMessage::ServerDeafened { deafened }).await
+                }
+                Ok(RoomEvent::ForceDisconnect { did: target }) if target == did => {
+                    send(&mut ws_sink, &ServerMessage::Kicked).await;
+                    false
+                }
                 Ok(event) => forward_room_event(&mut ws_sink, event, &my_producer_ids).await,
-                Err(RecvError::Lagged(_)) => true,
+                Err(RecvError::Lagged(_)) => {
+                    let (state_muted, state_deafened) = channel.snapshot_moderation(&did);
+                    if state_muted != server_muted {
+                        server_muted = state_muted;
+                        for local in producers.iter().filter(|p| p.is_mic()) {
+                            let _ = if server_muted {
+                                local.producer.pause().await
+                            } else {
+                                local.producer.resume().await
+                            };
+                        }
+                        send(&mut ws_sink, &ServerMessage::ServerMuted { muted: server_muted }).await;
+                    }
+                    if state_deafened != server_deafened {
+                        server_deafened = state_deafened;
+                        for consumer in consumers.values() {
+                            let _ = if server_deafened {
+                                consumer.pause().await
+                            } else {
+                                consumer.resume().await
+                            };
+                        }
+                        send(
+                            &mut ws_sink,
+                            &ServerMessage::ServerDeafened {
+                                deafened: server_deafened,
+                            },
+                        )
+                        .await;
+                    }
+                    true
+                }
                 Err(RecvError::Closed) => false,
             },
         };

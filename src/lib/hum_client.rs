@@ -213,8 +213,10 @@ async fn resolve_outbound(
             let payload = HumEvent::VoiceState(VoiceStateEventData {
                 channel,
                 did: did.clone(),
-                muted,
-                deafened,
+                muted: Some(muted),
+                deafened: Some(deafened),
+                server_muted: None,
+                server_deafened: None,
             });
             Some((did, payload, vec![(community_uri, hub)]))
         }

@@ -4,9 +4,11 @@ use rocket::{State, post};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
+use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriModerationSubject;
 use crate::lib::community_record::fetch_community_record;
 use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
+use crate::lib::get_state::get_did_states;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
@@ -16,7 +18,10 @@ use crate::lib::moderation::{
 };
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::state::leave_vc;
 use crate::lib::tap::CommsBridge;
+use crate::lib::voice_control::{VoiceAction, VoiceControlCommand};
+use crate::lib::voice_events::broadcast_voice_presence;
 use crate::xrpc::com::atproto::identity::resolve_identity;
 use crate::xrpc::social::colibri::community::list_applications_handler::{
     Application, find_application_for_did,
@@ -289,6 +294,47 @@ fn resolve_boxed(
     Box::pin(async move { resolve_did_and_handle(&identifier).await })
 }
 
+/// Best-effort removal of a just-banned/kicked user from any voice channel they
+/// are currently connected to *within this community*. `user_states` is keyed
+/// globally (one row per DID), so we compare the stored VC community authority
+/// against the moderated community's authority before acting
+async fn disconnect_from_community_vc(
+    did: &str,
+    community_uri: &str,
+    db: &DatabaseConnection,
+    bridge: &CommsBridge,
+) {
+    let Some(community) = AtUri::parse(community_uri) else {
+        return;
+    };
+    let Ok(states) = get_did_states(did.to_string(), db).await else {
+        return;
+    };
+    let (Some(channel), Some(vc_community)) = (states.vc, states.vc_community) else {
+        return;
+    };
+    let Some(vc_uri) = AtUri::parse(&vc_community) else {
+        return;
+    };
+    if vc_uri.authority != community.authority {
+        return;
+    }
+
+    let _ = bridge.voice_control.send(VoiceControlCommand {
+        channel_uri: channel.clone(),
+        target_did: did.to_string(),
+        action: VoiceAction::Disconnect,
+    });
+    leave_vc(did.to_string(), db).await;
+    broadcast_voice_presence(
+        &bridge.broadcast,
+        &community.authority,
+        &channel,
+        did,
+        "leave",
+    );
+}
+
 #[post("/xrpc/social.colibri.community.banUser?<community>&<identifier>&<auth>")]
 /// Bans a user from a community by writing a `ban` moderation record.
 pub async fn ban_user(
@@ -299,7 +345,7 @@ pub async fn ban_user(
     bridge: &State<CommsBridge>,
 ) -> Result<Json<BanUserResponse>, ErrorResponse> {
     let sender = bridge.applications.clone();
-    moderate_user_with(
+    let result = moderate_user_with(
         ACTION_BAN,
         community.to_string(),
         identifier.to_string(),
@@ -318,7 +364,13 @@ pub async fn ban_user(
             let _ = sender.send(event);
         },
     )
-    .await
+    .await;
+
+    if let Ok(resp) = &result {
+        disconnect_from_community_vc(&resp.did, community, db.inner(), bridge.inner()).await;
+    }
+
+    result
 }
 
 #[post("/xrpc/social.colibri.community.unbanUser?<community>&<identifier>&<auth>")]
@@ -367,7 +419,7 @@ pub async fn kick_user(
     bridge: &State<CommsBridge>,
 ) -> Result<Json<BanUserResponse>, ErrorResponse> {
     let sender = bridge.applications.clone();
-    moderate_user_with(
+    let result = moderate_user_with(
         ACTION_KICK,
         community.to_string(),
         identifier.to_string(),
@@ -386,7 +438,13 @@ pub async fn kick_user(
             let _ = sender.send(event);
         },
     )
-    .await
+    .await;
+
+    if let Ok(resp) = &result {
+        disconnect_from_community_vc(&resp.did, community, db.inner(), bridge.inner()).await;
+    }
+
+    result
 }
 
 #[post("/xrpc/social.colibri.community.kick?<community>&<member>&<auth>")]
@@ -401,7 +459,7 @@ pub async fn kick(
     bridge: &State<CommsBridge>,
 ) -> Result<Json<BanUserResponse>, ErrorResponse> {
     let sender = bridge.applications.clone();
-    moderate_user_with(
+    let result = moderate_user_with(
         ACTION_KICK,
         community.to_string(),
         member.to_string(),
@@ -420,7 +478,13 @@ pub async fn kick(
             let _ = sender.send(event);
         },
     )
-    .await
+    .await;
+
+    if let Ok(resp) = &result {
+        disconnect_from_community_vc(&resp.did, community, db.inner(), bridge.inner()).await;
+    }
+
+    result
 }
 
 #[cfg(test)]

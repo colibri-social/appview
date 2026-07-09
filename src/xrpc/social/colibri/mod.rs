@@ -31,10 +31,16 @@ pub mod community;
 pub mod embed;
 pub mod notification;
 
-#[cfg(not(windows))]
 pub mod voice {
+    pub mod moderate_handler;
+
+    pub use moderate_handler::moderate_voice;
+
+    #[cfg(not(windows))]
     pub mod messages;
+    #[cfg(not(windows))]
     pub mod signal_handler;
 
+    #[cfg(not(windows))]
     pub use signal_handler::signal;
 }

@@ -218,6 +218,8 @@ pub struct CommsBridge {
     ///
     /// [`EventScope`]: crate::lib::event_scope::EventScope
     pub broadcast: broadcast::Sender<SharedScopedEvent>,
+    /// Fan-out of plain-data voice-moderation commands
+    pub voice_control: broadcast::Sender<crate::lib::voice_control::VoiceControlCommand>,
     /// Fan-out of notifications indexed inside the tap pipeline. Each WS
     /// subscriber filters by recipient DID.
     pub notifications: broadcast::Sender<IndexedNotification>,

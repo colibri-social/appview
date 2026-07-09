@@ -59,6 +59,15 @@ pub enum ServerMessage {
         dids: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
+    ServerMuted {
+        muted: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    ServerDeafened {
+        deafened: bool,
+    },
+    Kicked,
+    #[serde(rename_all = "camelCase")]
     Error {
         message: String,
     },

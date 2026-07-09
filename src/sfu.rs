@@ -11,6 +11,8 @@ mod backend {
     use mediasoup::rtp_observer::RtpObserverAddProducerOptions;
     use rocket::tokio::sync::{RwLock, broadcast};
 
+    use crate::lib::voice_control::{VoiceAction, VoiceControlCommand};
+
     pub fn status() -> String {
         "enabled (mediasoup)".to_string()
     }
@@ -57,6 +59,23 @@ mod backend {
             dids: Vec<String>,
         },
         Silence,
+        ForceMute {
+            did: String,
+            muted: bool,
+        },
+        ForceDeafen {
+            did: String,
+            deafened: bool,
+        },
+        ForceDisconnect {
+            did: String,
+        },
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct ModState {
+        pub muted: bool,
+        pub deafened: bool,
     }
 
     #[derive(Clone, Debug)]
@@ -122,6 +141,7 @@ mod backend {
         audio_observer: AudioLevelObserver,
         events: broadcast::Sender<RoomEvent>,
         producers: Arc<Mutex<HashMap<ProducerId, ProducerInfo>>>,
+        moderation: Arc<Mutex<HashMap<String, ModState>>>,
     }
 
     impl ChannelSfu {
@@ -138,6 +158,32 @@ mod backend {
 
         pub fn subscribe(&self) -> broadcast::Receiver<RoomEvent> {
             self.events.subscribe()
+        }
+
+        pub fn snapshot_moderation(&self, did: &str) -> (bool, bool) {
+            let state = self
+                .moderation
+                .lock()
+                .unwrap()
+                .get(did)
+                .copied()
+                .unwrap_or_default();
+            (state.muted, state.deafened)
+        }
+
+        fn set_moderation(&self, did: &str, muted: Option<bool>, deafened: Option<bool>) {
+            let mut guard = self.moderation.lock().unwrap();
+            let entry = guard.entry(did.to_string()).or_default();
+            if let Some(muted) = muted {
+                entry.muted = muted;
+            }
+            if let Some(deafened) = deafened {
+                entry.deafened = deafened;
+            }
+        }
+
+        fn emit(&self, event: RoomEvent) {
+            let _ = self.events.send(event);
         }
 
         pub fn snapshot_producers(&self) -> Vec<(ProducerId, ProducerInfo)> {
@@ -281,10 +327,42 @@ mod backend {
                 audio_observer,
                 events,
                 producers,
+                moderation: Arc::new(Mutex::new(HashMap::new())),
             });
             channels.insert(uri.to_string(), channel.clone());
             log::info!("Voice channel router created: {uri}");
             Ok(channel)
+        }
+
+        pub async fn get_channel(&self, uri: &str) -> Option<Arc<ChannelSfu>> {
+            self.channels.read().await.get(uri).cloned()
+        }
+
+        pub async fn apply_voice_control(&self, cmd: VoiceControlCommand) {
+            let Some(channel) = self.get_channel(&cmd.channel_uri).await else {
+                return;
+            };
+            match cmd.action {
+                VoiceAction::ServerMute(muted) => {
+                    channel.set_moderation(&cmd.target_did, Some(muted), None);
+                    channel.emit(RoomEvent::ForceMute {
+                        did: cmd.target_did,
+                        muted,
+                    });
+                }
+                VoiceAction::ServerDeafen(deafened) => {
+                    channel.set_moderation(&cmd.target_did, None, Some(deafened));
+                    channel.emit(RoomEvent::ForceDeafen {
+                        did: cmd.target_did,
+                        deafened,
+                    });
+                }
+                VoiceAction::Disconnect => {
+                    channel.emit(RoomEvent::ForceDisconnect {
+                        did: cmd.target_did,
+                    });
+                }
+            }
         }
 
         pub async fn cleanup_channel_if_empty(&self, uri: &str) {

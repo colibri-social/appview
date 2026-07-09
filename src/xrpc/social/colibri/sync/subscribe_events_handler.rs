@@ -1,16 +1,17 @@
 use crate::EventNotification;
 use crate::lib::at_uri::AtUri;
-use crate::lib::event_scope::{EventScope, ScopedEvent, SharedScopedEvent};
+use crate::lib::event_scope::{EventScope, SharedScopedEvent};
 use crate::lib::events::{
     ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent, NotificationEventData,
     NotificationEventMessage, SeenEvent, TypingEventData, TypingMessageData, ViewData,
-    VoiceChannelData, VoicePresenceEventData, VoiceStateData, VoiceStateEventData,
+    VoiceChannelData, VoiceStateData,
 };
 use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, set_vc_state, view_channel};
 use crate::lib::tap::CommsBridge;
+use crate::lib::voice_events::{broadcast_voice_presence, broadcast_voice_state};
 use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
 use crate::{
     lib::{
@@ -32,7 +33,6 @@ use rocket::{Request, State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
@@ -136,8 +136,10 @@ async fn parse_client_event(
                     &uri.authority,
                     &state_data.channel,
                     &did,
-                    state_data.muted,
-                    state_data.deafened,
+                    Some(state_data.muted),
+                    Some(state_data.deafened),
+                    None,
+                    None,
                 );
             }
 
@@ -147,30 +149,6 @@ async fn parse_client_event(
         }
         _ => None,
     }
-}
-
-fn broadcast_voice_state(
-    to_tap_broadcast: &Sender<SharedScopedEvent>,
-    community_did: &str,
-    channel: &str,
-    did: &str,
-    muted: bool,
-    deafened: bool,
-) {
-    let server_event = ColibriServerEvent {
-        event_type: String::from("voice_state_event"),
-        data: Some(ColibriServerEventData::VoiceState(VoiceStateEventData {
-            channel: channel.to_string(),
-            did: did.to_string(),
-            muted,
-            deafened,
-        })),
-    };
-    let scoped = Arc::new(ScopedEvent {
-        scope: EventScope::Community(community_did.to_string()),
-        payload: server_event.serialize(),
-    });
-    let _ = to_tap_broadcast.send(scoped);
 }
 
 async fn leave_vc_and_broadcast(
@@ -199,30 +177,6 @@ async fn leave_vc_and_broadcast(
 
         leave_vc(did.to_string(), db).await;
     }
-}
-
-fn broadcast_voice_presence(
-    to_tap_broadcast: &Sender<SharedScopedEvent>,
-    community_did: &str,
-    channel: &str,
-    did: &str,
-    event: &str,
-) {
-    let server_event = ColibriServerEvent {
-        event_type: String::from("voice_presence_event"),
-        data: Some(ColibriServerEventData::VoicePresence(
-            VoicePresenceEventData {
-                event: event.to_string(),
-                channel: channel.to_string(),
-                did: did.to_string(),
-            },
-        )),
-    };
-    let scoped = Arc::new(ScopedEvent {
-        scope: EventScope::Community(community_did.to_string()),
-        payload: server_event.serialize(),
-    });
-    let _ = to_tap_broadcast.send(scoped);
 }
 
 async fn serialize_typing_broadcast(

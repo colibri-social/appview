@@ -296,6 +296,8 @@ async fn inject_local(
                         did: subject.to_string(),
                         muted: voice.muted,
                         deafened: voice.deafened,
+                        server_muted: None,
+                        server_deafened: None,
                     })),
                 },
             );

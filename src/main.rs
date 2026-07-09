@@ -152,11 +152,15 @@ async fn rocket() -> _ {
 
     let (hums_broadcast, _) = broadcast::channel::<crate::lib::events::HumEnvelope>(128);
 
+    let (voice_control, _) =
+        broadcast::channel::<crate::lib::voice_control::VoiceControlCommand>(128);
+
     let (hum_outbox_tx, hum_outbox_rx) =
         tokio::sync::mpsc::channel::<crate::lib::hum_client::OutboundHum>(1024);
 
     let tap_bridge = CommsBridge {
         broadcast: from_tap_broadcast.clone(),
+        voice_control: voice_control.clone(),
         notifications: notification_broadcast.clone(),
         applications: application_broadcast,
         seen: seen_broadcast.clone(),
@@ -238,6 +242,21 @@ async fn rocket() -> _ {
     #[cfg(not(windows))]
     let voice_sfu = std::sync::Arc::new(sfu::Sfu::new().await);
 
+    #[cfg(not(windows))]
+    {
+        let sfu = voice_sfu.clone();
+        let mut rx = voice_control.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(cmd) => sfu.apply_voice_control(cmd).await,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     #[cfg_attr(windows, allow(unused_mut))]
     let mut rocket = rocket::build()
         .mount(
@@ -312,6 +331,7 @@ async fn rocket() -> _ {
                 xrpc::social::colibri::sync::subscribe_events,
                 xrpc::social::colibri::sync::send_hum,
                 xrpc::social::colibri::sync::subscribe_hums,
+                xrpc::social::colibri::voice::moderate_voice,
                 xrpc::social::colibri::server::describe_server,
             ],
         )

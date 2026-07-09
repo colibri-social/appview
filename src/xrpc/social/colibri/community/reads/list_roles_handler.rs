@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriRole;
+use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::record_data;
 
@@ -66,11 +67,16 @@ pub fn build_roles(records: Vec<record_data::Model>, authority: &str) -> Vec<Rol
                     deny: o.deny,
                 })
                 .collect();
+            let permissions = if stored.protected == Some(true) {
+                Permission::all_strings()
+            } else {
+                stored.permissions
+            };
             Some(Role {
                 uri: format!("at://{}/social.colibri.role/{}", did, rkey),
                 name: stored.name,
                 color: stored.color,
-                permissions: stored.permissions,
+                permissions,
                 position: stored.position,
                 hoisted: stored.hoisted,
                 mentionable: stored.mentionable,
@@ -97,7 +103,8 @@ async fn list_roles_with(
         }),
     })?;
 
-    let records = fetch_roles_fn(db, community.authority.clone()).await?;
+    let records = fetch_roles_fn(db.clone(), community.authority.clone()).await?;
+    crate::lib::owner_role_heal::spawn_heal(&db, &community.authority, &records);
     let roles = build_roles(records, &community.authority);
 
     Ok(Json(RoleList { roles }))
@@ -166,6 +173,37 @@ mod tests {
         assert_eq!(result.roles[0].name, "Owner");
         assert_eq!(result.roles[0].position, 100);
         assert_eq!(result.roles[0].protected, Some(true));
+        assert_eq!(result.roles[0].permissions, Permission::all_strings());
+    }
+
+    #[tokio::test]
+    async fn non_protected_role_keeps_its_stored_permissions() {
+        let db = mock_db();
+        let result = list_roles_with(
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            db,
+            &|_, _| {
+                Box::pin(async {
+                    Ok(vec![record_data::Model {
+                        id: 1,
+                        did: String::from("did:plc:owner"),
+                        nsid: String::from("social.colibri.role"),
+                        rkey: String::from("mod"),
+                        data: serde_json::json!({
+                            "name": "Moderator",
+                            "permissions": ["member.ban", "message.hide"],
+                            "position": 50,
+                            "channelOverrides": []
+                        }),
+                        indexed_at: String::from(""),
+                    }])
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.roles[0].protected, None);
         assert_eq!(
             result.roles[0].permissions,
             vec!["member.ban", "message.hide"]

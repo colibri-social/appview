@@ -267,8 +267,22 @@ pub struct VoicePresenceEventData {
 pub struct VoiceStateEventData {
     pub channel: String,
     pub did: String,
-    pub muted: bool,
-    pub deafened: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub muted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deafened: Option<bool>,
+    #[serde(
+        rename = "serverMuted",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub server_muted: Option<bool>,
+    #[serde(
+        rename = "serverDeafened",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub server_deafened: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

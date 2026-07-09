@@ -113,7 +113,7 @@ async fn get_data_with(
         }),
     })?;
 
-    let raw = fetch_data_fn(db, community_uri).await?;
+    let raw = fetch_data_fn(db.clone(), community_uri).await?;
 
     let community_record = raw.community_record.ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
@@ -204,6 +204,7 @@ async fn get_data_with(
         })
         .collect();
 
+    crate::lib::owner_role_heal::spawn_heal(&db, &community.authority, &raw.role_records);
     let roles = build_roles(raw.role_records, &community.authority);
 
     let MemberAggregate {

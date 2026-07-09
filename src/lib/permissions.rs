@@ -25,6 +25,7 @@ pub enum Permission {
     InvitationDelete,
     ModerationViewLog,
     ApprovalManage,
+    VoiceModerate,
 }
 
 impl Permission {
@@ -47,7 +48,16 @@ impl Permission {
             Permission::InvitationDelete => "invitation.delete",
             Permission::ModerationViewLog => "moderation.viewLog",
             Permission::ApprovalManage => "approval.manage",
+            Permission::VoiceModerate => "voice.moderate",
         }
+    }
+
+    /// Every permission's namespaced string identifier. Protected ("owner")
+    /// roles are granted this full set at read time (see `community_authz` and
+    /// the `listRoles` handler), so a newly added permission automatically
+    /// applies to every community's owner role without rewriting any records
+    pub fn all_strings() -> Vec<String> {
+        Self::all().iter().map(|p| p.as_str().to_string()).collect()
     }
 
     /// Every permission, in declaration order. Useful for bootstrapping the
@@ -71,6 +81,7 @@ impl Permission {
             Permission::InvitationDelete,
             Permission::ModerationViewLog,
             Permission::ApprovalManage,
+            Permission::VoiceModerate,
         ]
     }
 }
@@ -107,6 +118,7 @@ mod tests {
             Permission::InvitationDelete,
             Permission::ModerationViewLog,
             Permission::ApprovalManage,
+            Permission::VoiceModerate,
         ];
 
         let strings: HashSet<&str> = all.iter().map(|p| p.as_str()).collect();
