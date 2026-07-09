@@ -312,6 +312,12 @@ pub struct NotificationEventData {
     pub channel_uri: String,
     #[serde(rename = "indexedAt")]
     pub indexed_at: String,
+    #[serde(
+        rename = "mentionRoleName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mention_role_name: Option<String>,
     pub message: NotificationEventMessage,
 }
 

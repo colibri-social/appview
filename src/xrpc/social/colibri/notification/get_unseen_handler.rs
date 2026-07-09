@@ -104,6 +104,7 @@ mod tests {
             channel_uri: String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
             indexed_at: String::from("2026-05-14T00:00:00Z"),
             seen_at: None,
+            mention_role_name: None,
         }
     }
 

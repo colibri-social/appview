@@ -11,6 +11,7 @@ mod m20260624_120000_create_dismissed_applications;
 mod m20260625_000000_create_push_subscriptions;
 mod m20260628_120000_record_data_data_to_jsonb;
 mod m20260709_000000_add_vc_state_to_user_states;
+mod m20260710_000000_add_mention_role_to_notifications;
 
 pub struct Migrator;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260625_000000_create_push_subscriptions::Migration),
             Box::new(m20260628_120000_record_data_data_to_jsonb::Migration),
             Box::new(m20260709_000000_add_vc_state_to_user_states::Migration),
+            Box::new(m20260710_000000_add_mention_role_to_notifications::Migration),
         ]
     }
 }

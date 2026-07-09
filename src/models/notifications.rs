@@ -21,6 +21,10 @@ pub struct Model {
     pub indexed_at: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub seen_at: Option<String>,
+    /// Display name of the role whose mention triggered this notification, if it
+    /// was a role mention rather than a direct mention. Captured at index time.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub mention_role_name: Option<String>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

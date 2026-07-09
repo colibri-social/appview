@@ -363,6 +363,7 @@ fn serialize_notification_for(indexed: IndexedNotification, did: &str) -> Option
                 author_did: indexed.row.author_did,
                 channel_uri: indexed.row.channel_uri,
                 indexed_at: indexed.row.indexed_at,
+                mention_role_name: indexed.row.mention_role_name,
                 message: NotificationEventMessage {
                     text: indexed.message.text,
                     facets: indexed.message.facets,

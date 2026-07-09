@@ -159,11 +159,14 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
     }
 
     let title = match notification.row.kind.as_str() {
-        "reply" => "New reply",
-        _ => "New mention",
+        "reply" => String::from("New reply"),
+        _ => match notification.row.mention_role_name.as_deref() {
+            Some(role) => format!("Mentioned via @{role}"),
+            None => String::from("New mention"),
+        },
     };
     let payload = PushPayload {
-        title: String::from(title),
+        title,
         body: redact_spoilers(&notification.message.text, &notification.message.facets),
         tag: notification.row.message_uri.clone(),
         data: PushData {

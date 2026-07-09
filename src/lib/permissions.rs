@@ -26,6 +26,7 @@ pub enum Permission {
     ModerationViewLog,
     ApprovalManage,
     VoiceModerate,
+    MentionRoles,
 }
 
 impl Permission {
@@ -49,6 +50,7 @@ impl Permission {
             Permission::ModerationViewLog => "moderation.viewLog",
             Permission::ApprovalManage => "approval.manage",
             Permission::VoiceModerate => "voice.moderate",
+            Permission::MentionRoles => "mention.roles",
         }
     }
 
@@ -82,6 +84,7 @@ impl Permission {
             Permission::ModerationViewLog,
             Permission::ApprovalManage,
             Permission::VoiceModerate,
+            Permission::MentionRoles,
         ]
     }
 }
@@ -119,6 +122,7 @@ mod tests {
             Permission::ModerationViewLog,
             Permission::ApprovalManage,
             Permission::VoiceModerate,
+            Permission::MentionRoles,
         ];
 
         let strings: HashSet<&str> = all.iter().map(|p| p.as_str()).collect();

@@ -8,13 +8,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::ColibriMessage;
+use crate::lib::colibri::{ColibriMember, ColibriMessage, ColibriRole};
+use crate::lib::community_authz::load_actor_authz;
+use crate::lib::permissions::Permission;
 use crate::lib::time::current_iso8601_utc;
 use crate::models::{notifications, record_data};
 
 pub const KIND_MENTION: &str = "mention";
 pub const KIND_REPLY: &str = "reply";
 pub const FACET_MENTION_TYPE: &str = "social.colibri.richtext.facet#mention";
+pub const FACET_ROLE_TYPE: &str = "social.colibri.richtext.facet#role";
+const MEMBER_NSID: &str = "social.colibri.member";
+const ROLE_NSID: &str = "social.colibri.role";
 
 /// Bundle carried over the WS-broadcast channel so each subscriber can render
 /// a notification without having to fetch the message body separately.
@@ -72,6 +77,10 @@ pub struct NotificationView {
     pub indexed_at: String,
     #[serde(rename = "seenAt", skip_serializing_if = "Option::is_none")]
     pub seen_at: Option<String>,
+    /// Present when this was a role mention: the display name of the role that
+    /// triggered it, so clients can render "mentioned via @<name>".
+    #[serde(rename = "mentionRoleName", skip_serializing_if = "Option::is_none")]
+    pub mention_role_name: Option<String>,
     /// Inline message body. `None` if the underlying message has been deleted
     /// from the AppView cache.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,6 +98,7 @@ impl NotificationView {
             channel_uri: row.channel_uri,
             indexed_at: row.indexed_at,
             seen_at: row.seen_at,
+            mention_role_name: row.mention_role_name,
             message,
         }
     }
@@ -119,6 +129,131 @@ pub fn extract_mentioned_dids(facets: &[Value]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Extracts every mentioned role URI from the facets of a message. Returns URIs
+/// in the order they first appear, deduplicated.
+pub fn extract_mentioned_roles(facets: &[Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for facet in facets {
+        let Some(features) = facet.get("features").and_then(|f| f.as_array()) else {
+            continue;
+        };
+        for feature in features {
+            let Some(kind) = feature.get("$type").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            if kind != FACET_ROLE_TYPE {
+                continue;
+            }
+            let Some(role) = feature.get("role").and_then(|d| d.as_str()) else {
+                continue;
+            };
+            if seen.insert(role.to_string()) {
+                out.push(role.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Expands the role mentions in a message into the members to notify, each
+/// paired with the display name of the role that pinged them (for attribution).
+///
+/// A role is only expanded when it is `mentionable`, or — for roles not marked
+/// mentionable — when the message author holds the `mention.roles` permission.
+/// Role URIs whose authority doesn't match the message's community are ignored,
+/// so a message can't ping roles from an unrelated community. When a member
+/// holds more than one mentioned role, they are attributed to the first such
+/// role in the message's facet order.
+async fn expand_role_mention_recipients(
+    db: &DatabaseConnection,
+    author_did: &str,
+    channel_uri: &str,
+    role_uris: &[String],
+) -> Result<Vec<(String, String)>, DbErr> {
+    let Some(channel) = AtUri::parse(channel_uri) else {
+        return Ok(Vec::new());
+    };
+    let community_authority = channel.authority;
+    let community_uri = format!("at://{community_authority}/social.colibri.community/self");
+
+    // Resolved once (and only if a non-mentionable role is encountered), since
+    // it costs several queries.
+    let mut author_can_mention_all: Option<bool> = None;
+    // Authorized roles as (rkey, display name), in message facet order and
+    // deduplicated — the order decides attribution when a member holds several.
+    let mut authorized: Vec<(String, String)> = Vec::new();
+    let mut authorized_seen: HashSet<String> = HashSet::new();
+
+    for role_uri in role_uris {
+        let Some(parsed) = AtUri::parse(role_uri) else {
+            continue;
+        };
+        if parsed.authority != community_authority || parsed.collection != ROLE_NSID {
+            continue;
+        }
+        let role_rkey = parsed.rkey;
+
+        let Some(role_record) = record_data::Entity::find()
+            .filter(record_data::Column::Did.eq(&community_authority))
+            .filter(record_data::Column::Nsid.eq(ROLE_NSID))
+            .filter(record_data::Column::Rkey.eq(&role_rkey))
+            .one(db)
+            .await?
+        else {
+            continue;
+        };
+        let Ok(role) = serde_json::from_value::<ColibriRole>(role_record.data) else {
+            continue;
+        };
+
+        if role.mentionable != Some(true) {
+            if author_can_mention_all.is_none() {
+                let authz = load_actor_authz(db, &community_uri, author_did).await?;
+                author_can_mention_all = Some(authz.has(Permission::MentionRoles, None));
+            }
+            if author_can_mention_all != Some(true) {
+                continue;
+            }
+        }
+
+        if authorized_seen.insert(role_rkey.clone()) {
+            authorized.push((role_rkey, role.name));
+        }
+    }
+
+    if authorized.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let members = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&community_authority))
+        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
+        .all(db)
+        .await?;
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for record in members {
+        let Ok(member) = serde_json::from_value::<ColibriMember>(record.data) else {
+            continue;
+        };
+        if member.subject == author_did {
+            continue;
+        }
+        let Some((_, role_name)) = authorized
+            .iter()
+            .find(|(rkey, _)| member.roles.contains(rkey))
+        else {
+            continue;
+        };
+        if seen.insert(member.subject.clone()) {
+            out.push((member.subject, role_name.clone()));
+        }
+    }
+    Ok(out)
 }
 
 /// Looks up the author DID of a parent message.
@@ -172,7 +307,9 @@ pub async fn index_message_notifications(
     message_uri: &str,
     message: &ColibriMessage,
 ) -> Result<Vec<IndexedNotification>, DbErr> {
-    let mut recipients: Vec<(String, &'static str)> = Vec::new();
+    // (recipient DID, kind, mention role name). The role name is only set for
+    // role mentions; direct mentions and replies leave it `None`.
+    let mut recipients: Vec<(String, &'static str, Option<String>)> = Vec::new();
     let mut seen: HashSet<(String, &'static str)> = HashSet::new();
 
     if let Some(facets) = message.facets.as_ref() {
@@ -182,7 +319,22 @@ pub async fn index_message_notifications(
             }
             let key = (did.clone(), KIND_MENTION);
             if seen.insert(key.clone()) {
-                recipients.push(key);
+                recipients.push((did, KIND_MENTION, None));
+            }
+        }
+
+        // Direct mentions are added first, so a member both `@`-mentioned and
+        // role-mentioned keeps the direct mention (no role attribution).
+        let role_uris = extract_mentioned_roles(facets);
+        if !role_uris.is_empty() {
+            let role_recipients =
+                expand_role_mention_recipients(db, author_did, &message.channel, &role_uris)
+                    .await?;
+            for (did, role_name) in role_recipients {
+                let key = (did.clone(), KIND_MENTION);
+                if seen.insert(key.clone()) {
+                    recipients.push((did, KIND_MENTION, Some(role_name)));
+                }
             }
         }
     }
@@ -191,9 +343,9 @@ pub async fn index_message_notifications(
         && let Some(parent_author) = fetch_parent_author(db, &message.channel, parent_rkey).await?
         && parent_author != author_did
     {
-        let key = (parent_author, KIND_REPLY);
-        if seen.insert(key.clone()) {
-            recipients.push(key);
+        let key = (parent_author.clone(), KIND_REPLY);
+        if seen.insert(key) {
+            recipients.push((parent_author, KIND_REPLY, None));
         }
     }
 
@@ -203,7 +355,7 @@ pub async fn index_message_notifications(
 
     let now = current_iso8601_utc();
     let mut inserted = Vec::new();
-    for (recipient_did, kind) in recipients {
+    for (recipient_did, kind, mention_role_name) in recipients {
         let row = notifications::ActiveModel {
             recipient_did: ActiveValue::Set(recipient_did.clone()),
             kind: ActiveValue::Set(kind.to_string()),
@@ -212,6 +364,7 @@ pub async fn index_message_notifications(
             channel_uri: ActiveValue::Set(message.channel.clone()),
             indexed_at: ActiveValue::Set(now.clone()),
             seen_at: ActiveValue::Set(None),
+            mention_role_name: ActiveValue::Set(mention_role_name),
             ..Default::default()
         };
 
@@ -508,6 +661,56 @@ mod tests {
             }
         ]);
         assert!(extract_mentioned_dids(facets.as_array().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn extract_mentioned_roles_pulls_role_uri_from_role_features() {
+        let facets = json!([
+            {
+                "index": {"byteStart": 0, "byteEnd": 5},
+                "features": [
+                    {"$type": "social.colibri.richtext.facet#role", "role": "at://did:plc:c/social.colibri.role/mods"}
+                ]
+            },
+            {
+                "index": {"byteStart": 10, "byteEnd": 13},
+                "features": [
+                    {"$type": "social.colibri.richtext.facet#mention", "did": "did:plc:alice"}
+                ]
+            },
+            {
+                "index": {"byteStart": 20, "byteEnd": 25},
+                "features": [
+                    {"$type": "social.colibri.richtext.facet#role", "role": "at://did:plc:c/social.colibri.role/vips"},
+                    {"$type": "social.colibri.richtext.facet#role", "role": "at://did:plc:c/social.colibri.role/mods"}
+                ]
+            }
+        ]);
+        let roles = extract_mentioned_roles(facets.as_array().unwrap());
+        assert_eq!(
+            roles,
+            vec![
+                String::from("at://did:plc:c/social.colibri.role/mods"),
+                String::from("at://did:plc:c/social.colibri.role/vips"),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_mentioned_roles_ignores_non_role_features_and_missing_role() {
+        let facets = json!([
+            {
+                "features": [
+                    {"$type": "social.colibri.richtext.facet#mention", "did": "did:plc:alice"}
+                ]
+            },
+            {
+                "features": [
+                    {"$type": "social.colibri.richtext.facet#role"}
+                ]
+            }
+        ]);
+        assert!(extract_mentioned_roles(facets.as_array().unwrap()).is_empty());
     }
 
     #[test]
