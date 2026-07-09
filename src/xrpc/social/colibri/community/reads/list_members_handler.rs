@@ -21,6 +21,12 @@ pub struct Member {
     pub handle: String,
     pub roles: Vec<String>,
     pub data: ActorData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vc: Option<String>,
+    #[serde(rename = "vcMuted", skip_serializing_if = "Option::is_none")]
+    pub vc_muted: Option<bool>,
+    #[serde(rename = "vcDeafened", skip_serializing_if = "Option::is_none")]
+    pub vc_deafened: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -37,6 +43,9 @@ pub struct MemberAggregate {
     pub colibri_profiles: HashMap<String, ColibriActorProfile>,
     pub actor_data: HashMap<String, ColibriActorData>,
     pub states: HashMap<String, String>,
+    pub vc: HashMap<String, String>,
+    pub vc_muted: HashMap<String, bool>,
+    pub vc_deafened: HashMap<String, bool>,
     pub handles: HashMap<String, String>,
     /// Role rkeys assigned to each member, keyed by member DID. These are
     /// raw record keys — callers must expand them to full AT-URIs.
@@ -91,6 +100,9 @@ pub async fn fetch_member_aggregate(
             colibri_profiles: HashMap::new(),
             actor_data: HashMap::new(),
             states: HashMap::new(),
+            vc: HashMap::new(),
+            vc_muted: HashMap::new(),
+            vc_deafened: HashMap::new(),
             handles: HashMap::new(),
             member_roles: HashMap::new(),
         });
@@ -131,10 +143,18 @@ pub async fn fetch_member_aggregate(
         .filter(user_states::Column::Did.is_in(member_dids.clone()))
         .all(db)
         .await?;
-    let states: HashMap<String, String> = state_rows
-        .into_iter()
-        .map(|row| (row.did, row.state))
-        .collect();
+    let mut states: HashMap<String, String> = HashMap::new();
+    let mut vc: HashMap<String, String> = HashMap::new();
+    let mut vc_muted: HashMap<String, bool> = HashMap::new();
+    let mut vc_deafened: HashMap<String, bool> = HashMap::new();
+    for row in state_rows {
+        if let Some(channel) = row.vc {
+            vc.insert(row.did.clone(), channel);
+            vc_muted.insert(row.did.clone(), row.vc_muted.unwrap_or(false));
+            vc_deafened.insert(row.did.clone(), row.vc_deafened.unwrap_or(false));
+        }
+        states.insert(row.did, row.state);
+    }
 
     let repo_rows = repos::Entity::find()
         .filter(repos::Column::Did.is_in(member_dids.clone()))
@@ -151,6 +171,9 @@ pub async fn fetch_member_aggregate(
         colibri_profiles,
         actor_data,
         states,
+        vc,
+        vc_muted,
+        vc_deafened,
         handles,
         member_roles,
     })
@@ -198,6 +221,9 @@ pub fn build_member(
         roles,
         data: actor_data_from_effective(effective, is_bot, &handle, online_state, status),
         handle,
+        vc: None,
+        vc_muted: None,
+        vc_deafened: None,
     }
 }
 
@@ -224,6 +250,9 @@ async fn list_members_with(
         mut colibri_profiles,
         mut actor_data,
         mut states,
+        mut vc,
+        mut vc_muted,
+        mut vc_deafened,
         mut handles,
         mut member_roles,
     } = aggregate;
@@ -236,8 +265,11 @@ async fn list_members_with(
             let colibri_profile = colibri_profiles.remove(&did);
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
+            let member_vc = vc.remove(&did);
+            let member_vc_muted = vc_muted.remove(&did);
+            let member_vc_deafened = vc_deafened.remove(&did);
             let role_rkeys = member_roles.remove(&did).unwrap_or_default();
-            build_member(
+            let mut member = build_member(
                 did,
                 handle,
                 profile,
@@ -246,7 +278,11 @@ async fn list_members_with(
                 state,
                 &community.authority,
                 role_rkeys,
-            )
+            );
+            member.vc = member_vc;
+            member.vc_muted = member_vc_muted;
+            member.vc_deafened = member_vc_deafened;
+            member
         })
         .collect();
 
@@ -346,6 +382,9 @@ mod tests {
                             String::from("did:plc:alice"),
                             String::from("online"),
                         )]),
+                        vc: HashMap::new(),
+                        vc_muted: HashMap::new(),
+                        vc_deafened: HashMap::new(),
                         handles: HashMap::from([
                             (String::from("did:plc:alice"), String::from("alice.test")),
                             (String::from("did:plc:bob"), String::from("bob.test")),
@@ -394,6 +433,9 @@ mod tests {
                         colibri_profiles: HashMap::new(),
                         actor_data: HashMap::new(),
                         states: HashMap::new(),
+                        vc: HashMap::new(),
+                        vc_muted: HashMap::new(),
+                        vc_deafened: HashMap::new(),
                         handles: HashMap::new(),
                         member_roles: HashMap::from([(
                             String::from("did:plc:alice"),

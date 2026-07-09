@@ -178,6 +178,8 @@ async fn rocket() -> _ {
         .await
         .expect("Unable to apply SeaORM migrations");
 
+    crate::lib::state::reset_all_presence(&db).await;
+
     // Supervise the tap connection: connect, run until the socket drops, then
     // reconnect after a short backoff. The broadcast senders are cloned into
     // each connection; subscribers' receivers persist across reconnects.

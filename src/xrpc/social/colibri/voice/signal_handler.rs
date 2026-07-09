@@ -6,9 +6,12 @@ use mediasoup::prelude::*;
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::{State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
+use sea_orm::DatabaseConnection;
 
+use crate::lib::at_uri::AtUri;
+use crate::lib::colibri::ColibriChannel;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
-use crate::lib::service_auth;
+use crate::lib::{channel_authz, community_authz, community_write, service_auth};
 use crate::sfu::{ChannelSfu, RoomEvent, Sfu};
 use crate::xrpc::social::colibri::sync::subscribe_events_handler::{
     AUTH_SUBPROTOCOL, ChannelWithProtocol, SubprotocolAuth,
@@ -19,6 +22,66 @@ use super::messages::{ClientMessage, ServerMessage, transport_options};
 type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
 const LXM: &str = "social.colibri.voice.signal";
+
+fn ice_servers() -> serde_json::Value {
+    std::env::var("SFU_ICE_SERVERS")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))
+}
+
+async fn authorize_channel_access(
+    db: &DatabaseConnection,
+    channel_uri: &str,
+    did: &str,
+) -> Result<(), ErrorResponse> {
+    let Some(parsed) = AtUri::parse(channel_uri) else {
+        return Ok(());
+    };
+
+    let chan_json = match community_write::read_cached(
+        db,
+        &parsed.authority,
+        "social.colibri.channel",
+        &parsed.rkey,
+    )
+    .await
+    {
+        Ok(Some(json)) => json,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            log::warn!("voice authz channel read failed for {channel_uri}: {e}; allowing");
+            return Ok(());
+        }
+    };
+
+    let Ok(channel) = serde_json::from_value::<ColibriChannel>(chan_json) else {
+        return Ok(());
+    };
+
+    let restricted = channel.owner_only == Some(true)
+        || !channel.allowed_roles.is_empty()
+        || !channel.allowed_members.is_empty();
+    if !restricted || did == parsed.authority {
+        return Ok(());
+    }
+
+    let community_uri = format!("at://{}/social.colibri.community/self", parsed.authority);
+    match community_authz::load_actor_authz(db, &community_uri, did).await {
+        Ok(authz) if !channel_authz::can_post(&channel, &authz, did) => Err(ErrorResponse {
+            body: Json(ErrorBody {
+                error: String::from("Forbidden"),
+                message: String::from("You are not permitted to join this voice channel."),
+            }),
+        }),
+        Ok(_) => Ok(()),
+        Err(e) => {
+            log::warn!("voice authz lookup failed for {did}: {e}; allowing");
+            Ok(())
+        }
+    }
+}
 
 async fn send(ws_sink: &mut WsSink, msg: &ServerMessage) -> bool {
     let Ok(text) = serde_json::to_string(msg) else {
@@ -79,6 +142,7 @@ async fn handle_client_message(
         ClientMessage::Produce {
             kind,
             rtp_parameters,
+            source,
         } => match producer_transport
             .produce(ProducerOptions::new(kind, rtp_parameters))
             .await
@@ -88,7 +152,7 @@ async fn handle_client_message(
                 if kind == MediaKind::Audio {
                     channel.observe_audio(id).await;
                 }
-                channel.add_producer(id, did.to_string(), kind);
+                channel.add_producer(id, did.to_string(), kind, source);
                 my_producer_ids.push(id);
                 producers.push(producer);
                 send(ws_sink, &ServerMessage::Produced { id }).await;
@@ -172,6 +236,13 @@ async fn handle_client_message(
                 log::warn!("failed to resume consumer {id}: {e}");
             }
         }
+        ClientMessage::CloseProducer { producer_id } => {
+            if let Some(index) = producers.iter().position(|p| p.id() == producer_id) {
+                let _ = producers.remove(index);
+                my_producer_ids.retain(|id| *id != producer_id);
+                channel.remove_producer(&producer_id);
+            }
+        }
     }
 }
 
@@ -185,6 +256,7 @@ async fn forward_room_event(
             did,
             producer_id,
             kind,
+            source,
         } => {
             if my_producer_ids.contains(&producer_id) {
                 return true;
@@ -193,6 +265,7 @@ async fn forward_room_event(
                 did,
                 producer_id,
                 kind,
+                source,
             }
         }
         RoomEvent::ProducerRemoved { did, producer_id } => {
@@ -224,6 +297,7 @@ async fn run_voice_loop(
         router_rtp_capabilities: channel.rtp_capabilities(),
         producer_transport_options: transport_options(&producer_transport),
         consumer_transport_options: transport_options(&consumer_transport),
+        ice_servers: ice_servers(),
     };
     if !send(&mut ws_sink, &init).await {
         return;
@@ -236,6 +310,7 @@ async fn run_voice_loop(
                 did: info.did,
                 producer_id,
                 kind: info.kind,
+                source: info.source,
             },
         )
         .await;
@@ -301,6 +376,7 @@ pub async fn signal(
     subprotocol_auth: SubprotocolAuth,
     ws: WebSocket,
     sfu: &State<Arc<Sfu>>,
+    db: &State<DatabaseConnection>,
 ) -> Result<ChannelWithProtocol, ErrorResponse> {
     let used_subprotocol = subprotocol_auth.token().is_some();
     let token = subprotocol_auth
@@ -317,6 +393,8 @@ pub async fn signal(
                 message: e.to_string(),
             }),
         })?;
+
+    authorize_channel_access(db.inner(), &channel, &did).await?;
 
     let channel_sfu = sfu
         .get_or_create_channel(&channel)

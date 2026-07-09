@@ -2,7 +2,7 @@
 mod backend {
     use std::collections::HashMap;
     use std::net::IpAddr;
-    use std::num::{NonZeroU8, NonZeroU32};
+    use std::num::{NonZeroU8, NonZeroU16, NonZeroU32};
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,6 +47,7 @@ mod backend {
             did: String,
             producer_id: ProducerId,
             kind: MediaKind,
+            source: String,
         },
         ProducerRemoved {
             did: String,
@@ -62,6 +63,7 @@ mod backend {
     pub struct ProducerInfo {
         pub did: String,
         pub kind: MediaKind,
+        pub source: String,
     }
 
     fn worker_count() -> usize {
@@ -97,17 +99,22 @@ mod backend {
             _ => None,
         };
 
-        WebRtcTransportOptions::new(WebRtcTransportListenInfos::new(ListenInfo {
-            protocol: Protocol::Udp,
+        let listen_info = |protocol| ListenInfo {
+            protocol,
             ip: listen_ip,
-            announced_address,
+            announced_address: announced_address.clone(),
             expose_internal_ip: false,
             port: None,
-            port_range,
+            port_range: port_range.clone(),
             flags: None,
             send_buffer_size: None,
             recv_buffer_size: None,
-        }))
+        };
+
+        WebRtcTransportOptions::new(
+            WebRtcTransportListenInfos::new(listen_info(Protocol::Udp))
+                .insert(listen_info(Protocol::Tcp)),
+        )
     }
 
     pub struct ChannelSfu {
@@ -142,18 +149,26 @@ mod backend {
                 .collect()
         }
 
-        pub fn add_producer(&self, producer_id: ProducerId, did: String, kind: MediaKind) {
+        pub fn add_producer(
+            &self,
+            producer_id: ProducerId,
+            did: String,
+            kind: MediaKind,
+            source: String,
+        ) {
             self.producers.lock().unwrap().insert(
                 producer_id,
                 ProducerInfo {
                     did: did.clone(),
                     kind,
+                    source: source.clone(),
                 },
             );
             let _ = self.events.send(RoomEvent::ProducerAdded {
                 did,
                 producer_id,
                 kind,
+                source,
             });
         }
 
@@ -227,8 +242,11 @@ mod backend {
                 .create_router(RouterOptions::new(media_codecs()))
                 .await
                 .map_err(|e| format!("create_router: {e}"))?;
+            let mut audio_observer_options = AudioLevelObserverOptions::default();
+            audio_observer_options.max_entries = NonZeroU16::new(20).unwrap();
+            audio_observer_options.interval = 400;
             let audio_observer = router
-                .create_audio_level_observer(AudioLevelObserverOptions::default())
+                .create_audio_level_observer(audio_observer_options)
                 .await
                 .map_err(|e| format!("create_audio_level_observer: {e}"))?;
 

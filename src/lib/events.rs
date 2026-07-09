@@ -264,6 +264,14 @@ pub struct VoicePresenceEventData {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VoiceStateEventData {
+    pub channel: String,
+    pub did: String,
+    pub muted: bool,
+    pub deafened: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NotificationEventMessage {
     pub text: String,
     #[serde(default)]
@@ -375,6 +383,7 @@ pub enum ColibriServerEventData {
     User(UserEventData),
     Typing(TypingEventData),
     VoicePresence(VoicePresenceEventData),
+    VoiceState(VoiceStateEventData),
     Notification(NotificationEventData),
     Seen(SeenEventData),
     Mute(MuteEventData),
@@ -411,6 +420,8 @@ pub enum HumEvent {
     Typing(TypingEventData),
     #[serde(rename = "voice_presence_event")]
     VoicePresence(VoicePresenceEventData),
+    #[serde(rename = "voice_state_event")]
+    VoiceState(VoiceStateEventData),
 }
 
 /// An off-protocol event relayed between AppViews. Authenticated via
@@ -433,6 +444,14 @@ pub struct HumEnvelope {
 pub struct VoiceChannelData {
     pub channel: String,
     pub community: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VoiceStateData {
+    pub channel: String,
+    pub community: String,
+    pub muted: bool,
+    pub deafened: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

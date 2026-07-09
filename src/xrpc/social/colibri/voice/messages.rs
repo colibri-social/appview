@@ -27,6 +27,7 @@ pub enum ServerMessage {
         router_rtp_capabilities: RtpCapabilitiesFinalized,
         producer_transport_options: TransportOptions,
         consumer_transport_options: TransportOptions,
+        ice_servers: serde_json::Value,
     },
     ConnectedProducerTransport,
     #[serde(rename_all = "camelCase")]
@@ -46,6 +47,7 @@ pub enum ServerMessage {
         did: String,
         producer_id: ProducerId,
         kind: MediaKind,
+        source: String,
     },
     #[serde(rename_all = "camelCase")]
     ProducerRemoved {
@@ -73,6 +75,8 @@ pub enum ClientMessage {
     Produce {
         kind: MediaKind,
         rtp_parameters: RtpParameters,
+        #[serde(default)]
+        source: String,
     },
     #[serde(rename_all = "camelCase")]
     ConnectConsumerTransport { dtls_parameters: DtlsParameters },
@@ -80,4 +84,6 @@ pub enum ClientMessage {
     Consume { producer_id: ProducerId },
     #[serde(rename_all = "camelCase")]
     ConsumerResume { id: ConsumerId },
+    #[serde(rename_all = "camelCase")]
+    CloseProducer { producer_id: ProducerId },
 }

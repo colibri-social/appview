@@ -39,7 +39,7 @@ use crate::lib::colibri::ColibriActorProfile;
 use crate::lib::event_scope::{EventScope, ScopedEvent, SharedScopedEvent};
 use crate::lib::events::{
     ColibriServerEvent, ColibriServerEventData, HumEnvelope, HumEvent, UserEventStatus,
-    VoicePresenceEventData,
+    VoicePresenceEventData, VoiceStateEventData,
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::map_tap_event::build_presence_user_event;
@@ -225,6 +225,7 @@ fn event_channel(event: &HumEvent) -> Option<&str> {
     match event {
         HumEvent::Typing(t) => Some(&t.channel),
         HumEvent::VoicePresence(v) => Some(&v.channel),
+        HumEvent::VoiceState(v) => Some(&v.channel),
         HumEvent::User(_) => None,
     }
 }
@@ -281,6 +282,21 @@ async fn inject_local(
                             did: subject.to_string(),
                         },
                     )),
+                },
+            );
+        }
+        HumEvent::VoiceState(voice) => {
+            broadcast_community(
+                broadcast_tx,
+                community_did,
+                ColibriServerEvent {
+                    event_type: String::from("voice_state_event"),
+                    data: Some(ColibriServerEventData::VoiceState(VoiceStateEventData {
+                        channel: voice.channel.clone(),
+                        did: subject.to_string(),
+                        muted: voice.muted,
+                        deafened: voice.deafened,
+                    })),
                 },
             );
         }

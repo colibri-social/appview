@@ -34,7 +34,7 @@ use crate::lib::colibri::{ColibriActorData, ColibriCommunity, community_hub_did}
 use crate::lib::event_scope::SharedScopedEvent;
 use crate::lib::events::{
     HumEnvelope, HumEvent, TypingEventData, UserEventData, UserEventProfile, UserEventStatus,
-    VoicePresenceEventData,
+    VoicePresenceEventData, VoiceStateEventData,
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::get_state::get_state;
@@ -83,6 +83,12 @@ pub enum OutboundHum {
         did: String,
         channel: String,
         event: String,
+    },
+    VoiceState {
+        did: String,
+        channel: String,
+        muted: bool,
+        deafened: bool,
     },
 }
 
@@ -194,6 +200,21 @@ async fn resolve_outbound(
                 event,
                 channel,
                 did: did.clone(),
+            });
+            Some((did, payload, vec![(community_uri, hub)]))
+        }
+        OutboundHum::VoiceState {
+            did,
+            channel,
+            muted,
+            deafened,
+        } => {
+            let (community_uri, hub) = channel_target(db, &channel).await?;
+            let payload = HumEvent::VoiceState(VoiceStateEventData {
+                channel,
+                did: did.clone(),
+                muted,
+                deafened,
             });
             Some((did, payload, vec![(community_uri, hub)]))
         }

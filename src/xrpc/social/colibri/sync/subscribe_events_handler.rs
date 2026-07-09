@@ -1,15 +1,15 @@
 use crate::EventNotification;
 use crate::lib::at_uri::AtUri;
-use crate::lib::event_scope::{EventScope, SharedScopedEvent};
+use crate::lib::event_scope::{EventScope, ScopedEvent, SharedScopedEvent};
 use crate::lib::events::{
     ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent, NotificationEventData,
     NotificationEventMessage, SeenEvent, TypingEventData, TypingMessageData, ViewData,
-    VoiceChannelData,
+    VoiceChannelData, VoicePresenceEventData, VoiceStateData, VoiceStateEventData,
 };
 use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
-use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, view_channel};
+use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, set_vc_state, view_channel};
 use crate::lib::tap::CommsBridge;
 use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
 use crate::{
@@ -32,6 +32,7 @@ use rocket::{Request, State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 type WsSink = futures_util::stream::SplitSink<DuplexStream, WsMessage>;
 
@@ -44,6 +45,7 @@ async fn parse_client_event(
     text: &str,
     did: String,
     to_c2c_broadcast: &Sender<EventNotification>,
+    to_tap_broadcast: &Sender<SharedScopedEvent>,
     hum_outbox: &mpsc::Sender<OutboundHum>,
     db: &DatabaseConnection,
 ) -> Option<String> {
@@ -97,31 +99,130 @@ async fn parse_client_event(
                 },
             );
 
+            if let Some(uri) = AtUri::parse(&vc_msg_data.community) {
+                broadcast_voice_presence(
+                    to_tap_broadcast,
+                    &uri.authority,
+                    &vc_msg_data.channel,
+                    &did,
+                    "join",
+                );
+            }
+
             join_vc(did, vc_msg_data.channel, vc_msg_data.community, db).await;
 
             None
         }
         "voice_leave" => {
-            // Resolve the channel being left before we clear it, so the outbound
-            // Hum can carry it (the leave event has no payload of its own).
-            if let Ok(states) = get_did_states(did.clone(), db).await
-                && let Some(channel) = states.vc
-            {
-                hum_client::enqueue(
-                    hum_outbox,
-                    OutboundHum::Voice {
-                        did: did.clone(),
-                        channel,
-                        event: String::from("leave"),
-                    },
+            leave_vc_and_broadcast(&did, to_tap_broadcast, hum_outbox, db).await;
+            None
+        }
+        "voice_state" => {
+            let state_data: VoiceStateData = serde_json::from_value(user_message.data?).ok()?;
+
+            hum_client::enqueue(
+                hum_outbox,
+                OutboundHum::VoiceState {
+                    did: did.clone(),
+                    channel: state_data.channel.clone(),
+                    muted: state_data.muted,
+                    deafened: state_data.deafened,
+                },
+            );
+
+            if let Some(uri) = AtUri::parse(&state_data.community) {
+                broadcast_voice_state(
+                    to_tap_broadcast,
+                    &uri.authority,
+                    &state_data.channel,
+                    &did,
+                    state_data.muted,
+                    state_data.deafened,
                 );
             }
 
-            leave_vc(did, db).await;
+            set_vc_state(did, state_data.muted, state_data.deafened, db).await;
+
             None
         }
         _ => None,
     }
+}
+
+fn broadcast_voice_state(
+    to_tap_broadcast: &Sender<SharedScopedEvent>,
+    community_did: &str,
+    channel: &str,
+    did: &str,
+    muted: bool,
+    deafened: bool,
+) {
+    let server_event = ColibriServerEvent {
+        event_type: String::from("voice_state_event"),
+        data: Some(ColibriServerEventData::VoiceState(VoiceStateEventData {
+            channel: channel.to_string(),
+            did: did.to_string(),
+            muted,
+            deafened,
+        })),
+    };
+    let scoped = Arc::new(ScopedEvent {
+        scope: EventScope::Community(community_did.to_string()),
+        payload: server_event.serialize(),
+    });
+    let _ = to_tap_broadcast.send(scoped);
+}
+
+async fn leave_vc_and_broadcast(
+    did: &str,
+    to_tap_broadcast: &Sender<SharedScopedEvent>,
+    hum_outbox: &mpsc::Sender<OutboundHum>,
+    db: &DatabaseConnection,
+) {
+    if let Ok(states) = get_did_states(did.to_string(), db).await
+        && let Some(channel) = states.vc
+    {
+        hum_client::enqueue(
+            hum_outbox,
+            OutboundHum::Voice {
+                did: did.to_string(),
+                channel: channel.clone(),
+                event: String::from("leave"),
+            },
+        );
+
+        if let Some(community) = states.vc_community
+            && let Some(uri) = AtUri::parse(&community)
+        {
+            broadcast_voice_presence(to_tap_broadcast, &uri.authority, &channel, did, "leave");
+        }
+
+        leave_vc(did.to_string(), db).await;
+    }
+}
+
+fn broadcast_voice_presence(
+    to_tap_broadcast: &Sender<SharedScopedEvent>,
+    community_did: &str,
+    channel: &str,
+    did: &str,
+    event: &str,
+) {
+    let server_event = ColibriServerEvent {
+        event_type: String::from("voice_presence_event"),
+        data: Some(ColibriServerEventData::VoicePresence(
+            VoicePresenceEventData {
+                event: event.to_string(),
+                channel: channel.to_string(),
+                did: did.to_string(),
+            },
+        )),
+    };
+    let scoped = Arc::new(ScopedEvent {
+        scope: EventScope::Community(community_did.to_string()),
+        payload: server_event.serialize(),
+    });
+    let _ = to_tap_broadcast.send(scoped);
 }
 
 async fn serialize_typing_broadcast(
@@ -245,14 +346,22 @@ async fn handle_client_message(
     msg: Option<Result<WsMessage, rocket_ws::result::Error>>,
     did: String,
     to_c2c_broadcast: &Sender<EventNotification>,
+    to_tap_broadcast: &Sender<SharedScopedEvent>,
     hum_outbox: &mpsc::Sender<OutboundHum>,
     db: &DatabaseConnection,
 ) -> bool {
     match msg {
         Some(Ok(WsMessage::Close(_))) | None => false,
         Some(Ok(WsMessage::Text(text))) => {
-            if let Some(serialized_ack_res) =
-                parse_client_event(&text, did, to_c2c_broadcast, hum_outbox, db).await
+            if let Some(serialized_ack_res) = parse_client_event(
+                &text,
+                did,
+                to_c2c_broadcast,
+                to_tap_broadcast,
+                hum_outbox,
+                db,
+            )
+            .await
             {
                 let _ = ws_sink.send(WsMessage::Text(serialized_ack_res)).await;
             }
@@ -515,7 +624,7 @@ async fn run_event_loop(
     loop {
         let connected = tokio::select! {
             msg = from_tap.recv() => handle_tap_message(&mut ws_sink, msg, &did, &mut communities, &db).await,
-            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &hum_outbox, &db).await,
+            msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &to_tap_broadcast, &hum_outbox, &db).await,
             msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
             msg = from_notifications.recv() => handle_notification_msg(&mut ws_sink, msg, &did).await,
             msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg, &communities).await,
@@ -529,6 +638,7 @@ async fn run_event_loop(
         }
     }
 
+    leave_vc_and_broadcast(&did, &to_tap_broadcast, &hum_outbox, &db).await;
     save_state(&db, did.clone(), String::from("offline")).await;
     broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
 }
@@ -677,7 +787,7 @@ mod tests {
         scope_matches, serialize_typing_broadcast,
     };
     use crate::EventNotification;
-    use crate::lib::event_scope::EventScope;
+    use crate::lib::event_scope::{EventScope, SharedScopedEvent};
     use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
     use crate::lib::hum_client::OutboundHum;
     use crate::lib::test_fixtures::mock_db;
@@ -692,6 +802,10 @@ mod tests {
     /// satisfies the `parse_client_event` signature.
     fn hum_outbox() -> mpsc::Sender<OutboundHum> {
         mpsc::channel::<OutboundHum>(4).0
+    }
+
+    fn tap_broadcast() -> broadcast::Sender<SharedScopedEvent> {
+        broadcast::channel::<SharedScopedEvent>(4).0
     }
 
     #[test]
@@ -778,6 +892,7 @@ mod tests {
             r#"{"type":"heartbeat","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &tap_broadcast(),
             &hum_outbox(),
             &db,
         )
@@ -795,6 +910,7 @@ mod tests {
             r#"{"type":"typing","data":{"channel":"community-1"}}"#,
             String::from("did:plc:me"),
             &tx,
+            &tap_broadcast(),
             &hum_outbox(),
             &db,
         )
@@ -814,6 +930,7 @@ mod tests {
             r#"{"type":"typing","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &tap_broadcast(),
             &hum_outbox(),
             &db,
         )
@@ -843,6 +960,7 @@ mod tests {
             r#"{"type":"view","data":{"channel":"community-1"}}"#,
             String::from("did:plc:me"),
             &tx,
+            &tap_broadcast(),
             &hum_outbox(),
             &db,
         )
@@ -865,6 +983,7 @@ mod tests {
             r#"{"type":"unknown","data":null}"#,
             String::from("did:plc:me"),
             &tx,
+            &tap_broadcast(),
             &hum_outbox(),
             &db,
         )
@@ -881,6 +1000,8 @@ mod tests {
                 vc: None,
                 vc_community: None,
                 channel: Some(String::from("community-1")),
+                vc_muted: None,
+                vc_deafened: None,
             }]])
             .into_connection();
         let payload = serialize_typing_broadcast(

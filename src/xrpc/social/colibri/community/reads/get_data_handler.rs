@@ -212,6 +212,9 @@ async fn get_data_with(
         mut colibri_profiles,
         mut actor_data,
         mut states,
+        mut vc,
+        mut vc_muted,
+        mut vc_deafened,
         mut handles,
         mut member_roles,
     } = raw.member_aggregate;
@@ -224,8 +227,11 @@ async fn get_data_with(
             let colibri_profile = colibri_profiles.remove(&did);
             let data = actor_data.remove(&did);
             let state = states.remove(&did);
+            let member_vc = vc.remove(&did);
+            let member_vc_muted = vc_muted.remove(&did);
+            let member_vc_deafened = vc_deafened.remove(&did);
             let role_rkeys = member_roles.remove(&did).unwrap_or_default();
-            build_member(
+            let mut member = build_member(
                 did,
                 handle,
                 profile,
@@ -234,7 +240,11 @@ async fn get_data_with(
                 state,
                 &community.authority,
                 role_rkeys,
-            )
+            );
+            member.vc = member_vc;
+            member.vc_muted = member_vc_muted;
+            member.vc_deafened = member_vc_deafened;
+            member
         })
         .collect();
 
@@ -337,6 +347,9 @@ mod tests {
                 colibri_profiles: HashMap::new(),
                 actor_data: HashMap::new(),
                 states: HashMap::new(),
+                vc: HashMap::new(),
+                vc_muted: HashMap::new(),
+                vc_deafened: HashMap::new(),
                 handles: HashMap::from([(
                     String::from("did:plc:alice"),
                     String::from("alice.test"),

@@ -17,6 +17,8 @@ pub struct Model {
     pub vc_community: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub channel: Option<String>,
+    pub vc_muted: Option<bool>,
+    pub vc_deafened: Option<bool>,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

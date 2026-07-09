@@ -97,6 +97,43 @@ pub async fn leave_vc(did: String, db: &DatabaseConnection) {
             user_states::Column::VcCommunity,
             Expr::value(Option::<String>::None),
         )
+        .col_expr(
+            user_states::Column::VcMuted,
+            Expr::value(Option::<bool>::None),
+        )
+        .col_expr(
+            user_states::Column::VcDeafened,
+            Expr::value(Option::<bool>::None),
+        )
+        .filter(user_states::Column::Did.eq(did))
+        .exec(db)
+        .await;
+}
+
+pub async fn reset_all_presence(db: &DatabaseConnection) {
+    let _ = UserStates::update_many()
+        .col_expr(user_states::Column::State, Expr::value("offline"))
+        .col_expr(user_states::Column::Vc, Expr::value(Option::<String>::None))
+        .col_expr(
+            user_states::Column::VcCommunity,
+            Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            user_states::Column::VcMuted,
+            Expr::value(Option::<bool>::None),
+        )
+        .col_expr(
+            user_states::Column::VcDeafened,
+            Expr::value(Option::<bool>::None),
+        )
+        .exec(db)
+        .await;
+}
+
+pub async fn set_vc_state(did: String, muted: bool, deafened: bool, db: &DatabaseConnection) {
+    let _ = UserStates::update_many()
+        .col_expr(user_states::Column::VcMuted, Expr::value(muted))
+        .col_expr(user_states::Column::VcDeafened, Expr::value(deafened))
         .filter(user_states::Column::Did.eq(did))
         .exec(db)
         .await;

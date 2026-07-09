@@ -61,6 +61,8 @@ mod tests {
                 channel: None,
                 vc: None,
                 vc_community: None,
+                vc_muted: None,
+                vc_deafened: None,
             }]])
             .into_connection();
 

@@ -10,8 +10,13 @@ services:
       TAP_HOSTNAME: tap:2480
       ROCKET_ADDRESS: 0.0.0.0
       ROCKET_PORT: 8000
+      SFU_ANNOUNCED_IP: 127.0.0.1
+      SFU_RTC_MIN_PORT: 40000
+      SFU_RTC_MAX_PORT: 40019
     ports:
       - "8000:8000"
+      - "40000-40019:40000-40019/udp"
+      - "40000-40019:40000-40019/tcp"
     depends_on:
       postgres:
         condition: service_healthy
