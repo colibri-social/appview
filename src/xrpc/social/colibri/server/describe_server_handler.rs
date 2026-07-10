@@ -13,7 +13,8 @@ pub struct DescribeServerResponse {
     /// Used to identify what kind of type the AppView is. "vanilla" for the stock AppView.
     /// Can be any arbitrary string.
     pub flavor: String,
-    /// Crate version of the running AppView (`CARGO_PKG_VERSION`).
+    /// Version of the running AppView: the release tag when built in CI
+    /// (`APPVIEW_VERSION`), otherwise the crate version (`CARGO_PKG_VERSION`).
     pub version: String,
 }
 
@@ -27,7 +28,11 @@ pub fn describe_server() -> Json<DescribeServerResponse> {
     Json(DescribeServerResponse {
         software: String::from("colibri-appview"),
         flavor: String::from("vanilla"),
-        version: String::from(env!("CARGO_PKG_VERSION")),
+        version: String::from(
+            option_env!("APPVIEW_VERSION")
+                .filter(|v| !v.is_empty())
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+        ),
     })
 }
 

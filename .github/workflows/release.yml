@@ -1,0 +1,146 @@
+name: Release
+
+# Fires for any semver tag: stable tags cut by release-plz (e.g. v0.1.0) and
+# pre-release tags cut by the preview workflow (e.g. v0.1.0-rc.7). The tag's
+# GitHub Release is created by whoever cut the tag (release-plz / preview.yml);
+# this workflow only builds artifacts and attaches them.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # upload release assets
+  packages: write # push image to GHCR
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }} # colibri-social/appview
+
+jobs:
+  # Build one image per architecture on a native runner (no QEMU, mediasoup
+  # compiles C++ and emulated builds are slow/fragile), push by digest.
+  docker-build:
+    name: Docker image (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compute version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            APPVIEW_VERSION=${{ steps.ver.outputs.version }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combine the per-arch digests into a single multi-arch manifest and tag it.
+  docker-manifest:
+    name: Push multi-arch manifest
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # {{version}} -> 0.1.0 or 0.1.0-rc.7. metadata-action skips
+          # {{major}}.{{minor}} and `latest` for pre-releases; the explicit
+          # enable guard keeps `latest` off rc tags as belt-and-suspenders.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+      - name: Inspect
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+  # Native Linux binaries (x86_64 + aarch64) attached to the GitHub Release.
+  binaries:
+    name: Binary (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.93
+        run: rustup toolchain install 1.93 --profile minimal
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: APPVIEW_VERSION="${GITHUB_REF_NAME#v}" cargo build --release --locked
+      - name: Package
+        run: |
+          BIN=colibri-appview
+          DIST="${BIN}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$DIST"
+          cp "target/release/${BIN}" "$DIST/"
+          cp README.md LICENSE "$DIST/" 2>/dev/null || true
+          tar -czf "${DIST}.tar.gz" "$DIST"
+          sha256sum "${DIST}.tar.gz" > "${DIST}.tar.gz.sha256"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" *.tar.gz *.sha256 --clobber

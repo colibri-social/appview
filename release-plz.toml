@@ -1,0 +1,11 @@
+[workspace]
+# colibri-appview is an application, not a library, never publish to crates.io.
+publish = false
+# Clean tags/release names (v0.1.0), not the workspace default colibri-appview-v0.1.0.
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+
+[[package]]
+name = "migration"
+# Internal SeaORM migration crate. Don't version, tag, or release it.
+release = false

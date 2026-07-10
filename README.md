@@ -6,9 +6,9 @@ The AT Protocol Application View (AppView) that sits behind [colibri.social](htt
 
 ### Prerequisites
 
+- Linux (`x86_64` or `aarch64`)
 - Rust (`1.93`+).
 - Docker + Docker Compose, for Postgres and Tap
-- On **Windows**, two extra build tools for OpenSSL. See [Building on Windows](#building-on-windows).
 
 ### 1. Configure environment
 
@@ -41,17 +41,6 @@ npx web-push generate-vapid-keys
 ```
 
 When these are unset, background Web Push is disabled.
-
-## Building on Windows
-
-Web Push pulls in OpenSSL. On Linux/Docker the system `libssl` is used. Windows has no system OpenSSL to link against, so `Cargo.toml` builds it from source there. That build needs two tools on your `PATH`:
-
-- Strawberry Perl: <https://strawberryperl.com/>
-- NASM: <https://www.nasm.us/> (the installer does _not_ add itself to `PATH`. Add its install folder manually)
-
-With [Chocolatey](https://chocolatey.org/install): `choco install strawberryperl nasm -y`.
-
-Open a fresh terminal afterwards so the updated `PATH` is picked up (`perl --version` / `nasm --version` to confirm), then `cargo run`. The first build compiles OpenSSL from source, which might take up to 15 minutes.
 
 ## Deployment
 

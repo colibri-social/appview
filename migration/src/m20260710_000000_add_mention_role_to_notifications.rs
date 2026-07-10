@@ -11,7 +11,9 @@ impl MigrationTrait for Migration {
                 Table::alter()
                     .table(Alias::new("notifications"))
                     .add_column_if_not_exists(
-                        ColumnDef::new(Alias::new("mention_role_name")).text().null(),
+                        ColumnDef::new(Alias::new("mention_role_name"))
+                            .text()
+                            .null(),
                     )
                     .to_owned(),
             )

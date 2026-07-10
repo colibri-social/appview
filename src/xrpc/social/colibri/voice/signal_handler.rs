@@ -101,6 +101,7 @@ async fn send(ws_sink: &mut WsSink, msg: &ServerMessage) -> bool {
     ws_sink.send(WsMessage::Text(text)).await.is_ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     text: &str,
     ws_sink: &mut WsSink,

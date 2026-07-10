@@ -1,0 +1,74 @@
+name: Release-plz
+
+# PR-only release flow. On every push to main, release-plz maintains a "release"
+# PR that bumps the version + updates CHANGELOG.md from the conventional commits
+# since the last release. Merging that PR makes release-plz create the vX.Y.Z tag
+# and GitHub Release, which in turn triggers .github/workflows/release.yml to
+# build and attach the image + binaries.
+#
+# Dormant until feat/rewrite merges into main (main currently holds the
+# pre-rewrite code). Requires a GitHub App (see README/CI docs) with Contents +
+# Pull requests write, installed on this repo, exposed as the RELEASE_APP_ID and
+# RELEASE_APP_PRIVATE_KEY secrets. An App/PAT token is needed (not the default
+# GITHUB_TOKEN) so the release PR and release tag trigger CI / the release
+# workflow.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Create tags + GitHub Releases for any unreleased version (i.e. after the
+  # release PR is merged).
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install Rust 1.93
+        run: rustup toolchain install 1.93 --profile minimal
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # Open/update the release PR from unreleased commits.
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install Rust 1.93
+        run: rustup toolchain install 1.93 --profile minimal
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}

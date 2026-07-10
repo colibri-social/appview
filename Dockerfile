@@ -11,6 +11,12 @@ WORKDIR /app
 
 COPY . .
 
+# Optional: stamp the exact release version into the binary (reported by
+# social.colibri.server.describeServer). Unset for local builds -> falls back
+# to the crate version in Cargo.toml.
+ARG APPVIEW_VERSION
+ENV APPVIEW_VERSION=${APPVIEW_VERSION}
+
 RUN cargo build --release
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
