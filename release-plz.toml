@@ -1,9 +1,12 @@
 [workspace]
 # colibri-appview is an application, not a library, never publish to crates.io.
 publish = false
-# Clean tags/release names (v0.1.0), not the workspace default colibri-appview-v0.1.0.
+# Clean tags (v0.1.0), not the workspace default colibri-appview-v0.1.0.
 git_tag_name = "v{{ version }}"
-git_release_name = "v{{ version }}"
+# release-plz only creates + pushes the tag. .github/workflows/release.yml then
+# builds the image + binaries and publishes the GitHub Release afterwards, so a
+# release never appears before its artifacts are live.
+git_release_enable = false
 
 [[package]]
 name = "migration"
