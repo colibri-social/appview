@@ -1,6 +1,9 @@
 services:
   app:
-    build: .
+    # Interim: track the latest preview build from feat/rewrite. Switch to a
+    # pinned version (or :latest) once stable releases start from main.
+    image: ghcr.io/colibri-social/appview:preview
+    pull_policy: always
     restart: unless-stopped
     env_file:
       - .env

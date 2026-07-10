@@ -95,11 +95,13 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           # {{version}} -> 0.1.0 or 0.1.0-rc.7. metadata-action skips
           # {{major}}.{{minor}} and `latest` for pre-releases; the explicit
-          # enable guard keeps `latest` off rc tags as belt-and-suspenders.
+          # enable guards keep `latest` on stable only and `preview` on rc only,
+          # so staging can track ghcr.io/.../appview:preview.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=preview,enable=${{ contains(github.ref_name, '-') }}
       - name: Create and push manifest list
         working-directory: /tmp/digests
         run: |
