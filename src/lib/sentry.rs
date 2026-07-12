@@ -16,7 +16,7 @@ fn get_sentry_config() -> (String, ClientOptions) {
         dsn,
         sentry::ClientOptions {
             release: sentry::release_name!(),
-            send_default_pii: true,
+            send_default_pii: false,
             ..Default::default()
         },
     )
