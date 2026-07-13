@@ -10,7 +10,7 @@ edition = "2024"
 debug = "line-tables-only"
 
 [dependencies]
-migration = { path = "migration", version = "0.1.0" }
+migration = { path = "migration" }
 rocket = { version = "0.5.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 sentry = "0.47.0"

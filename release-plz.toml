@@ -12,6 +12,13 @@ git_tag_name = "v{{ version }}"
 # builds the image + binaries and publishes the GitHub Release afterwards, so a
 # release never appears before its artifacts are live.
 git_release_enable = false
+# colibri-appview is a binary-only app with no public library API, and it depends
+# on the local-only `migration` crate. cargo-semver-checks only works on library
+# crates and, to build the baseline, runs a full `cargo package` that resolves
+# `migration` from crates.io (where an unrelated crate of that name exists) and
+# fails. It's useless here, so turn it off; release-plz still diffs via
+# `cargo package --list`, which resolves path deps locally.
+semver_check = false
 
 [[package]]
 name = "migration"
