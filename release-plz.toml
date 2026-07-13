@@ -1,6 +1,11 @@
 [workspace]
 # colibri-appview is an application, not a library, never publish to crates.io.
 publish = false
+# publish = false still leaves release-plz checking crates.io for the last
+# release, so it can't find a baseline to bump from and never proposes a new
+# version. git_only makes it read the current version from the v{{version}} git
+# tags instead, so conventional commits since the last tag drive the bump.
+git_only = true
 # Clean tags (v0.1.0), not the workspace default colibri-appview-v0.1.0.
 git_tag_name = "v{{ version }}"
 # release-plz only creates + pushes the tag. .github/workflows/release.yml then
