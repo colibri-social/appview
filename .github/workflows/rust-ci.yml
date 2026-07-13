@@ -2,9 +2,12 @@ name: Rust CI
 
 on:
   workflow_dispatch:
+  # Only run on pushes to main (i.e. after a PR merges). Branch pushes that
+  # belong to an open PR are covered by the pull_request trigger below; running
+  # push on "**" as well made every PR push start two identical CI runs.
   push:
     branches:
-      - "**"
+      - main
   pull_request:
 
 concurrency:
