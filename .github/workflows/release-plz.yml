@@ -40,6 +40,10 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
       - name: Install Rust 1.93
         run: rustup toolchain install 1.93 --profile minimal
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
@@ -66,6 +70,10 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
       - name: Install Rust 1.93
         run: rustup toolchain install 1.93 --profile minimal
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
