@@ -1,6 +1,6 @@
 # appview
 
-The AT Protocol Application View (AppView) that sits behind [colibri.social](https://colibri.social). See the docs at <https://colibri.social/docs>.
+The AT Protocol Application View (AppView) that sits behind [colibri.social](https://colibri.social). See the docs at <https://colibri.social/docs>. Use via <https://api.colibri.social>.
 
 ## Getting started
 
