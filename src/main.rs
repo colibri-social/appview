@@ -7,7 +7,7 @@ use crate::lib::db::init_db;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::sentry::init_sentry;
 use crate::lib::tap::{self, CommsBridge, run_connection};
-use migration::{Migrator, MigratorTrait};
+use crate::migrations::{Migrator, MigratorTrait};
 use rocket::fairing::AdHoc;
 use rocket::http::Method;
 use rocket::tokio::sync::broadcast;
@@ -16,6 +16,7 @@ use rocket_cors::{AllowedOrigins, CorsOptions};
 use sea_orm::DatabaseConnection;
 
 mod lib;
+mod migrations;
 #[allow(dead_code)]
 mod models;
 mod sfu;

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "migration"]
+members = ["."]
 
 [package]
 name = "colibri-appview"
@@ -10,7 +10,6 @@ edition = "2024"
 debug = "line-tables-only"
 
 [dependencies]
-migration = { path = "migration" }
 rocket = { version = "0.5.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 sentry = "0.47.0"
@@ -18,6 +17,10 @@ dotenvy = "0.15"
 pretty_env_logger = "0.5.0"
 log = "0.4.29"
 sea-orm = { version = "2.0.0-rc", features = [ "sqlx-postgres", "runtime-tokio-rustls", "macros", "schema-sync", "entity-registry", "mock" ] }
+# DB migrations, previously the standalone `migration` workspace crate. Merged
+# into this binary as `src/migrations` so the package has no local-only path
+# dependency (which made `cargo package`, and thus release-plz, impossible).
+sea-orm-migration = { version = "2.0.0-rc", features = [ "runtime-tokio-rustls", "sqlx-postgres" ] }
 reqwest = { version = "0.13", features = ["json"] }
 futures = "0.3"
 trust-dns-resolver = "0.23.2"

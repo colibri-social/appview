@@ -1147,7 +1147,6 @@ dependencies = [
  "log",
  "lru 0.12.5",
  "mediasoup",
- "migration",
  "openssl",
  "p256",
  "pretty_env_logger",
@@ -1159,6 +1158,7 @@ dependencies = [
  "rocket_ws",
  "scraper",
  "sea-orm",
+ "sea-orm-migration",
  "sentry",
  "serde",
  "serde_json",
@@ -3516,14 +3516,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "migration"
-version = "0.1.0"
-dependencies = [
- "sea-orm-migration",
- "tokio",
 ]
 
 [[package]]
