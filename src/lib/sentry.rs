@@ -12,10 +12,21 @@ fn get_sentry_config() -> (String, ClientOptions) {
         _ => String::new(),
     };
 
+    let release = option_env!("APPVIEW_VERSION")
+        .filter(|v| !v.is_empty())
+        .map(|v| format!("colibri-appview@{v}").into())
+        .or_else(|| sentry::release_name!());
+
+    let environment = std::env::var("SENTRY_ENVIRONMENT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(Into::into);
+
     (
         dsn,
         sentry::ClientOptions {
-            release: sentry::release_name!(),
+            release,
+            environment,
             send_default_pii: false,
             ..Default::default()
         },
