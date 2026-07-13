@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "colibri-appview"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "async-stream",

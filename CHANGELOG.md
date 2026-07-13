@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/colibri-social/appview/compare/v0.1.0...v0.1.1) - 2026-07-13
+
+### Fixed
+
+- Update rust-ci.yml so runs don't duplicate ([#18](https://github.com/colibri-social/appview/pull/18))
+
+### Other
+
+- cache Rust builds in the release-plz workflow ([#20](https://github.com/colibri-social/appview/pull/20))
+
 ## [0.1.0](https://github.com/colibri-social/appview/releases/tag/v0.1.0) - 2026-07-12
 
 ### Added
