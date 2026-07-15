@@ -287,8 +287,12 @@ async fn handle_tap_message(
 ) -> bool {
     match event {
         Ok(ev) => forward_scoped_event(ws_sink, ev, did, communities, db).await,
-        Err(e) => {
-            eprintln!("Tap stream error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Tap stream lagged by {n} messages for {did}, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Tap stream closed");
             false
         }
     }
@@ -339,8 +343,12 @@ async fn handle_client_broadcast_msg(
             }
             true
         }
-        Err(e) => {
-            eprintln!("Client broadcast error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Client broadcast lagged by {n} messages, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Client broadcast closed");
             false
         }
     }
@@ -390,8 +398,12 @@ async fn handle_notification_msg(
             }
             true
         }
-        Err(e) => {
-            eprintln!("Notification broadcast error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Notification broadcast lagged by {n} messages for {did}, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Notification broadcast closed");
             false
         }
     }
@@ -432,8 +444,12 @@ async fn handle_application_msg(
             }
             true
         }
-        Err(e) => {
-            eprintln!("Application broadcast error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Application broadcast lagged by {n} messages, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Application broadcast closed");
             false
         }
     }
@@ -465,8 +481,12 @@ async fn handle_seen_msg(
             }
             true
         }
-        Err(e) => {
-            eprintln!("Seen broadcast error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Seen broadcast lagged by {n} messages for {did}, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Seen broadcast closed");
             false
         }
     }
@@ -498,8 +518,12 @@ async fn handle_mute_msg(
             }
             true
         }
-        Err(e) => {
-            eprintln!("Mute broadcast error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Mute broadcast lagged by {n} messages for {did}, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Mute broadcast closed");
             false
         }
     }
@@ -534,8 +558,12 @@ async fn handle_progress_msg(
             }
             true
         }
-        Err(e) => {
-            eprintln!("Progress broadcast error: {e}");
+        Err(RecvError::Lagged(n)) => {
+            log::warn!("Progress broadcast lagged by {n} messages for {did}, continuing");
+            true
+        }
+        Err(RecvError::Closed) => {
+            eprintln!("Progress broadcast closed");
             false
         }
     }
