@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use rocket::tokio::sync::Mutex as AsyncMutex;
 use rocket::{get, serde::json::Json};
 
-use crate::lib::http::HTTP;
+use crate::lib::embed_fetch;
 use crate::lib::{
     did_document::DidDocument,
     responses::{ErrorBody, ErrorResponse},
@@ -80,21 +80,16 @@ pub async fn resolve_did(did: &str) -> Result<Json<DidDocument>, ErrorResponse> 
         return Ok(Json(doc));
     }
 
-    let resp = if did.starts_with("did:web:") {
+    let url = if did.starts_with("did:web:") {
         let host = did.replace("did:web:", "");
-
-        HTTP.get(format!("https://{host}/.well-known/did.json"))
-            .send()
-            .await?
-            .json::<DidDocument>()
-            .await?
+        format!("https://{host}/.well-known/did.json")
     } else {
-        HTTP.get(format!("https://plc.directory/{did}"))
-            .send()
-            .await?
-            .json::<DidDocument>()
-            .await?
+        format!("https://plc.directory/{did}")
     };
+    let resp = embed_fetch::guarded_get(&url)
+        .await?
+        .json::<DidDocument>()
+        .await?;
 
     did_cache_put(did, &resp);
     Ok(Json(resp))

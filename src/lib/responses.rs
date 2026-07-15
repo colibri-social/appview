@@ -3,6 +3,8 @@ use rocket::serde::{Serialize, json::Json};
 use sea_orm::DbErr;
 use trust_dns_resolver::error::ResolveError;
 
+use crate::lib::embed_fetch::FetchError;
+
 #[derive(Serialize, Debug)]
 pub struct ErrorBody {
     pub message: String,
@@ -40,6 +42,17 @@ impl From<ResolveError> for ErrorResponse {
 
 impl From<DbErr> for ErrorResponse {
     fn from(err: DbErr) -> Self {
+        ErrorResponse {
+            body: Json(ErrorBody {
+                error: "UpstreamError".into(),
+                message: err.to_string(),
+            }),
+        }
+    }
+}
+
+impl From<FetchError> for ErrorResponse {
+    fn from(err: FetchError) -> Self {
         ErrorResponse {
             body: Json(ErrorBody {
                 error: "UpstreamError".into(),

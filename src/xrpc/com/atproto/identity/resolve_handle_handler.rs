@@ -10,7 +10,7 @@ use futures::future::{BoxFuture, select_ok};
 use serde::{Deserialize, Serialize};
 
 use crate::lib::did_document::DidDocument;
-use crate::lib::http::HTTP;
+use crate::lib::embed_fetch;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::*;
@@ -58,10 +58,8 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
     let did_json_future: BoxFuture<'_, Result<String, ErrorResponse>> = {
         let handle = handle.clone();
         async move {
-            let resp = HTTP
-                .get(format!("https://{handle}/.well-known/did.json"))
-                .send()
-                .await?;
+            let resp =
+                embed_fetch::guarded_get(&format!("https://{handle}/.well-known/did.json")).await?;
             let doc = resp.json::<DidDocument>().await?;
             Ok(doc.id)
         }
@@ -71,10 +69,9 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
     let atproto_did_future: BoxFuture<'_, Result<String, ErrorResponse>> = {
         let handle = handle.clone();
         async move {
-            let resp = HTTP
-                .get(format!("https://{handle}/.well-known/atproto-did"))
-                .send()
-                .await?;
+            let resp =
+                embed_fetch::guarded_get(&format!("https://{handle}/.well-known/atproto-did"))
+                    .await?;
             let text = resp.text().await?;
             if text.starts_with("did:") {
                 Ok(text)

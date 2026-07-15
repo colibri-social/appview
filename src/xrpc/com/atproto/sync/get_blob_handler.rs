@@ -8,28 +8,43 @@ use rocket::{State, get, response};
 
 use crate::lib::blob_cache::{BlobCache, CacheEntry};
 use crate::lib::did_document::DidDocument;
+use crate::lib::embed_fetch::{self, FetchError};
 use crate::lib::range::{RangeResult, parse_range};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use rocket::serde::json::Json;
 
 /// Blobs are content-addressed (immutable), so they can be cached aggressively.
 const CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+/// Hard ceiling on a single blob fetch, independent of the cache's own byte
+/// budget — bounds worst-case memory during the read itself.
+const MAX_BLOB_BYTES: usize = 100 * 1024 * 1024;
 
 /// Resolves a DID to its DID document by fetching from PLC directory or
 /// the did:web well-known URL. Mirrors the logic in `resolve_did_handler`.
-async fn fetch_did_document(did: &str) -> Result<DidDocument, reqwest::Error> {
-    if did.starts_with("did:web:") {
+async fn fetch_did_document(did: &str) -> Result<DidDocument, FetchError> {
+    let url = if did.starts_with("did:web:") {
         let host = did.trim_start_matches("did:web:");
-        reqwest::get(format!("https://{host}/.well-known/did.json"))
-            .await?
-            .json::<DidDocument>()
-            .await
+        format!("https://{host}/.well-known/did.json")
     } else {
-        reqwest::get(format!("https://plc.directory/{did}"))
-            .await?
-            .json::<DidDocument>()
-            .await
+        format!("https://plc.directory/{did}")
+    };
+    embed_fetch::guarded_get(&url)
+        .await?
+        .json::<DidDocument>()
+        .await
+        .map_err(|e| FetchError::Upstream(e.to_string()))
+}
+
+async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> Result<Bytes, String> {
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > max_bytes {
+            bytes.truncate(max_bytes);
+            break;
+        }
     }
+    Ok(Bytes::from(bytes))
 }
 
 /// Extracts the `serviceEndpoint` from the `#atproto_pds` service entry in a
@@ -131,7 +146,7 @@ async fn get_blob_inner(did: &str, cid: &str, cache: &BlobCache) -> GetBlobRespo
     };
 
     let url = format!("{endpoint}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}");
-    let resp = match reqwest::get(&url).await {
+    let resp = match embed_fetch::guarded_get(&url).await {
         Ok(r) => r,
         Err(e) => {
             return GetBlobResponse::Upstream(ErrorResponse {
@@ -165,9 +180,7 @@ async fn get_blob_inner(did: &str, cid: &str, cache: &BlobCache) -> GetBlobRespo
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    // `reqwest::Response::bytes` already yields `Bytes`; keep it as-is for a
-    // zero-copy hand-off into the cache and into range slices.
-    let bytes = match resp.bytes().await {
+    let bytes = match read_capped(resp, MAX_BLOB_BYTES).await {
         Ok(b) => b,
         Err(e) => {
             return GetBlobResponse::Upstream(ErrorResponse {

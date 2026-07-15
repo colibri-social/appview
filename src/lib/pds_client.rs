@@ -8,12 +8,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::lib::embed_fetch::{self, FetchError};
 use crate::lib::http::HTTP;
 
 #[derive(Debug, Error)]
 pub enum PdsError {
     #[error("http error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("fetch error: {0}")]
+    Fetch(#[from] FetchError),
     #[error("pds returned {status}: {body}")]
     BadStatus { status: u16, body: String },
     /// Reserved for richer response-shape validation in follow-up work.
@@ -145,7 +148,7 @@ pub async fn get_record(
         "{}/xrpc/com.atproto.repo.getRecord?repo={repo}&collection={collection}&rkey={rkey}",
         pds_endpoint.trim_end_matches('/')
     );
-    let resp = HTTP.clone().get(url).send().await?;
+    let resp = embed_fetch::guarded_get(&url).await?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
