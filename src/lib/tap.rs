@@ -118,6 +118,41 @@ pub async fn register_dids(dids: Vec<String>) {
     }
 }
 
+/// Tells Tap to stop tracking the given DIDs, deleting their tracked-repo
+/// metadata (tap's `repos`/`repo_records` state)
+pub async fn remove_dids(dids: Vec<String>) {
+    let tap_hostname = std::env::var("TAP_HOSTNAME").expect("TAP_HOSTNAME not found in .env");
+    let tap_password =
+        std::env::var("TAP_ADMIN_PASSWORD").expect("TAP_ADMIN_PASSWORD not found in .env");
+    let client = reqwest::Client::new();
+
+    let did_struct = DidStruct { dids };
+
+    let res = client
+        .post(format!("http://{tap_hostname}/repos/remove"))
+        .basic_auth(String::from("admin"), Some(tap_password))
+        .json(&did_struct)
+        .send()
+        .await;
+
+    if let Err(res_err) = res {
+        log::error!("Unable to remove DIDs: {}", res_err);
+    } else {
+        log::info!("Stopped tracking DIDs: {}", &did_struct.dids.join(", "));
+    }
+}
+
+/// Forces tap to redo a full historical backfill for DIDs it may already be
+/// tracking: removes them (dropping tap's tracked-repo state) then
+/// re-registers them, so tap treats each as a brand-new repo
+pub async fn force_redo_backfill(dids: Vec<String>) {
+    if dids.is_empty() {
+        return;
+    }
+    remove_dids(dids.clone()).await;
+    register_dids(dids).await;
+}
+
 /// Acknowledges a message from Tap and saves the data in the database.
 ///
 /// For `delete` events the local `record_data` row is removed for any NSID,

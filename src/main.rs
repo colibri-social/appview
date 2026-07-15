@@ -191,6 +191,16 @@ async fn rocket() -> _ {
         .await
         .expect("Unable to apply SeaORM migrations");
 
+    // Self-heal knob: `REFILL_FROM_SCRATCH` forces a full re-backfill of every
+    // DID this AppView has ever recorded anything about, clearing the mirrored
+    // record cache first. This runs before the AppView starts serving requests
+    // or connecting to tap's live stream.
+    if lib::refill::refill_from_scratch_requested()
+        && let Err(e) = lib::refill::refill_network_from_scratch(&db).await
+    {
+        log::error!("REFILL_FROM_SCRATCH: refill failed: {e}");
+    }
+
     crate::lib::state::reset_all_presence(&db).await;
 
     // Supervise the tap connection: connect, run until the socket drops, then
