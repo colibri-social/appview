@@ -26,6 +26,7 @@ const MESSAGE_NSID: &str = "social.colibri.message";
 const CHANNEL_NSID: &str = "social.colibri.channel";
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const DEFAULT_LIMIT: u64 = 100;
+const MAX_LIMIT: u64 = 100;
 
 /// A file attached to a message.
 #[derive(Serialize, Deserialize, Debug)]
@@ -571,7 +572,7 @@ async fn list_messages_with(
         }),
     })?;
 
-    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let page = assemble_fn(db, channel, effective_limit, cursor, include_hidden).await?;
     Ok(Json(message_list_from_page(
         page,
@@ -664,7 +665,7 @@ pub async fn build_message_list(
             message: String::from("Invalid channel AT-URI."),
         }),
     })?;
-    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let page = assemble_message_page(db, &channel, effective_limit, cursor, include_hidden).await?;
     Ok(message_list_from_page(page, channel_uri, effective_limit))
 }
@@ -732,6 +733,39 @@ mod tests {
             data,
             indexed_at: String::from("2026-05-26T00:00:00.000Z"),
         }
+    }
+
+    #[tokio::test]
+    async fn clamps_caller_supplied_limit_to_max() {
+        let db = mock_db();
+
+        list_messages_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
+            Some(999_999),
+            None,
+            false,
+            db,
+            &|_, _, limit, _, _| {
+                Box::pin(async move {
+                    assert_eq!(limit, MAX_LIMIT);
+                    Ok(MessagePage {
+                        records: vec![],
+                        community_uri: String::from(
+                            "at://did:plc:owner/social.colibri.community/c1",
+                        ),
+                        parent_records: HashMap::new(),
+                        reactions: HashMap::new(),
+                        author_profiles: HashMap::new(),
+                        author_colibri_profiles: HashMap::new(),
+                        author_actor_data: HashMap::new(),
+                        author_states: HashMap::new(),
+                        author_handles: HashMap::new(),
+                    })
+                })
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

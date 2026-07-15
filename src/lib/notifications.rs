@@ -21,6 +21,7 @@ pub const FACET_ROLE_TYPE: &str = "social.colibri.richtext.facet#role";
 const MEMBER_NSID: &str = "social.colibri.member";
 const ROLE_NSID: &str = "social.colibri.role";
 const CHANNEL_NSID: &str = "social.colibri.channel";
+const MAX_UNSEEN_LIMIT: u64 = 500;
 
 /// Whether `channel_uri` is a well-formed `at://` channel URI that resolves
 /// to a real, indexed channel record. Fabricated/malformed channel values
@@ -565,6 +566,7 @@ pub async fn list_unseen_for_channel(
         .filter(notifications::Column::ChannelUri.eq(channel_uri))
         .filter(notifications::Column::SeenAt.is_null())
         .order_by_desc(notifications::Column::Id)
+        .limit(MAX_UNSEEN_LIMIT)
         .all(db)
         .await
 }
@@ -823,5 +825,22 @@ mod tests {
             .await
             .unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_unseen_for_channel_caps_the_query_limit() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<notifications::Model>::new()])
+            .into_connection();
+        list_unseen_for_channel(
+            &db,
+            "did:plc:me",
+            "at://did:plc:owner/social.colibri.channel/c",
+        )
+        .await
+        .unwrap();
+        let log = db.into_transaction_log();
+        let stmt = format!("{:?}", log[0]);
+        assert!(stmt.contains(&MAX_UNSEEN_LIMIT.to_string()));
     }
 }

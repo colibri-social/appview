@@ -12,6 +12,7 @@ use crate::lib::responses::ErrorResponse;
 use crate::models::notifications as notifications_model;
 
 const DEFAULT_LIMIT: u64 = 50;
+const MAX_LIMIT: u64 = 100;
 
 #[derive(Serialize, Debug)]
 pub struct ListNotificationsResponse {
@@ -50,7 +51,7 @@ async fn list_notifications_with(
         db,
         verify_auth_fn,
         |caller_did, db| async move {
-            let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+            let effective_limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
             let rows = fetch_fn(db.clone(), caller_did, effective_limit, cursor).await?;
 
             let next_cursor = if (rows.len() as u64) == effective_limit {
@@ -181,6 +182,27 @@ mod tests {
         );
         assert_eq!(result.notifications[1].kind, "reply");
         assert_eq!(result.cursor.as_deref(), Some("10"));
+    }
+
+    #[tokio::test]
+    async fn clamps_caller_supplied_limit_to_max() {
+        let db = mock_db();
+        list_notifications_with(
+            String::from("token"),
+            Some(999_999),
+            None,
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, limit, _| {
+                Box::pin(async move {
+                    assert_eq!(limit, MAX_LIMIT);
+                    Ok(vec![])
+                })
+            },
+            &|_, _| Box::pin(async { Ok(HashMap::new()) }),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
