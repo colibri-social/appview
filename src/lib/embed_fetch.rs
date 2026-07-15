@@ -5,10 +5,10 @@
 //! internal/private addresses on a caller's behalf.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use reqwest::{Client, Url, redirect::Policy};
+use reqwest::{Client, Response, Url, redirect::Policy};
 use scraper::{Html, Selector};
 use serde::Serialize;
 
@@ -78,6 +78,8 @@ impl std::fmt::Display for FetchError {
     }
 }
 
+impl std::error::Error for FetchError {}
+
 /// A fully-read upstream response, body capped at the caller's limit.
 pub struct FetchedResource {
     /// The final URL after following redirects — used to resolve relative URLs.
@@ -117,9 +119,9 @@ pub fn is_blocked_ip(ip: &IpAddr) -> bool {
 }
 
 /// Resolves `url`'s host and rejects it if every/any resolved address is a
-/// blocked (private/loopback/etc.) IP. Rejecting when *any* resolved address is
-/// blocked is the conservative choice and frustrates DNS-rebinding tricks.
-async fn assert_host_allowed(url: &Url) -> Result<(), FetchError> {
+/// blocked (private/loopback/etc.) IP, or if the port isn't the scheme's
+/// default
+async fn assert_host_allowed(url: &Url) -> Result<Vec<SocketAddr>, FetchError> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(FetchError::InvalidUrl(format!(
             "unsupported scheme '{}'",
@@ -131,52 +133,61 @@ async fn assert_host_allowed(url: &Url) -> Result<(), FetchError> {
         .host_str()
         .ok_or_else(|| FetchError::InvalidUrl("missing host".into()))?;
     let port = url.port_or_known_default().unwrap_or(80);
+    let default_port = if url.scheme() == "https" { 443 } else { 80 };
+    if port != default_port {
+        return Err(FetchError::InvalidUrl(format!(
+            "non-default port '{port}' not allowed"
+        )));
+    }
 
-    // A bare IP literal never hits DNS — check it directly.
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_blocked_ip(&ip) {
             return Err(FetchError::Blocked(host.to_string()));
         }
-        return Ok(());
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
-    let mut addrs = rocket::tokio::net::lookup_host((host, port))
+    let addrs: Vec<SocketAddr> = rocket::tokio::net::lookup_host((host, port))
         .await
         .map_err(|e| FetchError::Upstream(format!("dns lookup failed: {e}")))?
-        .peekable();
+        .collect();
 
-    if addrs.peek().is_none() {
+    if addrs.is_empty() {
         return Err(FetchError::Upstream(format!("no addresses for {host}")));
     }
 
-    for addr in addrs {
+    for addr in &addrs {
         if is_blocked_ip(&addr.ip()) {
             return Err(FetchError::Blocked(format!("{host} -> {}", addr.ip())));
         }
     }
 
-    Ok(())
+    Ok(addrs)
 }
 
-/// SSRF-safe GET: validates the host (and every redirect target) against the
-/// private-address blocklist, follows up to [`MAX_REDIRECTS`] redirects
-/// manually, and reads at most `max_bytes` of the body.
-pub async fn validate_and_fetch(
-    raw_url: &str,
-    max_bytes: usize,
-) -> Result<FetchedResource, FetchError> {
-    let mut current = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
-
-    // Redirects are handled by hand so each hop can be re-validated.
-    let client = Client::builder()
+fn pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<Client, FetchError> {
+    Client::builder()
         .timeout(FETCH_TIMEOUT)
         .redirect(Policy::none())
         .user_agent(USER_AGENT)
+        .resolve_to_addrs(host, addrs)
         .build()
-        .map_err(|e| FetchError::Upstream(e.to_string()))?;
+        .map_err(|e| FetchError::Upstream(e.to_string()))
+}
+
+/// SSRF-safe GET: validates the host (and every redirect target) against the
+/// private-address blocklist, pins each hop's connection to the exact
+/// addresses just validated, and follows up to [`MAX_REDIRECTS`] redirects
+pub async fn guarded_get(raw_url: &str) -> Result<Response, FetchError> {
+    let mut current = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
 
     for _ in 0..=MAX_REDIRECTS {
-        assert_host_allowed(&current).await?;
+        let addrs = assert_host_allowed(&current).await?;
+        let host = current
+            .host_str()
+            .ok_or_else(|| FetchError::InvalidUrl("missing host".into()))?
+            .to_string();
+        let client = pinned_client(&host, &addrs)?;
 
         let resp = client
             .get(current.clone())
@@ -184,54 +195,65 @@ pub async fn validate_and_fetch(
             .await
             .map_err(|e| FetchError::Upstream(e.to_string()))?;
 
-        let status = resp.status();
-        if status.is_redirection() {
+        if resp.status().is_redirection() {
             let location = resp
                 .headers()
                 .get(reqwest::header::LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| FetchError::Upstream("redirect without location".into()))?;
+                .ok_or_else(|| FetchError::Upstream("redirect without location".into()))?
+                .to_string();
             current = current
-                .join(location)
+                .join(&location)
                 .map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
             continue;
         }
 
-        if !status.is_success() {
-            return Err(FetchError::Upstream(format!("upstream returned {status}")));
-        }
-
-        let final_url = resp.url().clone();
-        let content_type = resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
-
-        // Read in chunks so an oversized body is abandoned early.
-        let mut resp = resp;
-        let mut bytes: Vec<u8> = Vec::new();
-        while let Some(chunk) = resp
-            .chunk()
-            .await
-            .map_err(|e| FetchError::Upstream(e.to_string()))?
-        {
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() > max_bytes {
-                bytes.truncate(max_bytes);
-                break;
-            }
-        }
-
-        return Ok(FetchedResource {
-            final_url,
-            content_type,
-            bytes,
-        });
+        return Ok(resp);
     }
 
     Err(FetchError::TooManyRedirects)
+}
+
+/// SSRF-safe GET that also caps and fully reads the body, see [`guarded_get`]
+/// for the fetch/redirect handling
+pub async fn validate_and_fetch(
+    raw_url: &str,
+    max_bytes: usize,
+) -> Result<FetchedResource, FetchError> {
+    let resp = guarded_get(raw_url).await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(FetchError::Upstream(format!("upstream returned {status}")));
+    }
+
+    let final_url = resp.url().clone();
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let mut resp = resp;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FetchError::Upstream(e.to_string()))?
+    {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > max_bytes {
+            bytes.truncate(max_bytes);
+            break;
+        }
+    }
+
+    Ok(FetchedResource {
+        final_url,
+        content_type,
+        bytes,
+    })
 }
 
 /// Parses OpenGraph / Twitter-card / standard meta tags out of an HTML document.
@@ -358,6 +380,22 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, FetchError::Blocked(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_non_default_port() {
+        let err = assert_host_allowed(&Url::parse("http://1.1.1.1:8080/").unwrap())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FetchError::InvalidUrl(_)));
+    }
+
+    #[tokio::test]
+    async fn allows_default_port_and_returns_validated_addr() {
+        let addrs = assert_host_allowed(&Url::parse("http://1.1.1.1/").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(addrs, vec![SocketAddr::new("1.1.1.1".parse().unwrap(), 80)]);
     }
 
     #[test]

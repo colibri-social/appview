@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::lib::did_document::DidDocument;
+use crate::lib::embed_fetch;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ServiceAuthClaims {
@@ -217,8 +218,9 @@ async fn resolve_did_key_bytes(did: &str) -> Result<Vec<u8>, ServiceAuthError> {
         )));
     };
 
-    let doc: DidDocument = reqwest::get(&did_doc_url)
-        .await?
+    let doc: DidDocument = embed_fetch::guarded_get(&did_doc_url)
+        .await
+        .map_err(|e| ServiceAuthError::DidResolution(e.to_string()))?
         .json()
         .await
         .map_err(|e| ServiceAuthError::DidResolution(e.to_string()))?;
