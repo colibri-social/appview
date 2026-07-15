@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use sea_orm::sea_query::ExprTrait;
 use sea_orm::{
-    ActiveValue, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, sea_query,
+    ActiveValue, ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, sea_query,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -539,18 +540,43 @@ pub async fn unseen_count(db: &DatabaseConnection, recipient_did: &str) -> Resul
         .await
 }
 
-/// Counts unseen notifications for a recipient within a single channel.
-pub async fn unseen_count_for_channel(
+#[derive(FromQueryResult)]
+struct ChannelUnseenCount {
+    channel_uri: String,
+    unseen_count: i64,
+}
+
+/// Counts unseen notifications for a recipient across several channels in one
+/// grouped query, in place of one round-trip per channel. Channels with zero
+/// unseen notifications are simply absent from the returned map.
+pub async fn unseen_counts_for_channels(
     db: &DatabaseConnection,
     recipient_did: &str,
-    channel_uri: &str,
-) -> Result<u64, DbErr> {
-    notifications::Entity::find()
+    channel_uris: &[String],
+) -> Result<HashMap<String, u64>, DbErr> {
+    if channel_uris.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = notifications::Entity::find()
+        .select_only()
+        .column(notifications::Column::ChannelUri)
+        .column_as(
+            sea_query::Expr::col(notifications::Column::Id).count(),
+            "unseen_count",
+        )
         .filter(notifications::Column::RecipientDid.eq(recipient_did))
-        .filter(notifications::Column::ChannelUri.eq(channel_uri))
+        .filter(notifications::Column::ChannelUri.is_in(channel_uris.to_vec()))
         .filter(notifications::Column::SeenAt.is_null())
-        .count(db)
-        .await
+        .group_by(notifications::Column::ChannelUri)
+        .into_model::<ChannelUnseenCount>()
+        .all(db)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.channel_uri, std::cmp::max(r.unseen_count, 0) as u64))
+        .collect())
 }
 
 /// Lists the unseen notifications for a recipient within a single channel,
@@ -842,5 +868,59 @@ mod tests {
         let log = db.into_transaction_log();
         let stmt = format!("{:?}", log[0]);
         assert!(stmt.contains(&MAX_UNSEEN_LIMIT.to_string()));
+    }
+
+    #[tokio::test]
+    async fn unseen_counts_for_channels_groups_by_channel() {
+        use std::collections::BTreeMap;
+
+        let rows: Vec<BTreeMap<&str, sea_orm::Value>> = vec![
+            BTreeMap::from([
+                (
+                    "channel_uri",
+                    sea_orm::Value::from("at://did:plc:owner/social.colibri.channel/a"),
+                ),
+                ("unseen_count", sea_orm::Value::from(3i64)),
+            ]),
+            BTreeMap::from([
+                (
+                    "channel_uri",
+                    sea_orm::Value::from("at://did:plc:owner/social.colibri.channel/b"),
+                ),
+                ("unseen_count", sea_orm::Value::from(1i64)),
+            ]),
+        ];
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([rows])
+            .into_connection();
+
+        let counts = unseen_counts_for_channels(
+            &db,
+            "did:plc:me",
+            &[
+                String::from("at://did:plc:owner/social.colibri.channel/a"),
+                String::from("at://did:plc:owner/social.colibri.channel/b"),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            counts.get("at://did:plc:owner/social.colibri.channel/a"),
+            Some(&3)
+        );
+        assert_eq!(
+            counts.get("at://did:plc:owner/social.colibri.channel/b"),
+            Some(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn unseen_counts_for_channels_returns_empty_map_for_no_channels() {
+        let db = crate::lib::test_fixtures::mock_db();
+        let counts = unseen_counts_for_channels(&db, "did:plc:me", &[])
+            .await
+            .unwrap();
+        assert!(counts.is_empty());
     }
 }
