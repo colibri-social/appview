@@ -1,7 +1,7 @@
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, get};
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect};
 use serde::Serialize;
 
 use crate::lib::responses::{ErrorBody, ErrorResponse};
@@ -9,6 +9,7 @@ use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::models::record_data;
 
 const MUTE_NSID: &str = "social.colibri.actor.mute";
+const MAX_MUTES: u64 = 1000;
 
 #[derive(Serialize, Debug)]
 pub struct Mute {
@@ -34,6 +35,7 @@ pub async fn fetch_mutes(
     record_data::Entity::find()
         .filter(record_data::Column::Did.eq(did))
         .filter(record_data::Column::Nsid.eq(MUTE_NSID))
+        .limit(MAX_MUTES)
         .all(db)
         .await
 }

@@ -6,6 +6,7 @@ use sea_orm::{
 use crate::models::record_data::{self, Entity as RecordData, Model};
 
 const DEFAULT_LIMIT: u64 = 100;
+const MAX_LIMIT: u64 = 100;
 
 pub struct PagedRecords<T> {
     pub records: Vec<T>,
@@ -26,7 +27,7 @@ pub async fn list_atproto_records<T: for<'de> serde::Deserialize<'de>>(
     reverse: Option<bool>,
     db: &DatabaseConnection,
 ) -> Result<PagedRecords<T>, DbErr> {
-    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT);
+    let effective_limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let ascending = reverse.is_some_and(|v| v);
 
     let mut condition = Condition::all()
@@ -175,6 +176,29 @@ mod tests {
         .unwrap();
 
         assert!(result.cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn clamps_caller_supplied_limit_to_max() {
+        let rows: Vec<_> = (0..100)
+            .map(|i| model(i, &format!("r{i:03}"), "x"))
+            .collect();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([rows])
+            .into_connection();
+
+        let result = list_atproto_records::<SampleRecord>(
+            String::from("did:plc:abc"),
+            String::from("social.colibri.message"),
+            Some(999_999),
+            None,
+            None,
+            &db,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.cursor.is_some());
     }
 
     #[tokio::test]
