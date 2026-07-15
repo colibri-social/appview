@@ -14,7 +14,11 @@ use serde_json::Value;
 use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, auth_error, forbidden, load_authz_boxed, verify_auth_boxed,
+};
 use crate::lib::moderation::community_moderation_state;
+use crate::lib::permissions::Permission;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::{record_data, repos, user_states};
@@ -557,12 +561,16 @@ type AssemblePageFn = dyn Fn(
     + Send
     + Sync;
 
+#[allow(clippy::too_many_arguments)]
 async fn list_messages_with(
     channel_uri: String,
     limit: Option<u64>,
     cursor: Option<String>,
     include_hidden: bool,
+    auth: Option<String>,
     db: DatabaseConnection,
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
     assemble_fn: &AssemblePageFn,
 ) -> Result<Json<MessageList>, ErrorResponse> {
     let channel = AtUri::parse(&channel_uri).ok_or_else(|| ErrorResponse {
@@ -571,6 +579,23 @@ async fn list_messages_with(
             message: String::from("Invalid channel AT-URI."),
         }),
     })?;
+
+    // Ordinary messages are public AT-Proto records, so this endpoint stays unauthenticated by default.
+    // Moderator-hidden messages are an AppView-only overlay, so `all=true`
+    // requires proof the caller actually holds the permission that hides them.
+    if include_hidden {
+        let caller_did = verify_auth_fn(
+            auth.unwrap_or_default(),
+            String::from("social.colibri.channel.listMessages"),
+        )
+        .await
+        .map_err(auth_error)?;
+        let community_uri = format!("at://{}/{COMMUNITY_NSID}/self", channel.authority);
+        let authz = load_authz_fn(db.clone(), community_uri, caller_did).await?;
+        if !authz.has(Permission::MessageDelete, None) {
+            return Err(forbidden(Permission::MessageDelete));
+        }
+    }
 
     let effective_limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let page = assemble_fn(db, channel, effective_limit, cursor, include_hidden).await?;
@@ -682,16 +707,18 @@ fn assemble_message_page_boxed(
     })
 }
 
-#[get("/xrpc/social.colibri.channel.listMessages?<channel>&<limit>&<cursor>&<all>")]
+#[get("/xrpc/social.colibri.channel.listMessages?<channel>&<limit>&<cursor>&<all>&<auth>")]
 /// Returns a paginated list of messages for a channel, newest first.
 ///
 /// Messages hidden by a `hideMessage` moderation action are filtered out by
-/// default. Passing `all=true` includes them (e.g. for moderator views).
+/// default. Passing `all=true` includes them (e.g. for moderator views); doing
+/// so requires `auth` for a caller holding the `message.hide` permission.
 pub async fn list_messages(
     channel: &str,
     limit: Option<u64>,
     cursor: Option<&str>,
     all: Option<bool>,
+    auth: Option<&str>,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<MessageList>, ErrorResponse> {
     list_messages_with(
@@ -699,7 +726,10 @@ pub async fn list_messages(
         limit,
         cursor.map(|c| c.to_string()),
         all.unwrap_or(false),
+        auth.map(|a| a.to_string()),
         db.inner().clone(),
+        &verify_auth_boxed,
+        &load_authz_boxed,
         &assemble_message_page_boxed,
     )
     .await
@@ -744,7 +774,10 @@ mod tests {
             Some(999_999),
             None,
             false,
+            None,
             db,
+            &|_, _| Box::pin(async { panic!("should not authenticate when all=false") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when all=false") }),
             &|_, _, limit, _, _| {
                 Box::pin(async move {
                     assert_eq!(limit, MAX_LIMIT);
@@ -777,7 +810,10 @@ mod tests {
             Some(2),
             None,
             false,
+            None,
             db,
+            &|_, _| Box::pin(async { panic!("should not authenticate when all=false") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when all=false") }),
             &|_, _, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
@@ -863,7 +899,10 @@ mod tests {
             Some(10),
             None,
             false,
+            None,
             db,
+            &|_, _| Box::pin(async { panic!("should not authenticate when all=false") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when all=false") }),
             &|_, _, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
@@ -999,7 +1038,10 @@ mod tests {
             None,
             None,
             false,
+            None,
             db,
+            &|_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when uri is invalid") }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not assemble when uri is invalid") }),
         )
         .await;
@@ -1009,5 +1051,89 @@ mod tests {
             result.err().unwrap().body.into_inner().error,
             "InvalidRequest"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_all_true_without_auth() {
+        let db = mock_db();
+        let result = list_messages_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
+            None,
+            None,
+            true,
+            None,
+            db,
+            &|auth, _| {
+                Box::pin(async move {
+                    if auth.is_empty() {
+                        Err(crate::lib::service_auth::ServiceAuthError::InvalidFormat)
+                    } else {
+                        Ok(String::from("did:plc:mod"))
+                    }
+                })
+            },
+            &|_, _, _| Box::pin(async { panic!("should not load authz without a token") }),
+            &|_, _, _, _, _| Box::pin(async { panic!("should not assemble without auth") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+    }
+
+    #[tokio::test]
+    async fn rejects_all_true_without_message_delete_permission() {
+        let db = mock_db();
+        let result = list_messages_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
+            None,
+            None,
+            true,
+            Some(String::from("token")),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_, _, _| Box::pin(async { Ok(crate::lib::test_fixtures::empty_authz()) }),
+            &|_, _, _, _, _| Box::pin(async { panic!("should not assemble without permission") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
+    }
+
+    #[tokio::test]
+    async fn allows_all_true_with_message_delete_permission() {
+        let db = mock_db();
+        let result = list_messages_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan-a"),
+            None,
+            None,
+            true,
+            Some(String::from("token")),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_, _, _| Box::pin(async { Ok(crate::lib::test_fixtures::owner_authz()) }),
+            &|_, _, _, _, include_hidden| {
+                assert!(include_hidden);
+                Box::pin(async {
+                    Ok(MessagePage {
+                        records: vec![],
+                        community_uri: String::from(
+                            "at://did:plc:owner/social.colibri.community/c1",
+                        ),
+                        parent_records: HashMap::new(),
+                        reactions: HashMap::new(),
+                        author_profiles: HashMap::new(),
+                        author_colibri_profiles: HashMap::new(),
+                        author_actor_data: HashMap::new(),
+                        author_states: HashMap::new(),
+                        author_handles: HashMap::new(),
+                    })
+                })
+            },
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 }
