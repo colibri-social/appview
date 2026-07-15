@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/colibri-social/appview/compare/v0.1.2...v0.1.3) - 2026-07-15
+
+### Fixed
+
+- Backfill members from membership records ([#40](https://github.com/colibri-social/appview/pull/40))
+- Backfill members from membership records ([#39](https://github.com/colibri-social/appview/pull/39))
+
 ## [0.1.2](https://github.com/colibri-social/appview/compare/v0.1.1...v0.1.2) - 2026-07-15
 
 ### Added
