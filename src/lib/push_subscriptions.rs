@@ -8,15 +8,23 @@
 //! out to every device the recipient has registered.
 
 use sea_orm::{
-    ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, sea_query,
+    ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
+    sea_query,
 };
 
 use crate::lib::time::current_iso8601_utc;
 use crate::models::push_subscriptions;
 
-/// Stores (or refreshes) a push subscription. Idempotent on `endpoint`: a
-/// repeat registration updates the keys, platform, and owning actor and leaves
-/// `created_at` untouched.
+/// Hard ceiling on how many push subscriptions a single actor may register.
+/// Generous enough to cover every device/browser someone reasonably owns,
+/// while bounding the per-notification fan-out (and outbound-request
+/// amplification) a single account can cause.
+pub const MAX_SUBSCRIPTIONS_PER_ACTOR: u64 = 25;
+
+/// Stores (or refreshes) a push subscription. Idempotent on `(actor_did,
+/// endpoint)`: a repeat registration updates the keys/platform and leaves
+/// `created_at` untouched. Rejects a genuinely new endpoint once the actor
+/// already has [`MAX_SUBSCRIPTIONS_PER_ACTOR`] registered.
 pub async fn upsert(
     db: &DatabaseConnection,
     actor_did: &str,
@@ -25,6 +33,25 @@ pub async fn upsert(
     auth: &str,
     platform: &str,
 ) -> Result<(), DbErr> {
+    let already_registered = push_subscriptions::Entity::find()
+        .filter(push_subscriptions::Column::ActorDid.eq(actor_did))
+        .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
+        .one(db)
+        .await?
+        .is_some();
+
+    if !already_registered {
+        let count = push_subscriptions::Entity::find()
+            .filter(push_subscriptions::Column::ActorDid.eq(actor_did))
+            .count(db)
+            .await?;
+        if count >= MAX_SUBSCRIPTIONS_PER_ACTOR {
+            return Err(DbErr::Custom(format!(
+                "actor already has the maximum of {MAX_SUBSCRIPTIONS_PER_ACTOR} push subscriptions"
+            )));
+        }
+    }
+
     let active = push_subscriptions::ActiveModel {
         actor_did: ActiveValue::Set(actor_did.to_string()),
         endpoint: ActiveValue::Set(endpoint.to_string()),
@@ -37,25 +64,43 @@ pub async fn upsert(
 
     push_subscriptions::Entity::insert(active)
         .on_conflict(
-            sea_query::OnConflict::column(push_subscriptions::Column::Endpoint)
-                .update_columns([
-                    push_subscriptions::Column::ActorDid,
-                    push_subscriptions::Column::P256dh,
-                    push_subscriptions::Column::Auth,
-                    push_subscriptions::Column::Platform,
-                ])
-                .to_owned(),
+            sea_query::OnConflict::columns([
+                push_subscriptions::Column::ActorDid,
+                push_subscriptions::Column::Endpoint,
+            ])
+            .update_columns([
+                push_subscriptions::Column::P256dh,
+                push_subscriptions::Column::Auth,
+                push_subscriptions::Column::Platform,
+            ])
+            .to_owned(),
         )
         .exec(db)
         .await?;
     Ok(())
 }
 
-/// Drops a subscription by its endpoint. Idempotent — removing an endpoint that
-/// isn't stored is a no-op. Used both by `unregisterPush` and to prune
-/// subscriptions the push service reports as gone (HTTP 404/410).
+/// Drops a subscription by its endpoint, regardless of owner. Used to prune
+/// subscriptions the push service reports as gone (HTTP 404/410) — the
+/// caller there isn't a user request, so there's no actor to scope to.
 pub async fn delete_by_endpoint(db: &DatabaseConnection, endpoint: &str) -> Result<(), DbErr> {
     push_subscriptions::Entity::delete_many()
+        .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Drops a subscription by its endpoint, scoped to its owning actor —
+/// used by `unregisterPush` so a caller can only ever remove their own
+/// subscriptions, never one they merely learned the endpoint of.
+pub async fn delete_by_endpoint_for_actor(
+    db: &DatabaseConnection,
+    actor_did: &str,
+    endpoint: &str,
+) -> Result<(), DbErr> {
+    push_subscriptions::Entity::delete_many()
+        .filter(push_subscriptions::Column::ActorDid.eq(actor_did))
         .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
         .exec(db)
         .await?;

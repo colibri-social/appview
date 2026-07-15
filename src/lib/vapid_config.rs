@@ -52,7 +52,22 @@ pub fn vapid_config() -> Option<&'static VapidConfig> {
     VAPID.get_or_init(load_from_env).as_ref()
 }
 
-/// True when a VAPID keypair is configured (i.e. Web Push delivery is enabled).
-pub fn is_configured() -> bool {
-    vapid_config().is_some()
+/// Parses `private_key` as a VAPID (ES256) signing key, without needing a
+/// subscription to sign for. Called at boot so a malformed
+/// `VAPID_PRIVATE_KEY` fails fast instead of silently failing every push
+/// later.
+pub fn validate_private_key(private_key: &str) -> Result<(), String> {
+    web_push::VapidSignatureBuilder::from_base64_no_sub(private_key)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_private_key_rejects_malformed_key() {
+        assert!(validate_private_key("not-a-valid-key").is_err());
+    }
 }

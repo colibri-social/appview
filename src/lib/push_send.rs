@@ -191,18 +191,19 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
         }
     };
 
-    let client = reqwest::Client::new();
     for sub in subscriptions {
-        if let Err(e) = send_one(&client, &db, &sub, &body).await {
+        if let Err(e) = send_one(&db, &sub, &body).await {
             log::warn!("push: delivery to {} failed: {e}", sub.endpoint);
         }
     }
 }
 
 /// Builds the encrypted/signed request for a single subscription and sends it.
-/// On a `404`/`410` from the push service the subscription is pruned.
+/// On a `404`/`410` from the push service the subscription is pruned. The
+/// outbound request is validated and pinned the same way `embed_fetch` guards
+/// other outbound fetches — the endpoint is caller-supplied at registration
+/// time, so it's treated as untrusted here too.
 async fn send_one(
-    client: &reqwest::Client,
     db: &DatabaseConnection,
     sub: &crate::models::push_subscriptions::Model,
     body: &[u8],
@@ -231,8 +232,12 @@ async fn send_one(
         ContentEncoding::AesGcm => "aesgcm",
     };
 
+    let (client, url) = crate::lib::embed_fetch::guarded_client_for(&message.endpoint.to_string())
+        .await
+        .map_err(|e| format!("endpoint validation: {e}"))?;
+
     let mut req = client
-        .post(message.endpoint.to_string())
+        .post(url)
         .header("TTL", message.ttl.to_string())
         .header("Content-Encoding", content_encoding);
     for (name, value) in &payload.crypto_headers {

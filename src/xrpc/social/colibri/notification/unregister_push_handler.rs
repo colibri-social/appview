@@ -18,8 +18,9 @@ pub struct UnregisterPushResponse {
     pub unregistered: bool,
 }
 
-type UnregisterFn =
-    dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<(), DbErr>> + Send + Sync;
+type UnregisterFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<(), DbErr>>
+    + Send
+    + Sync;
 
 async fn unregister_push_with(
     auth: String,
@@ -33,8 +34,8 @@ async fn unregister_push_with(
         "social.colibri.notification.unregisterPush",
         db,
         verify_auth_fn,
-        |_caller_did, db| async move {
-            unregister_fn(db, endpoint).await?;
+        |caller_did, db| async move {
+            unregister_fn(db, caller_did, endpoint).await?;
             Ok(Json(UnregisterPushResponse { unregistered: true }))
         },
     )
@@ -43,9 +44,12 @@ async fn unregister_push_with(
 
 fn unregister_boxed(
     db: DatabaseConnection,
+    caller_did: String,
     endpoint: String,
 ) -> BoxFuture<'static, Result<(), DbErr>> {
-    Box::pin(async move { push_subscriptions::delete_by_endpoint(&db, &endpoint).await })
+    Box::pin(async move {
+        push_subscriptions::delete_by_endpoint_for_actor(&db, &caller_did, &endpoint).await
+    })
 }
 
 #[post(
@@ -80,15 +84,16 @@ mod tests {
     #[tokio::test]
     async fn unregisters_for_authenticated_caller() {
         let db = mock_db();
-        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
         let unregister = move |_: DatabaseConnection,
+                               caller_did: String,
                                endpoint: String|
               -> BoxFuture<'static, Result<(), DbErr>> {
             let captured = captured_clone.clone();
             Box::pin(async move {
-                *captured.lock().unwrap() = Some(endpoint);
+                *captured.lock().unwrap() = Some((caller_did, endpoint));
                 Ok(())
             })
         };
@@ -104,10 +109,9 @@ mod tests {
         .unwrap();
 
         assert!(result.unregistered);
-        assert_eq!(
-            captured.lock().unwrap().take().unwrap(),
-            "https://push.example/abc"
-        );
+        let (caller_did, endpoint) = captured.lock().unwrap().take().unwrap();
+        assert_eq!(caller_did, "did:plc:me");
+        assert_eq!(endpoint, "https://push.example/abc");
     }
 
     #[tokio::test]
@@ -118,7 +122,7 @@ mod tests {
             String::from("https://push.example/abc"),
             db,
             &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            &|_, _| Box::pin(async { panic!("should not unregister when auth fails") }),
+            &|_, _, _| Box::pin(async { panic!("should not unregister when auth fails") }),
         )
         .await;
 

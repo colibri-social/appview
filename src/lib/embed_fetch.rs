@@ -214,6 +214,29 @@ pub async fn guarded_get(raw_url: &str) -> Result<Response, FetchError> {
     Err(FetchError::TooManyRedirects)
 }
 
+/// Validates `raw_url` against the same scheme/port/blocklist rules as
+/// [`guarded_get`] without connecting — for validating a URL a caller wants
+/// to store (e.g. a Web Push endpoint) before it's ever fetched.
+pub async fn assert_url_allowed(raw_url: &str) -> Result<(), FetchError> {
+    let url = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
+    assert_host_allowed(&url).await?;
+    Ok(())
+}
+
+/// Validates and pins a client for a single request to `raw_url`, for callers
+/// that need something other than a plain GET (e.g. a POST with a custom
+/// body) — no redirects are followed. See [`guarded_get`] for the
+/// validation/pinning semantics.
+pub async fn guarded_client_for(raw_url: &str) -> Result<(Client, Url), FetchError> {
+    let url = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
+    let addrs = assert_host_allowed(&url).await?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| FetchError::InvalidUrl("missing host".into()))?;
+    let client = pinned_client(host, &addrs)?;
+    Ok((client, url))
+}
+
 /// SSRF-safe GET that also caps and fully reads the body, see [`guarded_get`]
 /// for the fetch/redirect handling
 pub async fn validate_and_fetch(
