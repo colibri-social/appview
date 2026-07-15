@@ -33,9 +33,10 @@ async fn update_seen_with(
         |caller_did, db| async move {
             // The cutoff defaults to "now" — anything indexed at or before
             // this point counts as "seen". Lets clients catch up without a
-            // timestamp round-trip.
-            let cutoff = seen_at_input.clone().unwrap_or_else(current_iso8601_utc);
+            // timestamp round-trip. Computed once so cutoff and seen_at are
+            // identical rather than two separate (possibly differing) "now"s.
             let seen_at = seen_at_input.unwrap_or_else(current_iso8601_utc);
+            let cutoff = seen_at.clone();
 
             let updated = mark_seen_fn(db, caller_did, seen_at, cutoff).await?;
             Ok(Json(UpdateSeenResponse { updated }))
