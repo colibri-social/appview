@@ -1,5 +1,6 @@
 use crate::EventNotification;
 use crate::lib::at_uri::AtUri;
+use crate::lib::community_authz::load_actor_authz;
 use crate::lib::event_scope::{EventScope, SharedScopedEvent};
 use crate::lib::events::{
     ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent, NotificationEventData,
@@ -9,6 +10,7 @@ use crate::lib::events::{
 use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
+use crate::lib::permissions::Permission;
 use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, set_vc_state, view_channel};
 use crate::lib::tap::CommsBridge;
 use crate::lib::voice_events::{broadcast_voice_presence, broadcast_voice_state};
@@ -409,35 +411,41 @@ async fn handle_notification_msg(
     }
 }
 
-/// The community DID an `application_event` targets, parsed from its
-/// `ApplicationEventData.community` AT-URI. `None` for non-application events
-/// or a malformed URI.
-fn application_community_did(event: &ColibriServerEvent) -> Option<String> {
+/// The community AT-URI an `application_event` targets, taken directly from
+/// its `ApplicationEventData.community` field. `None` for non-application
+/// events.
+fn application_community_uri(event: &ColibriServerEvent) -> Option<&str> {
     match &event.data {
-        Some(ColibriServerEventData::Application(data)) => {
-            AtUri::parse(&data.community).map(|uri| uri.authority)
-        }
+        Some(ColibriServerEventData::Application(data)) => Some(data.community.as_str()),
         _ => None,
     }
 }
 
 /// Forwards a handler-originated `application_event` (see
-/// `CommsBridge::applications`) to this connection iff the user is a member of
-/// the target community. A moderator is always a member, so member-scoping is a
-/// safe superset of the moderators who can act on the application — and it
-/// keeps pending-application traffic off connections in other communities.
+/// `CommsBridge::applications`) to this connection iff the connected user
+/// holds `Permission::ApprovalManage` in the target community — the same
+/// permission the REST equivalent (`listApplications`) requires, since
+/// pending-applicant DID/handle/profile data is moderator-only information.
+/// Community membership alone is *not* sufficient: an ordinary member is not
+/// necessarily a moderator.
 async fn handle_application_msg(
     ws_sink: &mut WsSink,
     msg: Result<ColibriServerEvent, RecvError>,
-    communities: &HashSet<String>,
+    db: &DatabaseConnection,
+    did: &str,
 ) -> bool {
     match msg {
         Ok(event) => {
-            match application_community_did(&event) {
-                Some(community_did) if communities.contains(&community_did) => {
-                    let _ = ws_sink.send(WsMessage::Text(event.serialize())).await;
-                }
-                Some(_) => {} // application for a community this user isn't in
+            match application_community_uri(&event) {
+                Some(community_uri) => match load_actor_authz(db, community_uri, did).await {
+                    Ok(authz) if authz.has(Permission::ApprovalManage, None) => {
+                        let _ = ws_sink.send(WsMessage::Text(event.serialize())).await;
+                    }
+                    Ok(_) => {} // caller lacks approval.manage in this community
+                    Err(e) => {
+                        log::error!("failed to load authz for application_event: {e}");
+                    }
+                },
                 None => {
                     log::warn!("dropping application_event with unparseable community");
                 }
@@ -610,7 +618,7 @@ async fn run_event_loop(
             msg = ws_source.next() => handle_client_message(&mut ws_sink, msg, did.clone(), &to_c2c_broadcast, &to_tap_broadcast, &hum_outbox, &db).await,
             msg = from_c2c_broadcast.recv() => handle_client_broadcast_msg(&mut ws_sink, msg, did.clone(), &db).await,
             msg = from_notifications.recv() => handle_notification_msg(&mut ws_sink, msg, &did).await,
-            msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg, &communities).await,
+            msg = from_applications.recv() => handle_application_msg(&mut ws_sink, msg, &db, &did).await,
             msg = from_seen.recv() => handle_seen_msg(&mut ws_sink, msg, &did).await,
             msg = from_mute.recv() => handle_mute_msg(&mut ws_sink, msg, &did).await,
             msg = from_progress.recv() => handle_progress_msg(&mut ws_sink, msg, &did).await,
@@ -766,7 +774,7 @@ pub async fn subscribe_events(
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTH_SUBPROTOCOL, application_community_did, parse_auth_subprotocol, parse_client_event,
+        AUTH_SUBPROTOCOL, application_community_uri, parse_auth_subprotocol, parse_client_event,
         scope_matches, serialize_typing_broadcast,
     };
     use crate::EventNotification;
@@ -848,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn application_community_did_extracts_authority() {
+    fn application_community_uri_extracts_community() {
         let event = ColibriServerEvent {
             event_type: String::from("application_event"),
             data: Some(ColibriServerEventData::Application(ApplicationEventData {
@@ -862,8 +870,8 @@ mod tests {
             })),
         };
         assert_eq!(
-            application_community_did(&event),
-            Some(String::from("did:plc:owner"))
+            application_community_uri(&event),
+            Some("at://did:plc:owner/social.colibri.community/self")
         );
     }
 
