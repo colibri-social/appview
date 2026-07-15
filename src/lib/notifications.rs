@@ -20,6 +20,30 @@ pub const FACET_MENTION_TYPE: &str = "social.colibri.richtext.facet#mention";
 pub const FACET_ROLE_TYPE: &str = "social.colibri.richtext.facet#role";
 const MEMBER_NSID: &str = "social.colibri.member";
 const ROLE_NSID: &str = "social.colibri.role";
+const CHANNEL_NSID: &str = "social.colibri.channel";
+
+/// Whether `channel_uri` is a well-formed `at://` channel URI that resolves
+/// to a real, indexed channel record. Fabricated/malformed channel values
+/// must not reach the notifications table: read paths already filter for
+/// the `at://` shape, and push delivery's mute matching silently no-ops for
+/// anything that doesn't parse, letting such a value bypass a community mute.
+async fn channel_exists(db: &DatabaseConnection, channel_uri: &str) -> bool {
+    let Some(parsed) = AtUri::parse(channel_uri) else {
+        return false;
+    };
+    if parsed.collection != CHANNEL_NSID {
+        return false;
+    }
+    matches!(
+        record_data::Entity::find()
+            .filter(record_data::Column::Did.eq(&parsed.authority))
+            .filter(record_data::Column::Nsid.eq(CHANNEL_NSID))
+            .filter(record_data::Column::Rkey.eq(&parsed.rkey))
+            .one(db)
+            .await,
+        Ok(Some(_))
+    )
+}
 
 /// Bundle carried over the WS-broadcast channel so each subscriber can render
 /// a notification without having to fetch the message body separately.
@@ -307,6 +331,14 @@ pub async fn index_message_notifications(
     message_uri: &str,
     message: &ColibriMessage,
 ) -> Result<Vec<IndexedNotification>, DbErr> {
+    if !channel_exists(db, &message.channel).await {
+        log::warn!(
+            "skipping notifications for {message_uri}: channel {} is malformed or unknown",
+            message.channel
+        );
+        return Ok(Vec::new());
+    }
+
     // (recipient DID, kind, mention role name). The role name is only set for
     // role mentions; direct mentions and replies leave it `None`.
     let mut recipients: Vec<(String, &'static str, Option<String>)> = Vec::new();
@@ -601,6 +633,8 @@ pub async fn mark_seen_up_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
     use serde_json::json;
 
     fn message_with_facets(facets: Value, parent: Option<&str>) -> ColibriMessage {
@@ -719,5 +753,75 @@ mod tests {
         let msg = message_with_facets(json!([]), Some("parent"));
         assert_eq!(msg.channel, "chan-a");
         assert_eq!(msg.parent.as_deref(), Some("parent"));
+    }
+
+    fn message_with_channel(channel: &str) -> ColibriMessage {
+        ColibriMessage {
+            r#type: "social.colibri.message".to_string(),
+            text: "hello".to_string(),
+            facets: None,
+            created_at: "2026-05-14T00:00:00Z".to_string(),
+            channel: channel.to_string(),
+            edited: None,
+            parent: None,
+            attachments: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_exists_rejects_bare_rkey() {
+        let db = crate::lib::test_fixtures::mock_db();
+        assert!(!channel_exists(&db, "chan-a").await);
+    }
+
+    #[tokio::test]
+    async fn channel_exists_rejects_wrong_collection() {
+        let db = crate::lib::test_fixtures::mock_db();
+        assert!(!channel_exists(&db, "at://did:plc:owner/social.colibri.role/chan-a").await);
+    }
+
+    #[tokio::test]
+    async fn channel_exists_rejects_unknown_channel() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .into_connection();
+        assert!(!channel_exists(&db, "at://did:plc:owner/social.colibri.channel/chan-a").await);
+    }
+
+    #[tokio::test]
+    async fn channel_exists_accepts_known_channel() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 1,
+                did: String::from("did:plc:owner"),
+                nsid: String::from(CHANNEL_NSID),
+                rkey: String::from("chan-a"),
+                data: json!({}),
+                indexed_at: String::new(),
+            }]])
+            .into_connection();
+        assert!(channel_exists(&db, "at://did:plc:owner/social.colibri.channel/chan-a").await);
+    }
+
+    #[tokio::test]
+    async fn index_message_notifications_skips_malformed_channel() {
+        let db = crate::lib::test_fixtures::mock_db();
+        let message = message_with_channel("chan-a");
+        let rows = index_message_notifications(&db, "did:plc:author", "at://msg", &message)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn index_message_notifications_skips_unknown_channel() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .into_connection();
+        let message = message_with_channel("at://did:plc:owner/social.colibri.channel/chan-a");
+        let rows = index_message_notifications(&db, "did:plc:author", "at://msg", &message)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
     }
 }

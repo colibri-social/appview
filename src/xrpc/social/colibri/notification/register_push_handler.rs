@@ -4,9 +4,10 @@ use rocket::{State, post};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::{Deserialize, Serialize};
 
+use crate::lib::embed_fetch;
 use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::push_subscriptions;
-use crate::lib::responses::ErrorResponse;
+use crate::lib::responses::{ErrorBody, ErrorResponse};
 
 /// Web Push subscription keys, as produced by the browser `PushSubscription`.
 #[derive(Deserialize, Clone, Debug)]
@@ -45,6 +46,14 @@ async fn register_push_with(
         db,
         verify_auth_fn,
         |caller_did, db| async move {
+            embed_fetch::assert_url_allowed(&input.endpoint)
+                .await
+                .map_err(|e| ErrorResponse {
+                    body: Json(ErrorBody {
+                        error: String::from("InvalidRequest"),
+                        message: format!("Invalid push endpoint: {e}"),
+                    }),
+                })?;
             register_fn(db, caller_did, input).await?;
             Ok(Json(RegisterPushResponse { registered: true }))
         },
@@ -102,7 +111,7 @@ mod tests {
     fn sample_input() -> RegisterPushInput {
         RegisterPushInput {
             platform: String::from("web"),
-            endpoint: String::from("https://push.example/abc"),
+            endpoint: String::from("https://1.1.1.1/abc"),
             keys: PushKeys {
                 p256dh: String::from("p256dh-key"),
                 auth: String::from("auth-key"),
@@ -140,8 +149,30 @@ mod tests {
         assert!(result.registered);
         let (did, endpoint, p256dh) = captured.lock().unwrap().take().unwrap();
         assert_eq!(did, "did:plc:me");
-        assert_eq!(endpoint, "https://push.example/abc");
+        assert_eq!(endpoint, "https://1.1.1.1/abc");
         assert_eq!(p256dh, "p256dh-key");
+    }
+
+    #[tokio::test]
+    async fn rejects_endpoint_pointing_at_private_ip() {
+        let db = mock_db();
+        let mut input = sample_input();
+        input.endpoint = String::from("http://127.0.0.1/abc");
+
+        let result = register_push_with(
+            String::from("token"),
+            input,
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, _| Box::pin(async { panic!("should not register a blocked endpoint") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "InvalidRequest"
+        );
     }
 
     #[tokio::test]

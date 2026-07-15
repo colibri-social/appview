@@ -666,6 +666,12 @@ fn shard_for(did: &str, collection: &str, rkey: &str, worker_count: usize) -> us
 ///
 /// Returns whether the event was acked (see [`ack_tap_msg`]): `true` when it's
 /// genuinely done, `false` when a persist failure left it for tap to redeliver.
+fn channel_rkey(channel: &str) -> String {
+    AtUri::parse(channel)
+        .map(|u| u.rkey)
+        .unwrap_or_else(|| channel.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_event(
     record: TapMessageRecord,
@@ -708,12 +714,17 @@ async fn process_event(
         && record.action != "delete"
         && let Some(payload) = record.record.as_ref()
         && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload.clone())
-        && let Some(community_did) = resolver.community_for_channel(db, &message.channel).await
+        && let Some(community_did) =
+            resolver.community_for_channel(db, &channel_rkey(&message.channel)).await
         // Owner may always post; skip the channel + authz reads.
         && record.did != community_did
-        && let Ok(Some(chan_json)) =
-            community_write::read_cached(db, &community_did, "social.colibri.channel", &message.channel)
-                .await
+        && let Ok(Some(chan_json)) = community_write::read_cached(
+            db,
+            &community_did,
+            "social.colibri.channel",
+            &channel_rkey(&message.channel),
+        )
+        .await
         && let Ok(channel) = serde_json::from_value::<ColibriChannel>(chan_json)
         // Unrestricted channels allow everyone — don't load authz.
         && (channel.owner_only == Some(true)
@@ -1109,6 +1120,19 @@ mod tests {
         let ack_json: serde_json::Value = serde_json::from_str(&ack).unwrap();
         assert_eq!(ack_json["type"], "ack");
         assert_eq!(ack_json["id"], 1);
+    }
+
+    #[test]
+    fn channel_rkey_extracts_rkey_from_full_at_uri() {
+        assert_eq!(
+            channel_rkey("at://did:plc:owner/social.colibri.channel/chan-a"),
+            "chan-a"
+        );
+    }
+
+    #[test]
+    fn channel_rkey_passes_through_bare_rkey_unchanged() {
+        assert_eq!(channel_rkey("chan-a"), "chan-a");
     }
 
     #[test]

@@ -91,7 +91,9 @@ async fn rocket() -> _ {
     // Web Push is optional. Surface at boot whether it's configured so a
     // missing keypair (→ no background push) is obvious in the logs rather
     // than a silent no-op per notification.
-    if lib::vapid_config::is_configured() {
+    if let Some(config) = lib::vapid_config::vapid_config() {
+        lib::vapid_config::validate_private_key(&config.private_key)
+            .expect("VAPID_PRIVATE_KEY must be a valid base64url-encoded VAPID private key");
         log::info!("Web Push enabled (VAPID keypair configured).");
     } else {
         log::warn!(
