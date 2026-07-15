@@ -3,7 +3,7 @@ use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::lib::did_document::DidDocument;
+use crate::lib::did_document::{DidDocument, VerificationMethod};
 use crate::lib::embed_fetch;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -123,8 +123,10 @@ pub async fn verify_service_auth(
         return Err(ServiceAuthError::LifetimeExceeded);
     }
 
-    // Resolve signing key
-    let key_bytes = resolve_did_key_bytes(&claims.iss).await?;
+    // Resolve signing key. `kid` (if the issuer's JWT header carries one)
+    // pins the exact verification method to use rather than guessing.
+    let kid = header.get("kid").and_then(|v| v.as_str());
+    let key_bytes = resolve_did_key_bytes(&claims.iss, kid).await?;
 
     // Verify signature over "header.claims"
     let signing_input = format!("{}.{}", header_b64, claims_b64);
@@ -227,8 +229,38 @@ fn verify_es256(msg: &str, sig: &[u8], key: &[u8]) -> bool {
     vk.verify_prehash(&hash, &sig).is_ok()
 }
 
+/// Picks the verification method to verify against. If `kid` is given (either
+/// a full VM id like `did:plc:abc#atproto` or just the fragment `atproto`),
+/// it's matched exactly; atproto service-auth JWTs typically omit `kid`
+/// entirely, so this falls back to the conventional `#atproto` signing-key
+/// fragment, and only as a last resort to the first VM carrying any key
+/// material
+fn select_verification_method<'a>(
+    methods: &'a [VerificationMethod],
+    kid: Option<&str>,
+) -> Option<&'a VerificationMethod> {
+    fn has_key(vm: &VerificationMethod) -> bool {
+        vm.public_key_multibase.is_some() || vm.public_key_jwk.is_some()
+    }
+
+    if let Some(kid) = kid {
+        let fragment = kid.rsplit('#').next().unwrap_or(kid);
+        let matched = methods
+            .iter()
+            .find(|vm| has_key(vm) && (vm.id == kid || vm.id.rsplit('#').next() == Some(fragment)));
+        if matched.is_some() {
+            return matched;
+        }
+    }
+
+    methods
+        .iter()
+        .find(|vm| has_key(vm) && vm.id.ends_with("#atproto"))
+        .or_else(|| methods.iter().find(|vm| has_key(vm)))
+}
+
 /// Resolves the DID document and extracts the associated verification method.
-async fn resolve_did_key_bytes(did: &str) -> Result<Vec<u8>, ServiceAuthError> {
+async fn resolve_did_key_bytes(did: &str, kid: Option<&str>) -> Result<Vec<u8>, ServiceAuthError> {
     let did_doc_url = if did.starts_with("did:web:") {
         let host = did.strip_prefix("did:web:").unwrap();
         format!("https://{}/.well-known/did.json", host)
@@ -248,10 +280,8 @@ async fn resolve_did_key_bytes(did: &str) -> Result<Vec<u8>, ServiceAuthError> {
         .await
         .map_err(|e| ServiceAuthError::DidResolution(e.to_string()))?;
 
-    let vm = doc
-        .verification_method
-        .into_iter()
-        .find(|vm| vm.public_key_multibase.is_some() || vm.public_key_jwk.is_some())
+    let vm = select_verification_method(&doc.verification_method, kid)
+        .cloned()
         .ok_or_else(|| ServiceAuthError::DidResolution("no verification method found".into()))?;
 
     if let Some(multibase) = vm.public_key_multibase {
@@ -429,6 +459,80 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceAuthError::DidResolution(_)));
+    }
+
+    fn vm_with_key(id: &str) -> VerificationMethod {
+        VerificationMethod {
+            id: id.to_string(),
+            verification_type: String::from("Multikey"),
+            controller: String::from("did:plc:abc"),
+            public_key_multibase: Some(String::from("zAbc")),
+            public_key_jwk: None,
+        }
+    }
+
+    fn vm_without_key(id: &str) -> VerificationMethod {
+        VerificationMethod {
+            id: id.to_string(),
+            verification_type: String::from("Multikey"),
+            controller: String::from("did:plc:abc"),
+            public_key_multibase: None,
+            public_key_jwk: None,
+        }
+    }
+
+    #[test]
+    fn select_vm_matches_full_kid() {
+        let methods = vec![
+            vm_with_key("did:plc:abc#atproto"),
+            vm_with_key("did:plc:abc#other"),
+        ];
+        let vm = select_verification_method(&methods, Some("did:plc:abc#other")).unwrap();
+        assert_eq!(vm.id, "did:plc:abc#other");
+    }
+
+    #[test]
+    fn select_vm_matches_kid_fragment_only() {
+        let methods = vec![
+            vm_with_key("did:plc:abc#atproto"),
+            vm_with_key("did:plc:abc#other"),
+        ];
+        // A bare fragment kid (no DID prefix) should still match by fragment.
+        let vm = select_verification_method(&methods, Some("other")).unwrap();
+        assert_eq!(vm.id, "did:plc:abc#other");
+    }
+
+    #[test]
+    fn select_vm_falls_back_to_atproto_fragment_without_kid() {
+        let methods = vec![
+            vm_with_key("did:plc:abc#other"),
+            vm_with_key("did:plc:abc#atproto"),
+        ];
+        let vm = select_verification_method(&methods, None).unwrap();
+        assert_eq!(vm.id, "did:plc:abc#atproto");
+    }
+
+    #[test]
+    fn select_vm_falls_back_to_first_keyed_vm_when_no_atproto_fragment() {
+        let methods = vec![
+            vm_without_key("did:plc:abc#no-key"),
+            vm_with_key("did:plc:abc#some-key"),
+        ];
+        let vm = select_verification_method(&methods, None).unwrap();
+        assert_eq!(vm.id, "did:plc:abc#some-key");
+    }
+
+    #[test]
+    fn select_vm_ignores_kid_that_matches_no_method_and_falls_back() {
+        let methods = vec![vm_with_key("did:plc:abc#atproto")];
+        let vm = select_verification_method(&methods, Some("did:plc:abc#nonexistent")).unwrap();
+        assert_eq!(vm.id, "did:plc:abc#atproto");
+    }
+
+    #[test]
+    fn select_vm_returns_none_when_nothing_has_a_key() {
+        let methods = vec![vm_without_key("did:plc:abc#atproto")];
+        assert!(select_verification_method(&methods, None).is_none());
     }
 
     #[test]
