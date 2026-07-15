@@ -21,6 +21,8 @@
 //! `YYYY-MM-DDTHH:MM:SS.mmmZ` form, so a plain string comparison is a
 //! chronological one.
 
+use std::collections::HashMap;
+
 use sea_orm::prelude::Expr;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
@@ -37,6 +39,9 @@ const READ_NSID: &str = "social.colibri.channel.read";
 const MEMBER_NSID: &str = "social.colibri.member";
 const COMMUNITY_NSID: &str = "social.colibri.community";
 
+/// Hard cap on channels processed per `listUnreadStatus` request
+const MAX_CHANNELS_PER_REQUEST: u64 = 200;
+
 /// Unread state for a single channel, in the shape the client consumes.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub struct ChannelUnreadStatus {
@@ -46,11 +51,6 @@ pub struct ChannelUnreadStatus {
     pub has_unread_messages: bool,
     #[serde(rename = "unreadPingCount")]
     pub unread_ping_count: u64,
-}
-
-#[derive(Deserialize)]
-struct StoredCursor {
-    cursor: String,
 }
 
 /// The newest message in a channel as `(rkey, indexed_at)`, or `None` if the
@@ -138,33 +138,53 @@ fn channel_has_unread(
     }
 }
 
-/// rkey of the last-read message for a user in a channel, from their latest
-/// read-cursor record. `None` when no cursor exists or its stored message URI
-/// is malformed (treated as "nothing read yet").
-async fn read_cursor_rkey(
+#[derive(Deserialize)]
+struct StoredCursorWithChannel {
+    channel: String,
+    cursor: String,
+}
+
+/// rkey of the last-read message for a user in each of `channel_uris`
+async fn read_cursor_rkeys(
     db: &DatabaseConnection,
     did: &str,
-    channel_uri: &str,
-) -> Result<Option<String>, DbErr> {
-    let record = record_data::Entity::find()
+    channel_uris: &[String],
+) -> Result<HashMap<String, String>, DbErr> {
+    if channel_uris.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let values: Vec<sea_orm::Value> = channel_uris
+        .iter()
+        .map(|c| sea_orm::Value::from(c.clone()))
+        .collect();
+    let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
+    let in_clause = format!(
+        r#""record_data"."data"->>'channel' IN ({})"#,
+        placeholders.join(", ")
+    );
+
+    let records = record_data::Entity::find()
         .filter(record_data::Column::Did.eq(did))
         .filter(record_data::Column::Nsid.eq(READ_NSID))
-        .filter(Expr::cust_with_values(
-            r#""record_data"."data"->>'channel' = $1"#,
-            vec![sea_orm::Value::from(channel_uri.to_string())],
-        ))
+        .filter(Expr::cust_with_values(in_clause, values))
         .order_by_desc(record_data::Column::Rkey)
-        .limit(1)
-        .one(db)
+        .all(db)
         .await?;
 
-    let Some(record) = record else {
-        return Ok(None);
-    };
-    let Ok(stored) = serde_json::from_value::<StoredCursor>(record.data) else {
-        return Ok(None);
-    };
-    Ok(AtUri::parse(&stored.cursor).map(|u| u.rkey))
+    // Rows arrive newest-first per the `ORDER BY rkey DESC` above, so the
+    // first row seen for a channel is its latest cursor; `or_insert` keeps it.
+    let mut out: HashMap<String, String> = HashMap::new();
+    for record in records {
+        let Ok(stored) = serde_json::from_value::<StoredCursorWithChannel>(record.data) else {
+            continue;
+        };
+        let Some(cursor_rkey) = AtUri::parse(&stored.cursor).map(|u| u.rkey) else {
+            continue;
+        };
+        out.entry(stored.channel).or_insert(cursor_rkey);
+    }
+    Ok(out)
 }
 
 /// Computes unread status for every channel in a community for one user.
@@ -180,6 +200,7 @@ pub async fn community_channel_unread_status(
             r#""record_data"."data"->>'community' = $1"#,
             vec![sea_orm::Value::from(community.rkey.clone())],
         ))
+        .limit(MAX_CHANNELS_PER_REQUEST)
         .all(db)
         .await?;
 
@@ -187,20 +208,26 @@ pub async fn community_channel_unread_status(
     // resolve it once up front.
     let join_boundary = join_boundary_indexed_at(db, caller_did, community).await?;
 
-    let mut out = Vec::with_capacity(channel_records.len());
-    for channel in channel_records {
-        let channel_uri = format!("at://{}/{}/{}", channel.did, channel.nsid, channel.rkey);
+    let channel_uris: Vec<String> = channel_records
+        .iter()
+        .map(|c| format!("at://{}/{}/{}", c.did, c.nsid, c.rkey))
+        .collect();
 
+    // Batched in place of one round-trip per channel each.
+    let cursor_rkeys = read_cursor_rkeys(db, caller_did, &channel_uris).await?;
+    let unseen_counts =
+        notifications::unseen_counts_for_channels(db, caller_did, &channel_uris).await?;
+
+    let mut out = Vec::with_capacity(channel_records.len());
+    for (channel, channel_uri) in channel_records.into_iter().zip(channel_uris) {
         let latest = latest_message(db, &channel_uri, &channel.rkey).await?;
-        let cursor_rkey = read_cursor_rkey(db, caller_did, &channel_uri).await?;
         let has_unread_messages = channel_has_unread(
             latest.as_ref().map(|(r, i)| (r.as_str(), i.as_str())),
-            cursor_rkey.as_deref(),
+            cursor_rkeys.get(&channel_uri).map(String::as_str),
             join_boundary.as_deref(),
         );
 
-        let unread_ping_count =
-            notifications::unseen_count_for_channel(db, caller_did, &channel_uri).await?;
+        let unread_ping_count = unseen_counts.get(&channel_uri).copied().unwrap_or(0);
 
         out.push(ChannelUnreadStatus {
             channel_uri,
@@ -214,6 +241,61 @@ pub async fn community_channel_unread_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    fn cursor_record(rkey: &str, channel: &str, cursor: &str) -> record_data::Model {
+        record_data::Model {
+            id: 0,
+            did: String::from("did:plc:me"),
+            nsid: READ_NSID.to_string(),
+            rkey: rkey.to_string(),
+            data: serde_json::json!({ "channel": channel, "cursor": cursor }),
+            indexed_at: String::from("2026-05-26T00:00:00.000Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_cursor_rkeys_keeps_latest_cursor_per_channel() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                // Newest first, matching the ORDER BY rkey DESC in the query.
+                cursor_record(
+                    "r2",
+                    "chan-a",
+                    "at://did:plc:owner/social.colibri.message/msg-2",
+                ),
+                cursor_record(
+                    "r1",
+                    "chan-a",
+                    "at://did:plc:owner/social.colibri.message/msg-1",
+                ),
+                cursor_record(
+                    "r3",
+                    "chan-b",
+                    "at://did:plc:owner/social.colibri.message/msg-3",
+                ),
+            ]])
+            .into_connection();
+
+        let out = read_cursor_rkeys(
+            &db,
+            "did:plc:me",
+            &[String::from("chan-a"), String::from("chan-b")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.get("chan-a").map(String::as_str), Some("msg-2"));
+        assert_eq!(out.get("chan-b").map(String::as_str), Some("msg-3"));
+    }
+
+    #[tokio::test]
+    async fn read_cursor_rkeys_returns_empty_map_for_no_channels() {
+        let db = crate::lib::test_fixtures::mock_db();
+        let out = read_cursor_rkeys(&db, "did:plc:me", &[]).await.unwrap();
+        assert!(out.is_empty());
+    }
 
     #[test]
     fn no_messages_is_never_unread() {

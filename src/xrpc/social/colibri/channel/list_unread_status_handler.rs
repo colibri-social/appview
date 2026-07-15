@@ -6,7 +6,9 @@ use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::channel_unread::{self, ChannelUnreadStatus};
-use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 
 #[derive(Serialize, Debug)]
@@ -22,27 +24,41 @@ type ComputeFn = dyn Fn(
     + Send
     + Sync;
 
+fn not_a_member() -> ErrorResponse {
+    ErrorResponse {
+        body: Json(ErrorBody {
+            error: String::from("Forbidden"),
+            message: String::from("caller is not a member of this community"),
+        }),
+    }
+}
+
 async fn list_unread_status_with(
     community_uri: String,
     auth: String,
     db: DatabaseConnection,
     verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
     compute_fn: &ComputeFn,
 ) -> Result<Json<ListUnreadStatusResponse>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
-
-    with_authenticated(
+    with_community_authz(
         auth,
         "social.colibri.channel.listUnreadStatus",
+        community_uri,
+        None,
         db,
         verify_auth_fn,
-        |caller_did, db| async move {
-            let channels = compute_fn(db, caller_did, community).await?;
+        load_authz_fn,
+        |ctx, db| async move {
+            // Not gated by a specific permission — any member may read their
+            // own unread status — but this echoes back the community's full
+            // channel list, so a non-member shouldn't be able to use it to
+            // enumerate channel URIs of a community they haven't joined.
+            if !ctx.authz.is_owner && ctx.authz.member.is_none() {
+                return Err(not_a_member());
+            }
+
+            let channels = compute_fn(db, ctx.caller_did, ctx.community).await?;
             Ok(Json(ListUnreadStatusResponse { channels }))
         },
     )
@@ -72,6 +88,7 @@ pub async fn list_unread_status(
         auth.to_string(),
         db.inner().clone(),
         &verify_auth_boxed,
+        &load_authz_boxed,
         &compute_boxed,
     )
     .await
@@ -81,7 +98,7 @@ pub async fn list_unread_status(
 mod tests {
     use super::*;
     use crate::lib::service_auth::ServiceAuthError;
-    use crate::lib::test_fixtures::mock_db;
+    use crate::lib::test_fixtures::{empty_authz, mock_db, owner_authz};
     use rocket::tokio;
 
     fn status(uri: &str, unread: bool, pings: u64) -> ChannelUnreadStatus {
@@ -99,9 +116,10 @@ mod tests {
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             &|_, did, community| {
-                assert_eq!(did, "did:plc:me");
+                assert_eq!(did, "did:plc:owner");
                 assert_eq!(community.rkey, "c1");
                 Box::pin(async {
                     Ok(vec![
@@ -128,6 +146,7 @@ mod tests {
             String::from("token"),
             db,
             &|_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when uri is invalid") }),
             &|_, _, _| Box::pin(async { panic!("should not compute when uri is invalid") }),
         )
         .await;
@@ -147,11 +166,29 @@ mod tests {
             String::from("token"),
             db,
             &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when auth fails") }),
             &|_, _, _| Box::pin(async { panic!("should not compute when auth fails") }),
         )
         .await;
 
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+    }
+
+    #[tokio::test]
+    async fn rejects_caller_who_is_not_a_member() {
+        let db = mock_db();
+        let result = list_unread_status_with(
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_, _, _| Box::pin(async { Ok(empty_authz()) }),
+            &|_, _, _| Box::pin(async { panic!("should not compute for a non-member") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
     }
 }
