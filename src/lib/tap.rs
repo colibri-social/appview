@@ -2,7 +2,8 @@ use crate::lib::at_uri::AtUri;
 use crate::lib::author_cache::AuthorCache;
 use crate::lib::channel_authz;
 use crate::lib::colibri::{
-    ColibriChannel, ColibriMembership, ColibriMessage, ColibriModeration, ColibriModerationSubject,
+    ColibriChannel, ColibriMember, ColibriMembership, ColibriMessage, ColibriModeration,
+    ColibriModerationSubject,
 };
 use crate::lib::community_authz;
 use crate::lib::community_record::fetch_community_record;
@@ -33,6 +34,7 @@ use tokio_tungstenite::{
 };
 
 const MEMBERSHIP_NSID: &str = "social.colibri.membership";
+const MEMBER_NSID: &str = "social.colibri.member";
 
 use crate::xrpc::social::colibri::sync::subscribe_events_handler::DidStruct;
 
@@ -733,6 +735,16 @@ async fn process_event(
     {
         let community_uri = format!("at://{community_did}/social.colibri.community/self");
         match community_authz::load_actor_authz(db, &community_uri, &record.did).await {
+            // No community-side member record at all yet, we don't ack so tap redelivers later
+            Ok(authz) if authz.member.is_none() => {
+                log::info!(
+                    "deferring message {}/{} into restricted channel {}: no member record yet",
+                    record.did,
+                    record.rkey,
+                    message.channel
+                );
+                return false;
+            }
             Ok(authz) if !channel_authz::can_post(&channel, &authz, &record.did) => {
                 log::info!(
                     "rejecting message {}/{} into restricted channel {}: author not permitted",
@@ -813,6 +825,16 @@ async fn process_event(
             record.rkey,
             e
         );
+    }
+
+    // Cascade backfill registration: community membership itself never
+    // otherwise registers a DID for backfill
+    if record.collection == MEMBER_NSID
+        && record.action != "delete"
+        && let Some(payload) = record.record.as_ref()
+        && let Ok(member) = serde_json::from_value::<ColibriMember>(payload.clone())
+    {
+        register_dids(vec![member.subject]).await;
     }
 
     // Cross-device read-state sync: when a user's read cursor advances (a
