@@ -26,6 +26,8 @@ pub enum ServiceAuthError {
     InvalidAudience,
     #[error("invalid lxm")]
     InvalidLxm,
+    #[error("token lifetime exceeds the maximum allowed")]
+    LifetimeExceeded,
     #[error("could not resolve DID: {0}")]
     DidResolution(String),
     #[error("signing error: {0}")]
@@ -35,6 +37,20 @@ pub enum ServiceAuthError {
 }
 
 const DEFAULT_APPVIEW_DID: &str = "did:web:api.colibri.social";
+
+/// Default cap on a service-auth token's declared lifetime
+/// (`exp - now`), when `SERVICE_AUTH_MAX_LIFETIME_SECS` is unset/invalid.
+/// A captured token (e.g. leaked via a log or proxy) should only be replayable
+/// for a short window, not for however far in the future its issuer set `exp`.
+const DEFAULT_MAX_TOKEN_LIFETIME_SECS: u64 = 300;
+
+fn max_token_lifetime_secs() -> u64 {
+    std::env::var("SERVICE_AUTH_MAX_LIFETIME_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_TOKEN_LIFETIME_SECS)
+}
 
 /// The `did:web` this AppView identifies as. Configurable via `APPVIEW_DID` so
 /// self-hosted deployments verify service-auth `aud` (and sign outbound tokens)
@@ -98,6 +114,13 @@ pub async fn verify_service_auth(
         && lxm != expected_lxm
     {
         return Err(ServiceAuthError::InvalidLxm);
+    }
+
+    // Reject tokens whose issuer set an unreasonably distant expiry — bounds
+    // how long a captured token stays replayable, independent of how far in
+    // the future its `exp` claims to be valid.
+    if claims.exp > now + max_token_lifetime_secs() {
+        return Err(ServiceAuthError::LifetimeExceeded);
     }
 
     // Resolve signing key
@@ -366,6 +389,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidLxm));
+    }
+
+    #[tokio::test]
+    async fn rejects_token_with_lifetime_exceeding_max_before_network_lookup() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = make_token(json!({
+            "iss":"did:plc:abc",
+            "aud":"did:web:api.colibri.social",
+            "exp": now + max_token_lifetime_secs() + 3600
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::LifetimeExceeded));
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
+    async fn accepts_token_with_lifetime_within_max() {
+        // Not expired and within the max-lifetime cap, so it clears every
+        // offline check and only fails once it reaches the (unmocked) network
+        // DID lookup — proving the lifetime cap alone didn't reject it.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = make_token(json!({
+            "iss":"did:web:nonexistent.invalid.test",
+            "aud":"did:web:api.colibri.social",
+            "exp": now + max_token_lifetime_secs() - 1
+        }));
+
+        let err = verify_service_auth(&token, "social.colibri.actor.getData")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::DidResolution(_)));
     }
 
     #[test]
