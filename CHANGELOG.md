@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/colibri-social/appview/compare/v0.1.1...v0.1.2) - 2026-07-15
+
+### Added
+
+- Better indexing for record data table ([#35](https://github.com/colibri-social/appview/pull/35))
+
+### Fixed
+
+- Thread channel scope through permission checks for mod stuff ([#34](https://github.com/colibri-social/appview/pull/34))
+- Batch and cap listUnreadStatus queries, require membership ([#33](https://github.com/colibri-social/appview/pull/33))
+- harden service auth checks ([#32](https://github.com/colibri-social/appview/pull/32))
+- harden getImage endpoint ([#30](https://github.com/colibri-social/appview/pull/30))
+- Make ?all=true param for listMessages endpoint mod only ([#31](https://github.com/colibri-social/appview/pull/31))
+- Require member.ban permission to list banned members ([#29](https://github.com/colibri-social/appview/pull/29))
+- Add pagination to remaining endpoints ([#28](https://github.com/colibri-social/appview/pull/28))
+- Harden web-push implementation ([#27](https://github.com/colibri-social/appview/pull/27))
+- Properly guard GET requests ([#26](https://github.com/colibri-social/appview/pull/26))
+- enforce role hierarchy on endpoints ([#25](https://github.com/colibri-social/appview/pull/25))
+- stop leaking mod-only events to all community clients ([#24](https://github.com/colibri-social/appview/pull/24))
+- Stop disconnecting sockets on lag ([#23](https://github.com/colibri-social/appview/pull/23))
+- Remove webhook call ([#21](https://github.com/colibri-social/appview/pull/21))
+
 ## [0.1.1](https://github.com/colibri-social/appview/compare/v0.1.0...v0.1.1) - 2026-07-13
 
 ### Fixed
