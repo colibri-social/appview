@@ -199,6 +199,16 @@ pub fn mint_appview_auth(aud: &str, lxm: &str) -> Result<String, ServiceAuthErro
     Ok(format!("{signing_input}.{sig_b64}"))
 }
 
+/// Parses `K256_PRIVATE_KEY` as a hex-encoded secp256k1 signing key, without
+/// minting anything. Called at boot so a malformed key fails fast instead of
+/// only surfacing on the first `.well-known/did.json` request or Hum send
+pub fn validate_k256_private_key(raw_key: &str) -> Result<(), String> {
+    let bytes = hex::decode(raw_key).map_err(|e| e.to_string())?;
+    SigningKey::from_slice(&bytes)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Verifies an ES256K-signed key.
 fn verify_es256k(msg: &str, sig: &[u8], key: &[u8]) -> bool {
     use k256::ecdsa::signature::hazmat::PrehashVerifier;
@@ -533,6 +543,23 @@ mod tests {
     fn select_vm_returns_none_when_nothing_has_a_key() {
         let methods = vec![vm_without_key("did:plc:abc#atproto")];
         assert!(select_verification_method(&methods, None).is_none());
+    }
+
+    #[test]
+    fn validate_k256_private_key_accepts_a_valid_hex_key() {
+        let hex_key = hex::encode([7u8; 32]);
+        assert!(validate_k256_private_key(&hex_key).is_ok());
+    }
+
+    #[test]
+    fn validate_k256_private_key_rejects_non_hex() {
+        assert!(validate_k256_private_key("not-hex").is_err());
+    }
+
+    #[test]
+    fn validate_k256_private_key_rejects_wrong_length() {
+        let hex_key = hex::encode([7u8; 16]);
+        assert!(validate_k256_private_key(&hex_key).is_err());
     }
 
     #[test]

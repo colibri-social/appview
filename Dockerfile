@@ -22,11 +22,14 @@ RUN cargo build --release
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin appview
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/colibri-appview ./colibri-appview
+COPY --from=builder --chown=appview:appview /app/target/release/colibri-appview ./colibri-appview
+
+USER appview
 
 EXPOSE 8000
 

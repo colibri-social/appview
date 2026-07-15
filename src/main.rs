@@ -80,6 +80,12 @@ async fn rocket() -> _ {
     // `community.create` (and downstream PDS-write helpers) consume.
     require_env_var("PDS_LOC");
     require_env_var("APPVIEW_HANDLE_DOMAIN");
+    require_env_var("K256_PRIVATE_KEY");
+
+    lib::service_auth::validate_k256_private_key(
+        &std::env::var("K256_PRIVATE_KEY").unwrap_or_default(),
+    )
+    .expect("K256_PRIVATE_KEY must be a valid hex-encoded secp256k1 private key");
 
     // Load the at-rest credential encryption key before any handler that
     // touches `community_credentials` can run. Fails fast at boot if the env
