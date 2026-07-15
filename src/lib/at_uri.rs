@@ -26,6 +26,14 @@ impl AtUri {
             rkey: rkey.to_string(),
         })
     }
+
+    /// Extracts the rkey from a full AT URI, or returns the input unchanged if
+    /// it doesn't parse as one
+    pub fn rkey_or_value(s: &str) -> String {
+        Self::parse(s)
+            .map(|u| u.rkey)
+            .unwrap_or_else(|| s.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -61,5 +69,18 @@ mod tests {
     fn keeps_extra_path_segments_with_rkey() {
         let uri = AtUri::parse("at://did:plc:abc/social.colibri.community/r1/extra").unwrap();
         assert_eq!(uri.rkey, "r1/extra");
+    }
+
+    #[test]
+    fn rkey_or_value_extracts_rkey_from_full_uri() {
+        assert_eq!(
+            AtUri::rkey_or_value("at://did:plc:abc/social.colibri.channel/chan-a"),
+            "chan-a"
+        );
+    }
+
+    #[test]
+    fn rkey_or_value_passes_through_non_uri_unchanged() {
+        assert_eq!(AtUri::rkey_or_value("chan-a"), "chan-a");
     }
 }

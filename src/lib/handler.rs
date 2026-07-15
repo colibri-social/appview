@@ -107,20 +107,52 @@ pub struct CallerContext {
 /// 2. Verify `auth` for `lxm` to a caller DID (→ `AuthError`).
 /// 3. Load the caller's [`ActorAuthz`] for the community.
 /// 4. If `permission` is `Some`, refuse with `Forbidden` unless the caller
-///    holds it (no channel scope — pass channel-scoped checks through the
-///    body if needed).
+///    holds it (no channel scope — use [`with_community_authz_scoped`] for
+///    endpoints that act on a specific channel, so per-channel permission
+///    overrides apply).
 ///
 /// On success, invokes `body` with [`CallerContext`] and the same
 /// `DatabaseConnection` so the body can issue further queries.
-///
-/// The argument list is deliberately wide so handlers don't have to thread
-/// these concerns separately; eight args is intentional.
 #[allow(clippy::too_many_arguments)]
 pub async fn with_community_authz<F, Fut, T>(
     auth: String,
     lxm: &'static str,
     community_uri: String,
     permission: Option<Permission>,
+    db: DatabaseConnection,
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
+    body: F,
+) -> Result<T, ErrorResponse>
+where
+    F: FnOnce(CallerContext, DatabaseConnection) -> Fut,
+    Fut: Future<Output = Result<T, ErrorResponse>>,
+{
+    with_community_authz_scoped(
+        auth,
+        lxm,
+        community_uri,
+        permission,
+        None,
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        body,
+    )
+    .await
+}
+
+/// Same as [`with_community_authz`], but `channel_rkey` (when given) scopes
+/// the permission check so a role's per-channel `allow`/`deny` overrides for
+/// that channel are consulted, not just its base permission list. Use this
+/// for any endpoint that acts on a specific, already-known channel.
+#[allow(clippy::too_many_arguments)]
+pub async fn with_community_authz_scoped<F, Fut, T>(
+    auth: String,
+    lxm: &'static str,
+    community_uri: String,
+    permission: Option<Permission>,
+    channel_rkey: Option<&str>,
     db: DatabaseConnection,
     verify_auth_fn: &VerifyAuthFn,
     load_authz_fn: &LoadAuthzFn,
@@ -137,7 +169,7 @@ where
     let authz = load_authz_fn(db.clone(), community_uri.clone(), caller_did.clone()).await?;
 
     if let Some(perm) = permission
-        && !authz.has(perm, None)
+        && !authz.has(perm, channel_rkey)
     {
         return Err(forbidden(perm));
     }
@@ -257,6 +289,80 @@ mod tests {
         )
         .await;
         assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+    }
+
+    #[tokio::test]
+    async fn with_community_authz_scoped_consults_channel_override_deny() {
+        use crate::lib::test_fixtures::{member, role_with_override};
+
+        let db = mock_db();
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:mod", vec!["mod"])),
+            roles: vec![role_with_override(
+                "Moderator",
+                10,
+                vec![Permission::MessageDelete],
+                "chan-a",
+                vec![],
+                vec![Permission::MessageDelete],
+            )],
+        };
+
+        let result: Result<(), ErrorResponse> = with_community_authz_scoped(
+            String::from("token"),
+            "social.colibri.test",
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            Some(Permission::MessageDelete),
+            Some("chan-a"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &move |_, _, _| {
+                let authz = authz.clone();
+                Box::pin(async move { Ok(authz) })
+            },
+            |_, _| async { panic!("should not run body: channel override denies this") },
+        )
+        .await;
+
+        assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
+    }
+
+    #[tokio::test]
+    async fn with_community_authz_scoped_allows_outside_the_overridden_channel() {
+        use crate::lib::test_fixtures::{member, role_with_override};
+
+        let db = mock_db();
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:mod", vec!["mod"])),
+            roles: vec![role_with_override(
+                "Moderator",
+                10,
+                vec![Permission::MessageDelete],
+                "chan-a",
+                vec![],
+                vec![Permission::MessageDelete],
+            )],
+        };
+
+        let result: Result<&'static str, ErrorResponse> = with_community_authz_scoped(
+            String::from("token"),
+            "social.colibri.test",
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            Some(Permission::MessageDelete),
+            Some("chan-b"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &move |_, _, _| {
+                let authz = authz.clone();
+                Box::pin(async move { Ok(authz) })
+            },
+            |_, _| async { Ok("ran") },
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), "ran");
     }
 
     #[tokio::test]

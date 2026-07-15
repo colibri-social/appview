@@ -9,6 +9,7 @@ use crate::lib::colibri::{ColibriCategory, ColibriChannel, ColibriRole};
 use crate::lib::community_write::{self, invalid_request, not_found_error};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+    with_community_authz_scoped,
 };
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
@@ -207,12 +208,14 @@ async fn update_channel_with(
         "at://{}/{}/{}",
         channel.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
+    let channel_rkey_scope = channel.rkey.clone();
 
-    with_community_authz(
+    with_community_authz_scoped(
         auth,
         "social.colibri.channel.update",
         community_uri,
         Some(Permission::ChannelUpdate),
+        Some(&channel_rkey_scope),
         db,
         verify_auth_fn,
         load_authz_fn,
@@ -377,12 +380,14 @@ async fn delete_channel_with(
         "at://{}/{}/{}",
         channel.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
+    let channel_rkey_scope = channel.rkey.clone();
 
-    with_community_authz(
+    with_community_authz_scoped(
         auth,
         "social.colibri.channel.delete",
         community_uri,
         Some(Permission::ChannelDelete),
+        Some(&channel_rkey_scope),
         db,
         verify_auth_fn,
         load_authz_fn,
@@ -450,7 +455,7 @@ pub async fn delete_channel(
 mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::{member, role};
+    use crate::lib::test_fixtures::{member, mock_db, role, role_with_override};
     use crate::models::record_data;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -509,6 +514,50 @@ mod tests {
         let body = result.expect_err("expected Forbidden").body.into_inner();
         assert_eq!(body.error, "Forbidden");
         assert!(body.message.contains("admin"));
+    }
+
+    // A role can hold `channel.update` in general but have it explicitly denied
+    // in a specific channel via a channel override. That override must actually
+    // be consulted for update/delete, so this channel's `chan1` override wins even though the
+    // caller's base permissions would otherwise allow the edit.
+    #[tokio::test]
+    async fn update_channel_rejects_when_channel_override_denies_update() {
+        let db = mock_db();
+        let authz = ActorAuthz {
+            is_owner: false,
+            member: Some(member("did:plc:rando", vec!["mod"])),
+            roles: vec![role_with_override(
+                "Moderator",
+                10,
+                vec![Permission::ChannelUpdate],
+                "chan1",
+                vec![],
+                vec![Permission::ChannelUpdate],
+            )],
+        };
+
+        let result = update_channel_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan1"),
+            Some(String::from("New name")),
+            None,
+            None,
+            vec![],
+            None,
+            vec![],
+            None,
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &move |_, _, _| {
+                let authz = authz.clone();
+                Box::pin(async move { Ok(authz) })
+            },
+        )
+        .await;
+
+        let body = result.expect_err("expected Forbidden").body.into_inner();
+        assert_eq!(body.error, "Forbidden");
+        assert!(body.message.contains("Missing permission"));
     }
 
     // A non-admin creator holding `channel.create` may not grant posting access
