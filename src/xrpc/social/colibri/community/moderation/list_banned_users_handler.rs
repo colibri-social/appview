@@ -7,8 +7,12 @@ use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::handler::{
+    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
+};
 use crate::lib::moderation::currently_banned_dids;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::permissions::Permission;
+use crate::lib::responses::ErrorResponse;
 use crate::xrpc::social::colibri::actor::get_data_handler::Actor;
 use crate::xrpc::social::colibri::community::invitations::hydrate_actors;
 
@@ -29,29 +33,37 @@ type HydrateFn = fn(
 
 async fn list_banned_users_with(
     community_uri: String,
+    auth: String,
     db: DatabaseConnection,
+    verify_auth_fn: &VerifyAuthFn,
+    load_authz_fn: &LoadAuthzFn,
     fetch_fn: FetchBannedFn,
     hydrate_fn: HydrateFn,
 ) -> Result<Json<BannedUsersResponse>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
+    with_community_authz(
+        auth,
+        "social.colibri.community.listBannedUsers",
+        community_uri,
+        Some(Permission::MemberBan),
+        db,
+        verify_auth_fn,
+        load_authz_fn,
+        move |ctx, db| async move {
+            let dids = fetch_fn(db.clone(), ctx.community).await?;
+            let mut hydrated = hydrate_fn(db, dids.clone()).await?;
 
-    let dids = fetch_fn(db.clone(), community).await?;
-    let mut hydrated = hydrate_fn(db, dids.clone()).await?;
+            // Preserve the (sorted) order from `currently_banned_dids`. `hydrate_actors`
+            // returns an entry for every DID it's handed, so each banned DID resolves;
+            // `filter_map` only guards against an unexpected miss.
+            let users = dids
+                .into_iter()
+                .filter_map(|did| hydrated.remove(&did))
+                .collect();
 
-    // Preserve the (sorted) order from `currently_banned_dids`. `hydrate_actors`
-    // returns an entry for every DID it's handed, so each banned DID resolves;
-    // `filter_map` only guards against an unexpected miss.
-    let users = dids
-        .into_iter()
-        .filter_map(|did| hydrated.remove(&did))
-        .collect();
-
-    Ok(Json(BannedUsersResponse { users }))
+            Ok(Json(BannedUsersResponse { users }))
+        },
+    )
+    .await
 }
 
 fn fetch_banned_boxed(
@@ -68,17 +80,22 @@ fn hydrate_boxed(
     Box::pin(async move { hydrate_actors(&db, dids).await })
 }
 
-#[get("/xrpc/social.colibri.community.listBannedUsers?<community>")]
+#[get("/xrpc/social.colibri.community.listBannedUsers?<community>&<auth>")]
 /// Lists every user currently banned in the community (derived from the
 /// `social.colibri.moderation` event log on the community repo), each hydrated
-/// into their full profile.
+/// into their full profile. Requires the caller to hold the `member.ban`
+/// permission — the ban list is moderator-only information, not a public roster.
 pub async fn list_banned_users(
     community: &str,
+    auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<BannedUsersResponse>, ErrorResponse> {
     list_banned_users_with(
         community.to_string(),
+        auth.to_string(),
         db.inner().clone(),
+        &verify_auth_boxed,
+        &load_authz_boxed,
         fetch_banned_boxed,
         hydrate_boxed,
     )
@@ -88,7 +105,7 @@ pub async fn list_banned_users(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::test_fixtures::mock_db;
+    use crate::lib::test_fixtures::{empty_authz, mock_db, owner_authz};
     use crate::xrpc::social::colibri::actor::get_data_handler::{ActorData, ActorStatus};
     use rocket::tokio;
 
@@ -118,7 +135,10 @@ mod tests {
         let db = mock_db();
         let result = list_banned_users_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("token"),
             db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             |_, community| {
                 assert_eq!(community.authority, "did:plc:owner");
                 Box::pin(async {
@@ -162,7 +182,10 @@ mod tests {
         let db = mock_db();
         let result = list_banned_users_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("token"),
             db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             |_, _| Box::pin(async { Ok(vec![String::from("did:plc:alice")]) }),
             |_, _| {
                 Box::pin(async {
@@ -192,7 +215,10 @@ mod tests {
         let db = mock_db();
         let result = list_banned_users_with(
             String::from("not-a-uri"),
+            String::from("token"),
             db,
+            &|_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
+            &|_, _, _| Box::pin(async { panic!("should not load authz when uri is invalid") }),
             |_, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
             |_, _| Box::pin(async { panic!("should not hydrate when uri is invalid") }),
         )
@@ -203,5 +229,23 @@ mod tests {
             result.err().unwrap().body.into_inner().error,
             "InvalidRequest"
         );
+    }
+
+    #[tokio::test]
+    async fn rejects_caller_without_ban_permission() {
+        let db = mock_db();
+        let result = list_banned_users_with(
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            &|_, _, _| Box::pin(async { Ok(empty_authz()) }),
+            |_, _| Box::pin(async { panic!("should not fetch without permission") }),
+            |_, _| Box::pin(async { panic!("should not hydrate without permission") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
     }
 }
