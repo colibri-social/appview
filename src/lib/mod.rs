@@ -36,6 +36,7 @@ pub mod push_send;
 pub mod push_subscriptions;
 pub mod range;
 pub mod reactions;
+pub mod refill;
 pub mod responses;
 pub mod sentry;
 pub mod service_auth;
