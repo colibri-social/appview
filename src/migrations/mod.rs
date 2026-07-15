@@ -13,6 +13,7 @@ mod m20260628_120000_record_data_data_to_jsonb;
 mod m20260709_000000_add_vc_state_to_user_states;
 mod m20260710_000000_add_mention_role_to_notifications;
 mod m20260715_000000_fix_push_subscriptions_unique_key;
+mod m20260715_010000_add_record_data_hot_path_indexes;
 
 pub struct Migrator;
 
@@ -33,6 +34,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260709_000000_add_vc_state_to_user_states::Migration),
             Box::new(m20260710_000000_add_mention_role_to_notifications::Migration),
             Box::new(m20260715_000000_fix_push_subscriptions_unique_key::Migration),
+            Box::new(m20260715_010000_add_record_data_hot_path_indexes::Migration),
         ]
     }
 }
