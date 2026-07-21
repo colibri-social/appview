@@ -290,6 +290,7 @@ async fn rocket() -> _ {
                 xrpc::com::atproto::sync::get_record,
                 xrpc::com::atproto::sync::list_records,
                 xrpc::social::colibri::actor::get_data,
+                xrpc::social::colibri::actor::get_notification_preference,
                 xrpc::social::colibri::actor::list_communities,
                 xrpc::social::colibri::actor::list_mutes,
                 xrpc::social::colibri::actor::set_state,

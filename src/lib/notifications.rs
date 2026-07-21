@@ -11,12 +11,16 @@ use serde_json::Value;
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriMember, ColibriMessage, ColibriRole};
 use crate::lib::community_authz::load_actor_authz;
+use crate::lib::notification_preferences::mentions_and_replies_only_dids;
 use crate::lib::permissions::Permission;
+use crate::lib::push_send::is_muted;
 use crate::lib::time::current_iso8601_utc;
 use crate::models::{notifications, record_data};
+use crate::xrpc::social::colibri::actor::list_mutes_handler::fetch_mutes_for_dids;
 
 pub const KIND_MENTION: &str = "mention";
 pub const KIND_REPLY: &str = "reply";
+pub const KIND_MESSAGE: &str = "message";
 pub const FACET_MENTION_TYPE: &str = "social.colibri.richtext.facet#mention";
 pub const FACET_ROLE_TYPE: &str = "social.colibri.richtext.facet#role";
 const MEMBER_NSID: &str = "social.colibri.member";
@@ -282,6 +286,61 @@ async fn expand_role_mention_recipients(
     Ok(out)
 }
 
+/// Expands "notify on every message" recipients for a channel: every
+/// community member except the author, anyone already notified via
+/// mention/reply for this message (`already_notified` — one notification per
+/// recipient per message, never two), anyone who has opted down to
+/// mentions/replies-only via `social.colibri.actor.notificationPreference`,
+/// and anyone who has muted the channel or its community.
+async fn expand_all_message_recipients(
+    db: &DatabaseConnection,
+    author_did: &str,
+    channel_uri: &str,
+    already_notified: &HashSet<String>,
+) -> Result<Vec<String>, DbErr> {
+    let Some(channel) = AtUri::parse(channel_uri) else {
+        return Ok(Vec::new());
+    };
+    let community_authority = channel.authority;
+
+    let members = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&community_authority))
+        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
+        .all(db)
+        .await?;
+
+    let mut candidates: Vec<String> = Vec::new();
+    let mut candidates_seen: HashSet<String> = HashSet::new();
+    for record in members {
+        let Ok(member) = serde_json::from_value::<ColibriMember>(record.data) else {
+            continue;
+        };
+        if member.subject == author_did || already_notified.contains(&member.subject) {
+            continue;
+        }
+        if candidates_seen.insert(member.subject.clone()) {
+            candidates.push(member.subject);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let opted_down = mentions_and_replies_only_dids(db, &candidates).await?;
+    let mutes_by_did = fetch_mutes_for_dids(db, &candidates).await?;
+
+    Ok(candidates
+        .into_iter()
+        .filter(|did| !opted_down.contains(did))
+        .filter(|did| {
+            !mutes_by_did
+                .get(did)
+                .is_some_and(|mutes| is_muted(mutes, channel_uri))
+        })
+        .collect())
+}
+
 /// Looks up the author DID of a parent message.
 /// Returns `None` if the parent is not in the cache.
 ///
@@ -380,6 +439,19 @@ pub async fn index_message_notifications(
         let key = (parent_author.clone(), KIND_REPLY);
         if seen.insert(key) {
             recipients.push((parent_author, KIND_REPLY, None));
+        }
+    }
+
+    // "All messages" recipients: every community member not already covered
+    // by a mention/reply above, minus opt-downs and mutes.
+    let already_notified: HashSet<String> =
+        recipients.iter().map(|(did, _, _)| did.clone()).collect();
+    let all_message_recipients =
+        expand_all_message_recipients(db, author_did, &message.channel, &already_notified).await?;
+    for did in all_message_recipients {
+        let key = (did.clone(), KIND_MESSAGE);
+        if seen.insert(key) {
+            recipients.push((did, KIND_MESSAGE, None));
         }
     }
 
@@ -913,6 +985,155 @@ mod tests {
             counts.get("at://did:plc:owner/social.colibri.channel/b"),
             Some(&1)
         );
+    }
+
+    fn member(subject: &str) -> record_data::Model {
+        record_data::Model {
+            id: 1,
+            did: String::from("did:plc:community"),
+            nsid: String::from(MEMBER_NSID),
+            rkey: subject.to_string(),
+            data: json!({ "subject": subject, "joinedAt": "2026-05-14T00:00:00Z" }),
+            indexed_at: String::new(),
+        }
+    }
+
+    fn notification_preference_record(did: &str, level: &str) -> record_data::Model {
+        record_data::Model {
+            id: 1,
+            did: did.to_string(),
+            nsid: String::from(
+                crate::lib::notification_preferences::NOTIFICATION_PREFERENCE_NSID,
+            ),
+            rkey: String::from(
+                crate::lib::notification_preferences::NOTIFICATION_PREFERENCE_RKEY,
+            ),
+            data: json!({ "level": level }),
+            indexed_at: String::new(),
+        }
+    }
+
+    fn mute_record(did: &str, subject: &str) -> record_data::Model {
+        record_data::Model {
+            id: 1,
+            did: did.to_string(),
+            nsid: String::from("social.colibri.actor.mute"),
+            rkey: String::from("r"),
+            data: json!({ "subject": subject }),
+            indexed_at: String::new(),
+        }
+    }
+
+    const ALL_MESSAGES_CHANNEL: &str = "at://did:plc:community/social.colibri.channel/general";
+
+    #[tokio::test]
+    async fn expand_all_message_recipients_returns_every_member_except_author() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                vec![member("did:plc:author"), member("did:plc:alice")],
+                Vec::<record_data::Model>::new(), // notification preferences
+                Vec::<record_data::Model>::new(), // mutes
+            ])
+            .into_connection();
+
+        let out = expand_all_message_recipients(
+            &db,
+            "did:plc:author",
+            ALL_MESSAGES_CHANNEL,
+            &HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, vec![String::from("did:plc:alice")]);
+    }
+
+    #[tokio::test]
+    async fn expand_all_message_recipients_excludes_already_notified() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                vec![member("did:plc:alice"), member("did:plc:bob")],
+                Vec::<record_data::Model>::new(),
+                Vec::<record_data::Model>::new(),
+            ])
+            .into_connection();
+
+        let already_notified: HashSet<String> = [String::from("did:plc:alice")].into();
+        let out = expand_all_message_recipients(
+            &db,
+            "did:plc:author",
+            ALL_MESSAGES_CHANNEL,
+            &already_notified,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, vec![String::from("did:plc:bob")]);
+    }
+
+    #[tokio::test]
+    async fn expand_all_message_recipients_excludes_mentions_and_replies_only_members() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                vec![member("did:plc:alice"), member("did:plc:bob")],
+                vec![notification_preference_record(
+                    "did:plc:alice",
+                    "mentionsAndReplies",
+                )],
+                Vec::<record_data::Model>::new(),
+            ])
+            .into_connection();
+
+        let out = expand_all_message_recipients(
+            &db,
+            "did:plc:author",
+            ALL_MESSAGES_CHANNEL,
+            &HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, vec![String::from("did:plc:bob")]);
+    }
+
+    #[tokio::test]
+    async fn expand_all_message_recipients_excludes_members_who_muted_the_channel() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                vec![member("did:plc:alice"), member("did:plc:bob")],
+                Vec::<record_data::Model>::new(),
+                vec![mute_record("did:plc:alice", ALL_MESSAGES_CHANNEL)],
+            ])
+            .into_connection();
+
+        let out = expand_all_message_recipients(
+            &db,
+            "did:plc:author",
+            ALL_MESSAGES_CHANNEL,
+            &HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, vec![String::from("did:plc:bob")]);
+    }
+
+    #[tokio::test]
+    async fn expand_all_message_recipients_returns_empty_when_no_candidates() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![member("did:plc:author")]])
+            .into_connection();
+
+        let out = expand_all_message_recipients(
+            &db,
+            "did:plc:author",
+            ALL_MESSAGES_CHANNEL,
+            &HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.is_empty());
     }
 
     #[tokio::test]
