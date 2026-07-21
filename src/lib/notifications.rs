@@ -1002,12 +1002,8 @@ mod tests {
         record_data::Model {
             id: 1,
             did: did.to_string(),
-            nsid: String::from(
-                crate::lib::notification_preferences::NOTIFICATION_PREFERENCE_NSID,
-            ),
-            rkey: String::from(
-                crate::lib::notification_preferences::NOTIFICATION_PREFERENCE_RKEY,
-            ),
+            nsid: String::from(crate::lib::notification_preferences::NOTIFICATION_PREFERENCE_NSID),
+            rkey: String::from(crate::lib::notification_preferences::NOTIFICATION_PREFERENCE_RKEY),
             data: json!({ "level": level }),
             indexed_at: String::new(),
         }

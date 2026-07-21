@@ -48,7 +48,10 @@ fn verify_auth_boxed(
     Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
 }
 
-fn level_for_boxed(db: DatabaseConnection, did: String) -> BoxFuture<'static, Result<String, DbErr>> {
+fn level_for_boxed(
+    db: DatabaseConnection,
+    did: String,
+) -> BoxFuture<'static, Result<String, DbErr>> {
     Box::pin(async move { level_for(&db, &did).await })
 }
 

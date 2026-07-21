@@ -113,10 +113,7 @@ mod tests {
     #[tokio::test]
     async fn level_for_reads_explicit_mentions_and_replies() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![pref_record(
-                "did:plc:me",
-                LEVEL_MENTIONS_AND_REPLIES,
-            )]])
+            .append_query_results([vec![pref_record("did:plc:me", LEVEL_MENTIONS_AND_REPLIES)]])
             .into_connection();
         assert_eq!(
             level_for(&db, "did:plc:me").await.unwrap(),
