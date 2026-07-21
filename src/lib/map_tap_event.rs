@@ -1123,6 +1123,7 @@ async fn map_tap_event_with(
             }
         }
         "social.colibri.approval" => Ok(vec![]),
+        "social.colibri.actor.mute" => Ok(vec![]),
         // Read cursors are handled directly in `tap.rs`, which emits the
         // cross-device read-state sync event. No server event maps here.
         "social.colibri.channel.read" => Ok(vec![]),
