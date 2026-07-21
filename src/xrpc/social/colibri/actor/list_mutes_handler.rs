@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, get};
@@ -38,6 +40,32 @@ pub async fn fetch_mutes(
         .limit(MAX_MUTES)
         .all(db)
         .await
+}
+
+/// Fetches every `social.colibri.actor.mute` record authored by any of
+/// `dids`, grouped by author. Used where mutes for many members must be
+/// checked against a single message (e.g. expanding "notify everyone" to
+/// exclude members who muted the channel) without one query per member.
+pub async fn fetch_mutes_for_dids(
+    db: &DatabaseConnection,
+    dids: &[String],
+) -> Result<HashMap<String, Vec<record_data::Model>>, DbErr> {
+    if dids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let records = record_data::Entity::find()
+        .filter(record_data::Column::Did.is_in(dids.to_vec()))
+        .filter(record_data::Column::Nsid.eq(MUTE_NSID))
+        .limit(MAX_MUTES * dids.len() as u64)
+        .all(db)
+        .await?;
+
+    let mut by_did: HashMap<String, Vec<record_data::Model>> = HashMap::new();
+    for record in records {
+        by_did.entry(record.did.clone()).or_default().push(record);
+    }
+    Ok(by_did)
 }
 
 type VerifyAuthFn =
@@ -113,6 +141,7 @@ mod tests {
     use super::*;
     use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn mute_record(rkey: &str, subject: &str) -> record_data::Model {
         record_data::Model {
@@ -178,6 +207,47 @@ mod tests {
         .unwrap();
 
         assert!(result.mutes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_mutes_for_dids_groups_records_by_author() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                record_data::Model {
+                    id: 1,
+                    did: String::from("did:plc:alice"),
+                    nsid: MUTE_NSID.to_string(),
+                    rkey: String::from("r1"),
+                    data: serde_json::json!({ "subject": "at://did:plc:owner/social.colibri.community/self" }),
+                    indexed_at: String::new(),
+                },
+                record_data::Model {
+                    id: 2,
+                    did: String::from("did:plc:bob"),
+                    nsid: MUTE_NSID.to_string(),
+                    rkey: String::from("r2"),
+                    data: serde_json::json!({ "subject": "at://did:plc:owner/social.colibri.channel.text/general" }),
+                    indexed_at: String::new(),
+                },
+            ]])
+            .into_connection();
+
+        let grouped = fetch_mutes_for_dids(
+            &db,
+            &[String::from("did:plc:alice"), String::from("did:plc:bob")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(grouped.get("did:plc:alice").unwrap().len(), 1);
+        assert_eq!(grouped.get("did:plc:bob").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_mutes_for_dids_returns_empty_map_for_no_dids() {
+        let db = mock_db();
+        let grouped = fetch_mutes_for_dids(&db, &[]).await.unwrap();
+        assert!(grouped.is_empty());
     }
 
     #[tokio::test]

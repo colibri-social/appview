@@ -10,11 +10,13 @@ pub mod sync {
 
 pub mod actor {
     pub mod get_data_handler;
+    pub mod get_notification_preference_handler;
     pub mod list_communities_handler;
     pub mod list_mutes_handler;
     pub mod set_state_handler;
 
     pub use get_data_handler::get_data;
+    pub use get_notification_preference_handler::get_notification_preference;
     pub use list_communities_handler::list_communities;
     pub use list_mutes_handler::list_mutes;
     pub use set_state_handler::set_state;

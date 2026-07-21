@@ -28,6 +28,7 @@ pub mod klipy;
 pub mod list_atproto_records;
 pub mod map_tap_event;
 pub mod moderation;
+pub mod notification_preferences;
 pub mod notifications;
 pub mod owner_role_heal;
 pub mod pds_client;
