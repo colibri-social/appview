@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/colibri-social/appview/compare/v0.1.3...v0.1.4) - 2026-07-21
+
+### Added
+
+- Push notifications for all message types ([#44](https://github.com/colibri-social/appview/pull/44))
+
+### Fixed
+
+- Backfill members from membership records ([#42](https://github.com/colibri-social/appview/pull/42))
+
 ## [0.1.3](https://github.com/colibri-social/appview/compare/v0.1.2...v0.1.3) - 2026-07-15
 
 ### Fixed
