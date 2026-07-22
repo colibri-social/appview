@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 
-use sea_orm::DatabaseConnection;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::Serialize;
 use web_push::{ContentEncoding, SubscriptionInfo, VapidSignatureBuilder, WebPushMessageBuilder};
 
@@ -38,6 +38,7 @@ use crate::lib::fcm_send::{self, SendOutcome};
 use crate::lib::get_state::get_state;
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::push_subscriptions;
+use crate::lib::service_auth::appview_did;
 use crate::lib::vapid_config::vapid_config;
 use crate::models::record_data;
 use crate::xrpc::social::colibri::actor::list_mutes_handler::fetch_mutes;
@@ -314,9 +315,100 @@ async fn send_web_one(
     Ok(())
 }
 
+/// The Android app's tap-to-open target for a channel notification, plus
+/// whatever community context is available to decorate it with — an avatar
+/// image and a display name. Deliberately tolerant: a channel URI that
+/// doesn't parse, or a missing/unreadable community record, still yields a
+/// usable (if plain) deep link rather than failing the whole send.
+struct FcmChannelContext {
+    deep_link: String,
+    community_name: Option<String>,
+    avatar_url: Option<String>,
+}
+
+/// Pulls a blob ref's CID out of its JSON representation, matching both the
+/// legacy `{ cid }` shape and the standard atproto `{ ref: { $link } }` shape
+/// — mirrors the client's `resolveBlob` (`packages/client/src/atproto/resolve-blob.ts`).
+fn extract_blob_cid(blob: &serde_json::Value) -> Option<String> {
+    blob.get("cid")
+        .and_then(|v| v.as_str())
+        .or_else(|| blob.get("ref")?.get("$link")?.as_str())
+        .map(str::to_string)
+}
+
+/// This AppView's own public host, derived from its `did:web` identity —
+/// used to build a `getBlob` URL pointing back at itself, the same way
+/// `com.atproto.sync.getBlob` is already served.
+fn appview_host() -> String {
+    appview_did()
+        .strip_prefix("did:web:")
+        .unwrap_or("api.colibri.social")
+        .replace("%3A", ":")
+}
+
+/// Builds the tap-to-open deep link (`social.colibri:/channel/<community>/<channelType>/<channel>`,
+/// consumed by `DeepLinkListener.tsx`) and, if the channel's community record
+/// has one, its avatar's `getBlob` URL and display name.
+async fn fcm_channel_context(db: &DatabaseConnection, channel_uri: &str) -> FcmChannelContext {
+    let Some(channel) = AtUri::parse(channel_uri) else {
+        return FcmChannelContext {
+            deep_link: String::new(),
+            community_name: None,
+            avatar_url: None,
+        };
+    };
+
+    let community_did = channel.authority;
+    let community_record = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&community_did))
+        .filter(record_data::Column::Nsid.eq(COMMUNITY_NSID))
+        .one(db)
+        .await
+        .ok()
+        .flatten();
+
+    let community_segment = match &community_record {
+        Some(record) if record.rkey != "self" => format!("{community_did}-{}", record.rkey),
+        _ => community_did.clone(),
+    };
+
+    let community_name = community_record
+        .as_ref()
+        .and_then(|r| r.data.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let avatar_url = community_record
+        .as_ref()
+        .and_then(|r| r.data.get("picture"))
+        .and_then(extract_blob_cid)
+        .map(|cid| {
+            return format!(
+                "https://{}/xrpc/com.atproto.sync.getBlob?did={community_did}&cid={cid}",
+                appview_host()
+            );
+        });
+
+    let deep_link = format!(
+        "social.colibri:/channel/{community_segment}/{}/{}",
+        channel.collection, channel.rkey
+    );
+
+    FcmChannelContext {
+        deep_link,
+        community_name,
+        avatar_url,
+    }
+}
+
 /// Sends a single FCM message. Prunes the subscription when FCM reports the
 /// registration token is permanently dead. No-ops (returns `Ok`) if FCM isn't
 /// configured.
+///
+/// The payload is data-only (no `notification` block) — Android's OS-level
+/// auto-display can't do per-channel collapsing, a custom avatar, or
+/// tap-to-open, so `ColibriFirebaseMessagingService` (native, Android-side)
+/// always builds the notification itself instead.
 async fn send_fcm_one(
     db: &DatabaseConnection,
     sub: &crate::models::push_subscriptions::Model,
@@ -329,20 +421,24 @@ async fn send_fcm_one(
     let client = fcm_send::client();
     let access_token = client.access_token(config).await?;
 
+    let context = fcm_channel_context(db, &payload.data.channel_uri).await;
+
     let mut data = HashMap::new();
+    data.insert("title", payload.title.as_str());
+    data.insert("body", payload.body.as_str());
     data.insert("channelUri", payload.data.channel_uri.as_str());
     data.insert("messageUri", payload.data.message_uri.as_str());
     data.insert("tag", payload.tag.as_str());
+    data.insert("deepLink", context.deep_link.as_str());
+    if let Some(name) = context.community_name.as_deref() {
+        data.insert("communityName", name);
+    }
+    if let Some(url) = context.avatar_url.as_deref() {
+        data.insert("avatarUrl", url);
+    }
 
     match client
-        .send(
-            config,
-            &access_token,
-            &sub.endpoint,
-            &payload.title,
-            &payload.body,
-            &data,
-        )
+        .send(config, &access_token, &sub.endpoint, &data)
         .await
     {
         SendOutcome::Delivered => Ok(()),
@@ -486,6 +582,106 @@ mod tests {
         // Should return without panicking on the unrecognized provider — the
         // dispatch loop logs and skips it.
         deliver(db, indexed_notification("message", None)).await;
+    }
+
+    #[test]
+    fn extract_blob_cid_reads_legacy_cid_field() {
+        let blob = json!({ "cid": "bafylegacy", "mimeType": "image/png" });
+        assert_eq!(extract_blob_cid(&blob).as_deref(), Some("bafylegacy"));
+    }
+
+    #[test]
+    fn extract_blob_cid_reads_standard_ref_link_field() {
+        let blob = json!({ "ref": { "$link": "bafystandard" }, "mimeType": "image/png" });
+        assert_eq!(extract_blob_cid(&blob).as_deref(), Some("bafystandard"));
+    }
+
+    #[test]
+    fn extract_blob_cid_returns_none_for_neither_shape() {
+        assert!(extract_blob_cid(&json!({ "mimeType": "image/png" })).is_none());
+    }
+
+    #[test]
+    fn appview_host_strips_did_web_prefix() {
+        // SAFETY: no other test in this process reads APPVIEW_DID concurrently.
+        unsafe {
+            std::env::set_var("APPVIEW_DID", "did:web:test.colibri.example");
+        }
+        assert_eq!(appview_host(), "test.colibri.example");
+        unsafe {
+            std::env::remove_var("APPVIEW_DID");
+        }
+    }
+
+    fn community(rkey: &str, name: Option<&str>, picture: Option<&str>) -> record_data::Model {
+        let mut data = json!({});
+        if let Some(name) = name {
+            data["name"] = json!(name);
+        }
+        if let Some(cid) = picture {
+            data["picture"] = json!({ "ref": { "$link": cid } });
+        }
+        record_data::Model {
+            id: 1,
+            did: String::from("did:plc:community"),
+            nsid: String::from(COMMUNITY_NSID),
+            rkey: String::from(rkey),
+            data,
+            indexed_at: String::from("2026-06-25T00:00:00.000Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fcm_channel_context_builds_deep_link_and_avatar() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![community(
+                "self",
+                Some("My Community"),
+                Some("bafyavatar"),
+            )]])
+            .into_connection();
+
+        let context = fcm_channel_context(&db, CHANNEL).await;
+        assert_eq!(
+            context.deep_link,
+            "social.colibri:/channel/did:plc:community/social.colibri.channel.text/general"
+        );
+        assert_eq!(context.community_name.as_deref(), Some("My Community"));
+        assert!(
+            context.avatar_url.as_deref().is_some_and(
+                |u| u.contains("did=did:plc:community") && u.contains("cid=bafyavatar")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn fcm_channel_context_uses_compact_segment_for_non_self_rkey() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![community("byo", None, None)]])
+            .into_connection();
+
+        let context = fcm_channel_context(&db, CHANNEL).await;
+        assert_eq!(
+            context.deep_link,
+            "social.colibri:/channel/did:plc:community-byo/social.colibri.channel.text/general"
+        );
+        assert!(context.community_name.is_none());
+        assert!(context.avatar_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn fcm_channel_context_falls_back_gracefully_without_a_community_record() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .into_connection();
+
+        let context = fcm_channel_context(&db, CHANNEL).await;
+        assert_eq!(
+            context.deep_link,
+            "social.colibri:/channel/did:plc:community/social.colibri.channel.text/general"
+        );
+        assert!(context.community_name.is_none());
+        assert!(context.avatar_url.is_none());
     }
 
     fn mute(subject: &str) -> record_data::Model {
