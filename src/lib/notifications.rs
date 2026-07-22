@@ -15,7 +15,7 @@ use crate::lib::notification_preferences::mentions_and_replies_only_dids;
 use crate::lib::permissions::Permission;
 use crate::lib::push_send::is_muted;
 use crate::lib::time::current_iso8601_utc;
-use crate::models::{notifications, record_data};
+use crate::models::{notifications, record_data, user_states};
 use crate::xrpc::social::colibri::actor::list_mutes_handler::fetch_mutes_for_dids;
 
 pub const KIND_MENTION: &str = "mention";
@@ -341,6 +341,28 @@ async fn expand_all_message_recipients(
         .collect())
 }
 
+/// Which of `dids` currently have `channel_uri` open, per `state::view_channel`
+/// (cleared on WS disconnect by `state::clear_viewed_channel`, so this can't
+/// go stale beyond a session boundary). Batched into a single `IN` query,
+/// mirroring `mentions_and_replies_only_dids`.
+async fn currently_viewing_dids(
+    db: &DatabaseConnection,
+    dids: &[String],
+    channel_uri: &str,
+) -> Result<HashSet<String>, DbErr> {
+    if dids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let rows = user_states::Entity::find()
+        .filter(user_states::Column::Did.is_in(dids.to_vec()))
+        .filter(user_states::Column::Channel.eq(channel_uri))
+        .all(db)
+        .await?;
+
+    Ok(rows.into_iter().map(|r| r.did).collect())
+}
+
 /// Looks up the author DID of a parent message.
 /// Returns `None` if the parent is not in the cache.
 ///
@@ -454,6 +476,14 @@ pub async fn index_message_notifications(
             recipients.push((did, KIND_MESSAGE, None));
         }
     }
+
+    // Recipients actively viewing this exact channel already see the message
+    // arrive live over the socket. Skip notifying them entirely (push,
+    // in-app ping, and badge), same as most chat apps not pinging you about a
+    // conversation you already have open.
+    let candidate_dids: Vec<String> = recipients.iter().map(|(did, _, _)| did.clone()).collect();
+    let viewing_now = currently_viewing_dids(db, &candidate_dids, &message.channel).await?;
+    recipients.retain(|(did, _, _)| !viewing_now.contains(did));
 
     if recipients.is_empty() {
         return Ok(Vec::new());
@@ -1125,6 +1155,73 @@ mod tests {
             "did:plc:author",
             ALL_MESSAGES_CHANNEL,
             &HashSet::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.is_empty());
+    }
+
+    fn user_state(did: &str, channel: Option<&str>) -> user_states::Model {
+        user_states::Model {
+            did: String::from(did),
+            state: String::from("online"),
+            vc: None,
+            vc_community: None,
+            channel: channel.map(String::from),
+            vc_muted: None,
+            vc_deafened: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn currently_viewing_dids_returns_empty_for_no_candidates() {
+        let db = crate::lib::test_fixtures::mock_db();
+        let out = currently_viewing_dids(&db, &[], ALL_MESSAGES_CHANNEL)
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn currently_viewing_dids_returns_only_matching_members() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![user_state(
+                "did:plc:viewer",
+                Some(ALL_MESSAGES_CHANNEL),
+            )]])
+            .into_connection();
+
+        let out = currently_viewing_dids(
+            &db,
+            &[
+                String::from("did:plc:viewer"),
+                String::from("did:plc:elsewhere"),
+            ],
+            ALL_MESSAGES_CHANNEL,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert!(out.contains("did:plc:viewer"));
+    }
+
+    #[tokio::test]
+    async fn currently_viewing_dids_returns_empty_when_db_has_no_matching_rows() {
+        // MockDatabase returns canned rows rather than evaluating the query's
+        // filter, so this only exercises the "no rows came back" branch (the
+        // `channel = ...` filtering itself is plain SQL, trusted as-is) — but
+        // it does confirm a non-empty `dids` list with zero matches behaves
+        // like the empty-candidates case rather than erroring.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<user_states::Model>::new()])
+            .into_connection();
+
+        let out = currently_viewing_dids(
+            &db,
+            &[String::from("did:plc:elsewhere")],
+            ALL_MESSAGES_CHANNEL,
         )
         .await
         .unwrap();
