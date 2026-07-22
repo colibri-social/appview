@@ -188,15 +188,52 @@ fn notification_title(kind: &str, mention_role_name: Option<&str>) -> String {
     }
 }
 
+/// The MIME type declared on an attachment's blob ref, if any. Tolerant of
+/// both the standard atproto blob shape and the legacy `{ cid, mimeType }`
+/// shape (both carry `mimeType` at the blob root).
+fn attachment_mime(attachment: &serde_json::Value) -> Option<&str> {
+    attachment
+        .get("blob")
+        .and_then(|blob| blob.get("mimeType"))
+        .and_then(|mime| mime.as_str())
+}
+
+/// A short stand-in body for a message that has attachments but no text, so a
+/// push never arrives blank. Mirrors the client's inline attachment
+/// placeholder. Returns `None` when there are no attachments.
+fn attachment_fallback_body(attachments: &[serde_json::Value]) -> Option<String> {
+    let count = attachments.len();
+    if count == 0 {
+        return None;
+    }
+    let all_images = attachments
+        .iter()
+        .all(|a| attachment_mime(a).is_some_and(|mime| mime.starts_with("image/")));
+    Some(match (all_images, count) {
+        (true, 1) => String::from("Sent a photo"),
+        (true, n) => format!("Sent {n} photos"),
+        (false, 1) => String::from("Sent an attachment"),
+        (false, n) => format!("Sent {n} attachments"),
+    })
+}
+
 /// Builds the provider-agnostic payload both `send_web_one` and
 /// `send_fcm_one` deliver.
 fn build_payload(notification: &IndexedNotification) -> PushPayload {
+    let text = redact_spoilers(&notification.message.text, &notification.message.facets);
+    // A message can carry only attachments and no text; fall back to an
+    // attachment summary so the notification body is never empty.
+    let body = if text.trim().is_empty() {
+        attachment_fallback_body(&notification.message.attachments).unwrap_or(text)
+    } else {
+        text
+    };
     PushPayload {
         title: notification_title(
             &notification.row.kind,
             notification.row.mention_role_name.as_deref(),
         ),
-        body: redact_spoilers(&notification.message.text, &notification.message.facets),
+        body,
         tag: notification.row.message_uri.clone(),
         data: PushData {
             channel_uri: notification.row.channel_uri.clone(),
@@ -231,7 +268,16 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
     for sub in subscriptions {
         let result = match sub.provider.as_str() {
             "web" => send_web_one(&db, &sub, &payload).await,
-            "fcm" => send_fcm_one(&db, &sub, &payload, &notification.row.author_did).await,
+            "fcm" => {
+                send_fcm_one(
+                    &db,
+                    &sub,
+                    &payload,
+                    &notification.row.author_did,
+                    &notification.message.attachments,
+                )
+                .await
+            }
             other => {
                 log::warn!(
                     "push: unknown provider '{other}' for subscription {}",
@@ -365,6 +411,24 @@ fn blob_url(did: &str, cid: &str) -> String {
     )
 }
 
+/// The public `getBlob` URL of the first image attachment (owned by
+/// `owner_did`), so the Android notification can show it inline. `None` when
+/// the message carries no image attachment.
+fn first_image_attachment_url(
+    attachments: &[serde_json::Value],
+    owner_did: &str,
+) -> Option<String> {
+    attachments.iter().find_map(|attachment| {
+        let blob = attachment.get("blob")?;
+        let mime = blob.get("mimeType").and_then(|m| m.as_str())?;
+        if !mime.starts_with("image/") {
+            return None;
+        }
+        let cid = extract_blob_cid(blob)?;
+        Some(blob_url(owner_did, &cid))
+    })
+}
+
 /// Builds the tap-to-open deep link (`social.colibri:/channel/<community>/<channelType>/<channel>`,
 /// consumed by `DeepLinkListener.tsx`), the channel's community context (name
 /// and avatar, if its record has one), and the author's display name and
@@ -477,6 +541,7 @@ async fn send_fcm_one(
     sub: &crate::models::push_subscriptions::Model,
     payload: &PushPayload,
     author_did: &str,
+    attachments: &[serde_json::Value],
 ) -> Result<(), String> {
     let Some(config) = fcm_config() else {
         return Ok(());
@@ -503,6 +568,11 @@ async fn send_fcm_one(
     }
     if let Some(url) = context.author_avatar_url.as_deref() {
         data.insert("authorAvatarUrl", url);
+    }
+    // Shown inline in the Android notification's MessagingStyle message.
+    let image_url = first_image_attachment_url(attachments, author_did);
+    if let Some(url) = image_url.as_deref() {
+        data.insert("imageUrl", url);
     }
 
     match client
@@ -591,6 +661,73 @@ mod tests {
             payload.data.message_uri,
             "at://did:plc:community/social.colibri.channel.message/msg1"
         );
+    }
+
+    fn image_blob(mime: &str) -> serde_json::Value {
+        serde_json::json!({
+            "blob": {"$type": "blob", "ref": {"$link": "bafyimg"}, "mimeType": mime, "size": 1},
+            "name": "pic",
+        })
+    }
+
+    fn file_blob() -> serde_json::Value {
+        serde_json::json!({
+            "blob": {"$type": "blob", "ref": {"$link": "bafyfile"}, "mimeType": "application/pdf", "size": 1},
+            "name": "doc.pdf",
+        })
+    }
+
+    #[test]
+    fn attachment_fallback_body_describes_attachments() {
+        assert_eq!(attachment_fallback_body(&[]), None);
+        assert_eq!(
+            attachment_fallback_body(&[image_blob("image/png")]).as_deref(),
+            Some("Sent a photo")
+        );
+        assert_eq!(
+            attachment_fallback_body(&[image_blob("image/png"), image_blob("image/jpeg")])
+                .as_deref(),
+            Some("Sent 2 photos")
+        );
+        assert_eq!(
+            attachment_fallback_body(&[file_blob()]).as_deref(),
+            Some("Sent an attachment")
+        );
+        // A mix of image and non-image is summarized as generic attachments.
+        assert_eq!(
+            attachment_fallback_body(&[image_blob("image/png"), file_blob()]).as_deref(),
+            Some("Sent 2 attachments")
+        );
+    }
+
+    #[test]
+    fn build_payload_falls_back_to_attachment_summary_when_text_empty() {
+        let mut notification = indexed_notification("message", None);
+        notification.message.text = String::new();
+        notification.message.attachments = vec![image_blob("image/png")];
+        let payload = build_payload(&notification);
+        assert_eq!(payload.body, "Sent a photo");
+    }
+
+    #[test]
+    fn build_payload_keeps_text_when_present_even_with_attachments() {
+        let mut notification = indexed_notification("message", None);
+        notification.message.attachments = vec![image_blob("image/png")];
+        let payload = build_payload(&notification);
+        assert_eq!(payload.body, "hello there");
+    }
+
+    #[test]
+    fn first_image_attachment_url_picks_first_image_only() {
+        assert_eq!(
+            first_image_attachment_url(&[file_blob()], "did:plc:author"),
+            None
+        );
+        let url =
+            first_image_attachment_url(&[file_blob(), image_blob("image/png")], "did:plc:author")
+                .expect("expected an image url");
+        assert!(url.contains("did=did:plc:author"));
+        assert!(url.contains("cid=bafyimg"));
     }
 
     #[tokio::test]
