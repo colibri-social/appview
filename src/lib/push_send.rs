@@ -43,6 +43,7 @@ use crate::lib::vapid_config::vapid_config;
 use crate::models::record_data;
 use crate::xrpc::social::colibri::actor::list_mutes_handler::fetch_mutes;
 use crate::xrpc::social::colibri::actor::set_state_handler::UserState;
+use crate::xrpc::social::colibri::community::invitations::hydrate_actors;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const FACET_SPOILER_TYPE: &str = "social.colibri.richtext.facet#spoiler";
@@ -225,7 +226,7 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
     for sub in subscriptions {
         let result = match sub.provider.as_str() {
             "web" => send_web_one(&db, &sub, &payload).await,
-            "fcm" => send_fcm_one(&db, &sub, &payload).await,
+            "fcm" => send_fcm_one(&db, &sub, &payload, &notification.row.author_did).await,
             other => {
                 log::warn!(
                     "push: unknown provider '{other}' for subscription {}",
@@ -315,15 +316,19 @@ async fn send_web_one(
     Ok(())
 }
 
-/// The Android app's tap-to-open target for a channel notification, plus
-/// whatever community context is available to decorate it with — an avatar
-/// image and a display name. Deliberately tolerant: a channel URI that
-/// doesn't parse, or a missing/unreadable community record, still yields a
-/// usable (if plain) deep link rather than failing the whole send.
-struct FcmChannelContext {
+/// The Android app's tap-to-open target and sender/community decoration for
+/// an FCM notification. Deliberately tolerant: a channel URI that doesn't
+/// parse, a missing community record, or an unresolvable author still yield
+/// a usable (if plain) result rather than failing the whole send.
+struct FcmNotificationContext {
     deep_link: String,
     community_name: Option<String>,
-    avatar_url: Option<String>,
+    community_avatar_url: Option<String>,
+    /// The message author's display name (falling back to their handle, then
+    /// "Someone") — shown as the sender in the Android notification instead
+    /// of a generic "New mention"/"New message" label.
+    author_name: String,
+    author_avatar_url: Option<String>,
 }
 
 /// Pulls a blob ref's CID out of its JSON representation, matching both the
@@ -346,16 +351,34 @@ fn appview_host() -> String {
         .replace("%3A", ":")
 }
 
+/// A `getBlob` URL for a blob owned by `did`, matching the client's
+/// `resolveBlob` construction.
+fn blob_url(did: &str, cid: &str) -> String {
+    format!(
+        "https://{}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}",
+        appview_host()
+    )
+}
+
 /// Builds the tap-to-open deep link (`social.colibri:/channel/<community>/<channelType>/<channel>`,
-/// consumed by `DeepLinkListener.tsx`) and, if the channel's community record
-/// has one, its avatar's `getBlob` URL and display name.
-async fn fcm_channel_context(db: &DatabaseConnection, channel_uri: &str) -> FcmChannelContext {
+/// consumed by `DeepLinkListener.tsx`), the channel's community context (name
+/// and avatar, if its record has one), and the author's display name and
+/// avatar (via the same actor-hydration path used for message/member lists).
+async fn fcm_notification_context(
+    db: &DatabaseConnection,
+    channel_uri: &str,
+    author_did: &str,
+) -> FcmNotificationContext {
+    let author_fallback = || FcmNotificationContext {
+        deep_link: String::new(),
+        community_name: None,
+        community_avatar_url: None,
+        author_name: String::from("Someone"),
+        author_avatar_url: None,
+    };
+
     let Some(channel) = AtUri::parse(channel_uri) else {
-        return FcmChannelContext {
-            deep_link: String::new(),
-            community_name: None,
-            avatar_url: None,
-        };
+        return author_fallback();
     };
 
     let community_did = channel.authority;
@@ -378,26 +401,40 @@ async fn fcm_channel_context(db: &DatabaseConnection, channel_uri: &str) -> FcmC
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    let avatar_url = community_record
+    let community_avatar_url = community_record
         .as_ref()
         .and_then(|r| r.data.get("picture"))
         .and_then(extract_blob_cid)
-        .map(|cid| {
-            format!(
-                "https://{}/xrpc/com.atproto.sync.getBlob?did={community_did}&cid={cid}",
-                appview_host()
-            )
-        });
+        .map(|cid| blob_url(&community_did, &cid));
+
+    let author = hydrate_actors(db, vec![author_did.to_string()])
+        .await
+        .ok()
+        .and_then(|mut actors| actors.remove(author_did));
+
+    let author_name = author
+        .as_ref()
+        .map(|a| a.data.display_name.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| String::from("Someone"));
+
+    let author_avatar_url = author
+        .as_ref()
+        .and_then(|a| a.data.avatar.as_ref())
+        .and_then(extract_blob_cid)
+        .map(|cid| blob_url(author_did, &cid));
 
     let deep_link = format!(
         "social.colibri:/channel/{community_segment}/{}/{}",
         channel.collection, channel.rkey
     );
 
-    FcmChannelContext {
+    FcmNotificationContext {
         deep_link,
         community_name,
-        avatar_url,
+        community_avatar_url,
+        author_name,
+        author_avatar_url,
     }
 }
 
@@ -413,6 +450,7 @@ async fn send_fcm_one(
     db: &DatabaseConnection,
     sub: &crate::models::push_subscriptions::Model,
     payload: &PushPayload,
+    author_did: &str,
 ) -> Result<(), String> {
     let Some(config) = fcm_config() else {
         return Ok(());
@@ -421,7 +459,7 @@ async fn send_fcm_one(
     let client = fcm_send::client();
     let access_token = client.access_token(config).await?;
 
-    let context = fcm_channel_context(db, &payload.data.channel_uri).await;
+    let context = fcm_notification_context(db, &payload.data.channel_uri, author_did).await;
 
     let mut data = HashMap::new();
     data.insert("title", payload.title.as_str());
@@ -430,11 +468,15 @@ async fn send_fcm_one(
     data.insert("messageUri", payload.data.message_uri.as_str());
     data.insert("tag", payload.tag.as_str());
     data.insert("deepLink", context.deep_link.as_str());
+    data.insert("authorName", context.author_name.as_str());
     if let Some(name) = context.community_name.as_deref() {
         data.insert("communityName", name);
     }
-    if let Some(url) = context.avatar_url.as_deref() {
-        data.insert("avatarUrl", url);
+    if let Some(url) = context.community_avatar_url.as_deref() {
+        data.insert("communityAvatarUrl", url);
+    }
+    if let Some(url) = context.author_avatar_url.as_deref() {
+        data.insert("authorAvatarUrl", url);
     }
 
     match client
@@ -631,57 +673,101 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn fcm_channel_context_builds_deep_link_and_avatar() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![community(
-                "self",
-                Some("My Community"),
-                Some("bafyavatar"),
-            )]])
-            .into_connection();
+    const AUTHOR_DID: &str = "did:plc:author";
 
-        let context = fcm_channel_context(&db, CHANNEL).await;
+    /// Appends the three empty query results `hydrate_actors` issues in order
+    /// (self-records, user_states, repos) when it can't resolve anything for
+    /// the author — `hydrate_actors` itself then falls back to the bare DID
+    /// as the display name (mirroring every other actor-bearing surface), so
+    /// `author_name` ends up as `AUTHOR_DID` rather than our own "Someone"
+    /// fallback (which only kicks in if `hydrate_actors` errors outright).
+    fn mock_db_with_unresolvable_author(db: MockDatabase) -> sea_orm::DatabaseConnection {
+        db.append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([Vec::<crate::models::user_states::Model>::new()])
+            .append_query_results([Vec::<crate::models::repos::Model>::new()])
+            .into_connection()
+    }
+
+    #[tokio::test]
+    async fn fcm_notification_context_builds_deep_link_and_avatar() {
+        let db =
+            mock_db_with_unresolvable_author(
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    community("self", Some("My Community"), Some("bafyavatar")),
+                ]]),
+            );
+
+        let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
         assert_eq!(
             context.deep_link,
             "social.colibri:/channel/did:plc:community/social.colibri.channel.text/general"
         );
         assert_eq!(context.community_name.as_deref(), Some("My Community"));
         assert!(
-            context.avatar_url.as_deref().is_some_and(
-                |u| u.contains("did=did:plc:community") && u.contains("cid=bafyavatar")
-            )
+            context.community_avatar_url.as_deref().is_some_and(|u| u
+                .contains("did=did:plc:community")
+                && u.contains("cid=bafyavatar"))
         );
+        assert_eq!(context.author_name, AUTHOR_DID);
+        assert!(context.author_avatar_url.is_none());
     }
 
     #[tokio::test]
-    async fn fcm_channel_context_uses_compact_segment_for_non_self_rkey() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![community("byo", None, None)]])
-            .into_connection();
+    async fn fcm_notification_context_uses_compact_segment_for_non_self_rkey() {
+        let db = mock_db_with_unresolvable_author(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![community("byo", None, None)]]),
+        );
 
-        let context = fcm_channel_context(&db, CHANNEL).await;
+        let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
         assert_eq!(
             context.deep_link,
             "social.colibri:/channel/did:plc:community-byo/social.colibri.channel.text/general"
         );
         assert!(context.community_name.is_none());
-        assert!(context.avatar_url.is_none());
+        assert!(context.community_avatar_url.is_none());
     }
 
     #[tokio::test]
-    async fn fcm_channel_context_falls_back_gracefully_without_a_community_record() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([Vec::<record_data::Model>::new()])
-            .into_connection();
+    async fn fcm_notification_context_falls_back_gracefully_without_a_community_record() {
+        let db = mock_db_with_unresolvable_author(
+            MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([Vec::<record_data::Model>::new()]),
+        );
 
-        let context = fcm_channel_context(&db, CHANNEL).await;
+        let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
         assert_eq!(
             context.deep_link,
             "social.colibri:/channel/did:plc:community/social.colibri.channel.text/general"
         );
         assert!(context.community_name.is_none());
-        assert!(context.avatar_url.is_none());
+        assert!(context.community_avatar_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn fcm_notification_context_resolves_author_name_and_avatar() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![community("self", None, None)]])
+            .append_query_results([vec![record_data::Model {
+                id: 2,
+                did: String::from(AUTHOR_DID),
+                nsid: String::from("social.colibri.actor.profile"),
+                rkey: String::from("self"),
+                data: json!({
+                    "displayName": "Ada Lovelace",
+                    "avatar": { "ref": { "$link": "bafyauthor" } },
+                }),
+                indexed_at: String::from("2026-06-25T00:00:00.000Z"),
+            }]])
+            .append_query_results([Vec::<crate::models::user_states::Model>::new()])
+            .append_query_results([Vec::<crate::models::repos::Model>::new()])
+            .into_connection();
+
+        let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
+        assert_eq!(context.author_name, "Ada Lovelace");
+        assert!(context.author_avatar_url.as_deref().is_some_and(|u| {
+            u.contains(&format!("did={AUTHOR_DID}")) && u.contains("cid=bafyauthor")
+        }));
     }
 
     fn mute(subject: &str) -> record_data::Model {
