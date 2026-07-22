@@ -138,20 +138,22 @@ impl FcmClient {
     }
 
     /// Sends a single FCM message. `data` values must all be strings, per
-    /// FCM's requirement for the `data` payload map.
+    /// FCM's requirement for the `data` payload map. Deliberately data-only
+    /// (no `notification` block) — Android's OS-level auto-display can't do
+    /// per-channel collapsing, a custom avatar, or tap-to-open, so the app's
+    /// own `ColibriFirebaseMessagingService` always builds the notification
+    /// itself, which only happens when the payload has no `notification`
+    /// block to auto-display instead.
     pub async fn send(
         &self,
         config: &FcmConfig,
         access_token: &str,
         registration_token: &str,
-        title: &str,
-        body: &str,
         data: &HashMap<&str, &str>,
     ) -> SendOutcome {
         let payload = serde_json::json!({
             "message": {
                 "token": registration_token,
-                "notification": { "title": title, "body": body },
                 "data": data,
             }
         });
@@ -302,14 +304,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "dead-token",
-                "t",
-                "b",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "dead-token", &HashMap::new())
             .await;
         assert_eq!(outcome, SendOutcome::Unregistered);
     }
@@ -328,14 +323,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "some-token",
-                "t",
-                "b",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "some-token", &HashMap::new())
             .await;
         assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
@@ -352,14 +340,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "some-token",
-                "t",
-                "b",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "some-token", &HashMap::new())
             .await;
         assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
@@ -380,14 +361,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "some-token",
-                "t",
-                "b",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "some-token", &HashMap::new())
             .await;
         assert_eq!(outcome, SendOutcome::Delivered);
     }
