@@ -11,7 +11,9 @@ use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::permissions::Permission;
-use crate::lib::state::{broadcast_state_change, join_vc, leave_vc, set_vc_state, view_channel};
+use crate::lib::state::{
+    broadcast_state_change, clear_viewed_channel, join_vc, leave_vc, set_vc_state, view_channel,
+};
 use crate::lib::tap::CommsBridge;
 use crate::lib::voice_events::{broadcast_voice_presence, broadcast_voice_state};
 use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
@@ -631,6 +633,7 @@ async fn run_event_loop(
 
     leave_vc_and_broadcast(&did, &to_tap_broadcast, &hum_outbox, &db).await;
     save_state(&db, did.clone(), String::from("offline")).await;
+    clear_viewed_channel(did.clone(), &db).await;
     broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
 }
 

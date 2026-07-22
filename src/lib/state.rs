@@ -147,6 +147,21 @@ pub async fn view_channel(did: String, channel: String, db: &DatabaseConnection)
         .await;
 }
 
+/// Clears the channel `view_channel` last recorded, so a disconnected user
+/// doesn't keep suppressing notifications for whatever they had open (see
+/// `notifications::currently_viewing_dids`) after they've actually left.
+/// Called on WS disconnect.
+pub async fn clear_viewed_channel(did: String, db: &DatabaseConnection) {
+    let _ = UserStates::update_many()
+        .col_expr(
+            user_states::Column::Channel,
+            Expr::value(Option::<String>::None),
+        )
+        .filter(user_states::Column::Did.eq(did))
+        .exec(db)
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +213,17 @@ mod tests {
             &db,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn clear_viewed_channel_executes_without_failing() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                last_insert_id: 1,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        clear_viewed_channel(String::from("did:plc:abc"), &db).await;
     }
 }
