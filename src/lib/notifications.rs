@@ -1194,7 +1194,10 @@ mod tests {
 
         let out = currently_viewing_dids(
             &db,
-            &[String::from("did:plc:viewer"), String::from("did:plc:elsewhere")],
+            &[
+                String::from("did:plc:viewer"),
+                String::from("did:plc:elsewhere"),
+            ],
             ALL_MESSAGES_CHANNEL,
         )
         .await
