@@ -681,9 +681,7 @@ mod tests {
     /// as the display name (mirroring every other actor-bearing surface), so
     /// `author_name` ends up as `AUTHOR_DID` rather than our own "Someone"
     /// fallback (which only kicks in if `hydrate_actors` errors outright).
-    fn mock_db_with_unresolvable_author(
-        db: MockDatabase,
-    ) -> sea_orm::DatabaseConnection {
+    fn mock_db_with_unresolvable_author(db: MockDatabase) -> sea_orm::DatabaseConnection {
         db.append_query_results([Vec::<record_data::Model>::new()])
             .append_query_results([Vec::<crate::models::user_states::Model>::new()])
             .append_query_results([Vec::<crate::models::repos::Model>::new()])
@@ -692,13 +690,12 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_notification_context_builds_deep_link_and_avatar() {
-        let db = mock_db_with_unresolvable_author(
-            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![community(
-                "self",
-                Some("My Community"),
-                Some("bafyavatar"),
-            )]]),
-        );
+        let db =
+            mock_db_with_unresolvable_author(
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    community("self", Some("My Community"), Some("bafyavatar")),
+                ]]),
+            );
 
         let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
         assert_eq!(
@@ -707,10 +704,9 @@ mod tests {
         );
         assert_eq!(context.community_name.as_deref(), Some("My Community"));
         assert!(
-            context
-                .community_avatar_url
-                .as_deref()
-                .is_some_and(|u| u.contains("did=did:plc:community") && u.contains("cid=bafyavatar"))
+            context.community_avatar_url.as_deref().is_some_and(|u| u
+                .contains("did=did:plc:community")
+                && u.contains("cid=bafyavatar"))
         );
         assert_eq!(context.author_name, AUTHOR_DID);
         assert!(context.author_avatar_url.is_none());
@@ -769,12 +765,9 @@ mod tests {
 
         let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
         assert_eq!(context.author_name, "Ada Lovelace");
-        assert!(
-            context
-                .author_avatar_url
-                .as_deref()
-                .is_some_and(|u| u.contains(&format!("did={AUTHOR_DID}")) && u.contains("cid=bafyauthor"))
-        );
+        assert!(context.author_avatar_url.as_deref().is_some_and(|u| {
+            u.contains(&format!("did={AUTHOR_DID}")) && u.contains("cid=bafyauthor")
+        }));
     }
 
     fn mute(subject: &str) -> record_data::Model {
