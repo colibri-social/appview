@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust 1.93
-        run: rustup toolchain install 1.93 --profile minimal --component rustfmt
+      - name: Install Rust 1.96
+        run: rustup toolchain install 1.96 --profile minimal --component rustfmt
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -30,8 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust 1.93
-        run: rustup toolchain install 1.93 --profile minimal --component clippy
+      - name: Install Rust 1.96
+        run: rustup toolchain install 1.96 --profile minimal --component clippy
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
       - name: Run linter
@@ -42,8 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust 1.93
-        run: rustup toolchain install 1.93 --profile minimal
+      - name: Install Rust 1.96
+        run: rustup toolchain install 1.96 --profile minimal
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
       - name: Run tests

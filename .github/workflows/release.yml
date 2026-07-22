@@ -126,8 +126,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust 1.93
-        run: rustup toolchain install 1.93 --profile minimal
+      - name: Install Rust 1.96
+        run: rustup toolchain install 1.96 --profile minimal
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:

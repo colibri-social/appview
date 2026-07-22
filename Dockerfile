@@ -1,5 +1,5 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
-FROM rust:1.93-slim-bookworm AS builder
+FROM rust:1.96-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev build-essential python3 python3-pip && rm -rf /var/lib/apt/lists/*
 

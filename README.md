@@ -7,7 +7,7 @@ The AT Protocol Application View (AppView) that sits behind [colibri.social](htt
 ### Prerequisites
 
 - Linux (`x86_64` or `aarch64`)
-- Rust (`1.93`+).
+- Rust (`1.96`+).
 - Docker + Docker Compose, for Postgres and Tap
 
 ### 1. Configure environment
