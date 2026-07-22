@@ -304,12 +304,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "dead-token",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "dead-token", &HashMap::new())
             .await;
         assert_eq!(outcome, SendOutcome::Unregistered);
     }
@@ -328,12 +323,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "some-token",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "some-token", &HashMap::new())
             .await;
         assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
@@ -350,12 +340,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "some-token",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "some-token", &HashMap::new())
             .await;
         assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
@@ -376,12 +361,7 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(
-                &config,
-                "access-token",
-                "some-token",
-                &HashMap::new(),
-            )
+            .send(&config, "access-token", "some-token", &HashMap::new())
             .await;
         assert_eq!(outcome, SendOutcome::Delivered);
     }
