@@ -442,11 +442,18 @@ async fn fcm_notification_context(
         .await
         .ok()
         .flatten()
-        .and_then(|r| r.data.get("type").and_then(|v| v.as_str()).map(str::to_string))
+        .and_then(|r| {
+            r.data
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| String::from(DEFAULT_CHANNEL_TYPE));
 
-    let deep_link =
-        format!("social.colibri:/channel/{community_segment}/{channel_type}/{}", channel.rkey);
+    let deep_link = format!(
+        "social.colibri:/channel/{community_segment}/{channel_type}/{}",
+        channel.rkey
+    );
 
     FcmNotificationContext {
         deep_link,
@@ -724,11 +731,12 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_notification_context_builds_deep_link_and_avatar() {
-        let db = mock_db_with_unresolvable_author_and_channel(
-            MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
-                community("self", Some("My Community"), Some("bafyavatar")),
-            ]]),
-        );
+        let db =
+            mock_db_with_unresolvable_author_and_channel(
+                MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
+                    community("self", Some("My Community"), Some("bafyavatar")),
+                ]]),
+            );
 
         let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
         assert_eq!(
