@@ -1,11 +1,13 @@
-//! Persistence for Web Push subscriptions.
+//! Persistence for push subscriptions (Web Push and FCM).
 //!
-//! Each row is one browser/device push endpoint owned by an actor. Endpoints
-//! are globally unique (the push service mints them), so the table dedupes on
-//! `endpoint`: re-registering an endpoint refreshes its keys and owning actor
-//! rather than inserting a duplicate. The AppView reads these when a
-//! mention/reply notification is indexed (see `push_send`) to fan a Web Push
-//! out to every device the recipient has registered.
+//! Each row is one device/endpoint owned by an actor for a given `provider`
+//! (`"web"` or `"fcm"`). `endpoint` holds the provider-specific unique
+//! identifier — a Web Push endpoint URL for `provider = "web"`, an FCM
+//! registration token for `provider = "fcm"` — so the table dedupes on
+//! `(actor_did, provider, endpoint)`: re-registering refreshes the keys/owning
+//! actor rather than inserting a duplicate. The AppView reads these when a
+//! mention/reply/message notification is indexed (see `push_send`) to fan a
+//! push out to every device the recipient has registered.
 
 use sea_orm::{
     ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
@@ -22,19 +24,23 @@ use crate::models::push_subscriptions;
 pub const MAX_SUBSCRIPTIONS_PER_ACTOR: u64 = 25;
 
 /// Stores (or refreshes) a push subscription. Idempotent on `(actor_did,
-/// endpoint)`: a repeat registration updates the keys/platform and leaves
-/// `created_at` untouched. Rejects a genuinely new endpoint once the actor
-/// already has [`MAX_SUBSCRIPTIONS_PER_ACTOR`] registered.
+/// provider, endpoint)`: a repeat registration updates the keys/platform and
+/// leaves `created_at` untouched. Rejects a genuinely new endpoint once the
+/// actor already has [`MAX_SUBSCRIPTIONS_PER_ACTOR`] registered, across all
+/// providers combined.
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert(
     db: &DatabaseConnection,
     actor_did: &str,
+    provider: &str,
     endpoint: &str,
-    p256dh: &str,
-    auth: &str,
+    p256dh: Option<&str>,
+    auth: Option<&str>,
     platform: &str,
 ) -> Result<(), DbErr> {
     let already_registered = push_subscriptions::Entity::find()
         .filter(push_subscriptions::Column::ActorDid.eq(actor_did))
+        .filter(push_subscriptions::Column::Provider.eq(provider))
         .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
         .one(db)
         .await?
@@ -54,9 +60,10 @@ pub async fn upsert(
 
     let active = push_subscriptions::ActiveModel {
         actor_did: ActiveValue::Set(actor_did.to_string()),
+        provider: ActiveValue::Set(provider.to_string()),
         endpoint: ActiveValue::Set(endpoint.to_string()),
-        p256dh: ActiveValue::Set(p256dh.to_string()),
-        auth: ActiveValue::Set(auth.to_string()),
+        p256dh: ActiveValue::Set(p256dh.map(str::to_string)),
+        auth: ActiveValue::Set(auth.map(str::to_string)),
         platform: ActiveValue::Set(platform.to_string()),
         created_at: ActiveValue::Set(current_iso8601_utc()),
         ..Default::default()
@@ -66,6 +73,7 @@ pub async fn upsert(
         .on_conflict(
             sea_query::OnConflict::columns([
                 push_subscriptions::Column::ActorDid,
+                push_subscriptions::Column::Provider,
                 push_subscriptions::Column::Endpoint,
             ])
             .update_columns([
@@ -80,27 +88,35 @@ pub async fn upsert(
     Ok(())
 }
 
-/// Drops a subscription by its endpoint, regardless of owner. Used to prune
-/// subscriptions the push service reports as gone (HTTP 404/410) — the
-/// caller there isn't a user request, so there's no actor to scope to.
-pub async fn delete_by_endpoint(db: &DatabaseConnection, endpoint: &str) -> Result<(), DbErr> {
+/// Drops a subscription by its `(provider, endpoint)`, regardless of owner.
+/// Used to prune subscriptions the push service reports as gone (e.g. HTTP
+/// 404/410 for Web Push, `UNREGISTERED`/`NOT_FOUND` for FCM) — the caller
+/// there isn't a user request, so there's no actor to scope to.
+pub async fn delete_by_endpoint(
+    db: &DatabaseConnection,
+    provider: &str,
+    endpoint: &str,
+) -> Result<(), DbErr> {
     push_subscriptions::Entity::delete_many()
+        .filter(push_subscriptions::Column::Provider.eq(provider))
         .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
         .exec(db)
         .await?;
     Ok(())
 }
 
-/// Drops a subscription by its endpoint, scoped to its owning actor —
-/// used by `unregisterPush` so a caller can only ever remove their own
-/// subscriptions, never one they merely learned the endpoint of.
+/// Drops a subscription by its `(provider, endpoint)`, scoped to its owning
+/// actor — used by `unregisterPush` so a caller can only ever remove their
+/// own subscriptions, never one they merely learned the endpoint of.
 pub async fn delete_by_endpoint_for_actor(
     db: &DatabaseConnection,
     actor_did: &str,
+    provider: &str,
     endpoint: &str,
 ) -> Result<(), DbErr> {
     push_subscriptions::Entity::delete_many()
         .filter(push_subscriptions::Column::ActorDid.eq(actor_did))
+        .filter(push_subscriptions::Column::Provider.eq(provider))
         .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
         .exec(db)
         .await?;
@@ -132,18 +148,20 @@ mod tests {
                     id: 1,
                     actor_did: String::from("did:plc:me"),
                     endpoint: String::from("https://push.example/a"),
-                    p256dh: String::from("p1"),
-                    auth: String::from("a1"),
+                    p256dh: Some(String::from("p1")),
+                    auth: Some(String::from("a1")),
                     platform: String::from("web"),
+                    provider: String::from("web"),
                     created_at: String::from("2026-06-25T00:00:00.000Z"),
                 },
                 push_subscriptions::Model {
                     id: 2,
                     actor_did: String::from("did:plc:me"),
                     endpoint: String::from("https://push.example/b"),
-                    p256dh: String::from("p2"),
-                    auth: String::from("a2"),
+                    p256dh: Some(String::from("p2")),
+                    auth: Some(String::from("a2")),
                     platform: String::from("web"),
+                    provider: String::from("web"),
                     created_at: String::from("2026-06-25T00:00:01.000Z"),
                 },
             ]])
@@ -162,7 +180,7 @@ mod tests {
                 rows_affected: 0,
             }])
             .into_connection();
-        delete_by_endpoint(&db, "https://push.example/gone")
+        delete_by_endpoint(&db, "web", "https://push.example/gone")
             .await
             .unwrap();
     }

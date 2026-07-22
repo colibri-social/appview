@@ -10,6 +10,9 @@ use crate::lib::responses::ErrorResponse;
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct UnregisterPushInput {
+    /// `"web"` or `"fcm"`. Defaults to `"web"` when omitted, for older
+    /// clients that predate multi-provider support.
+    pub provider: Option<String>,
     pub endpoint: String,
 }
 
@@ -18,24 +21,26 @@ pub struct UnregisterPushResponse {
     pub unregistered: bool,
 }
 
-type UnregisterFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<(), DbErr>>
+type UnregisterFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<(), DbErr>>
     + Send
     + Sync;
 
 async fn unregister_push_with(
     auth: String,
-    endpoint: String,
+    input: UnregisterPushInput,
     db: DatabaseConnection,
     verify_auth_fn: &VerifyAuthFn,
     unregister_fn: &UnregisterFn,
 ) -> Result<Json<UnregisterPushResponse>, ErrorResponse> {
+    let provider = input.provider.unwrap_or_else(|| String::from("web"));
+    let endpoint = input.endpoint;
     with_authenticated(
         auth,
         "social.colibri.notification.unregisterPush",
         db,
         verify_auth_fn,
         |caller_did, db| async move {
-            unregister_fn(db, caller_did, endpoint).await?;
+            unregister_fn(db, caller_did, provider, endpoint).await?;
             Ok(Json(UnregisterPushResponse { unregistered: true }))
         },
     )
@@ -45,10 +50,12 @@ async fn unregister_push_with(
 fn unregister_boxed(
     db: DatabaseConnection,
     caller_did: String,
+    provider: String,
     endpoint: String,
 ) -> BoxFuture<'static, Result<(), DbErr>> {
     Box::pin(async move {
-        push_subscriptions::delete_by_endpoint_for_actor(&db, &caller_did, &endpoint).await
+        push_subscriptions::delete_by_endpoint_for_actor(&db, &caller_did, &provider, &endpoint)
+            .await
     })
 }
 
@@ -56,8 +63,8 @@ fn unregister_boxed(
     "/xrpc/social.colibri.notification.unregisterPush?<auth>",
     data = "<input>"
 )]
-/// Drops a previously registered Web Push subscription for the authenticated
-/// user, identified by its endpoint.
+/// Drops a previously registered push subscription for the authenticated
+/// user, identified by its provider + endpoint.
 pub async fn unregister_push(
     auth: &str,
     input: Json<UnregisterPushInput>,
@@ -65,7 +72,7 @@ pub async fn unregister_push(
 ) -> Result<Json<UnregisterPushResponse>, ErrorResponse> {
     unregister_push_with(
         auth.to_string(),
-        input.into_inner().endpoint,
+        input.into_inner(),
         db.inner().clone(),
         &verify_auth_boxed,
         &unregister_boxed,
@@ -81,26 +88,34 @@ mod tests {
     use rocket::tokio;
     use std::sync::{Arc, Mutex};
 
+    fn sample_input() -> UnregisterPushInput {
+        UnregisterPushInput {
+            provider: None,
+            endpoint: String::from("https://push.example/abc"),
+        }
+    }
+
     #[tokio::test]
     async fn unregisters_for_authenticated_caller() {
         let db = mock_db();
-        let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
         let captured_clone = captured.clone();
 
         let unregister = move |_: DatabaseConnection,
                                caller_did: String,
+                               provider: String,
                                endpoint: String|
               -> BoxFuture<'static, Result<(), DbErr>> {
             let captured = captured_clone.clone();
             Box::pin(async move {
-                *captured.lock().unwrap() = Some((caller_did, endpoint));
+                *captured.lock().unwrap() = Some((caller_did, provider, endpoint));
                 Ok(())
             })
         };
 
         let result = unregister_push_with(
             String::from("token"),
-            String::from("https://push.example/abc"),
+            sample_input(),
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
             &unregister,
@@ -109,9 +124,77 @@ mod tests {
         .unwrap();
 
         assert!(result.unregistered);
-        let (caller_did, endpoint) = captured.lock().unwrap().take().unwrap();
+        let (caller_did, provider, endpoint) = captured.lock().unwrap().take().unwrap();
         assert_eq!(caller_did, "did:plc:me");
+        assert_eq!(provider, "web");
         assert_eq!(endpoint, "https://push.example/abc");
+    }
+
+    #[tokio::test]
+    async fn defaults_provider_to_web_when_omitted() {
+        let db = mock_db();
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let unregister = move |_: DatabaseConnection,
+                               _: String,
+                               provider: String,
+                               _: String|
+              -> BoxFuture<'static, Result<(), DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(provider);
+                Ok(())
+            })
+        };
+
+        unregister_push_with(
+            String::from("token"),
+            sample_input(),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &unregister,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(captured.lock().unwrap().take().unwrap(), "web");
+    }
+
+    #[tokio::test]
+    async fn respects_explicit_fcm_provider() {
+        let db = mock_db();
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let unregister = move |_: DatabaseConnection,
+                               _: String,
+                               provider: String,
+                               _: String|
+              -> BoxFuture<'static, Result<(), DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(provider);
+                Ok(())
+            })
+        };
+
+        let input = UnregisterPushInput {
+            provider: Some(String::from("fcm")),
+            endpoint: String::from("fcm-registration-token"),
+        };
+
+        unregister_push_with(
+            String::from("token"),
+            input,
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &unregister,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(captured.lock().unwrap().take().unwrap(), "fcm");
     }
 
     #[tokio::test]
@@ -119,10 +202,10 @@ mod tests {
         let db = mock_db();
         let result = unregister_push_with(
             String::from("token"),
-            String::from("https://push.example/abc"),
+            sample_input(),
             db,
             &|_, _| Box::pin(async { Err(ServiceAuthError::InvalidSignature) }),
-            &|_, _, _| Box::pin(async { panic!("should not unregister when auth fails") }),
+            &|_, _, _, _| Box::pin(async { panic!("should not unregister when auth fails") }),
         )
         .await;
 

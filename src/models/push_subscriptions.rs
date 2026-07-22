@@ -11,12 +11,14 @@ pub struct Model {
     pub actor_did: String,
     #[sea_orm(column_type = "Text")]
     pub endpoint: String,
-    #[sea_orm(column_type = "Text")]
-    pub p256dh: String,
-    #[sea_orm(column_type = "Text")]
-    pub auth: String,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub p256dh: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub auth: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub platform: String,
+    #[sea_orm(column_type = "Text")]
+    pub provider: String,
     #[sea_orm(column_type = "Text")]
     pub created_at: String,
 }

@@ -107,6 +107,15 @@ async fn rocket() -> _ {
         );
     }
 
+    // FCM (Android push) is likewise optional.
+    if let Some(config) = lib::fcm_config::fcm_config() {
+        lib::fcm_config::validate_private_key(&config.private_key)
+            .expect("FCM_SERVICE_ACCOUNT_JSON must contain a valid RSA private key");
+        log::info!("FCM push enabled (service account configured).");
+    } else {
+        log::warn!("FCM push disabled: set FCM_SERVICE_ACCOUNT_JSON to enable Android push.");
+    }
+
     // The GIF picker is optional
     match std::env::var("KLIPY_API_KEY") {
         Ok(k) if !k.trim().is_empty() => log::info!("GIF picker enabled (Klipy key configured)."),

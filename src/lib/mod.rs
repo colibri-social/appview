@@ -18,6 +18,8 @@ pub mod embed_cache;
 pub mod embed_fetch;
 pub mod event_scope;
 pub mod events;
+pub mod fcm_config;
+pub mod fcm_send;
 pub mod get_atproto_record;
 pub mod get_state;
 pub mod handler;
