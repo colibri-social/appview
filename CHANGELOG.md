@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/colibri-social/appview/compare/v0.1.6...v0.1.7) - 2026-07-22
+
+### Fixed
+
+- Show user profile pictures and names in FCM notifications ([#49](https://github.com/colibri-social/appview/pull/49))
+
 ## [0.1.6](https://github.com/colibri-social/appview/compare/v0.1.5...v0.1.6) - 2026-07-22
 
 ### Added
