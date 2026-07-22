@@ -46,7 +46,12 @@ use crate::xrpc::social::colibri::actor::set_state_handler::UserState;
 use crate::xrpc::social::colibri::community::invitations::hydrate_actors;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
+const CHANNEL_NSID: &str = "social.colibri.channel";
 const FACET_SPOILER_TYPE: &str = "social.colibri.richtext.facet#spoiler";
+/// Fallback channel type for the deep link's `:channelType` segment when the
+/// channel record can't be read — matches the client's own fallback (see
+/// `TEXT_CHANNEL_COLLECTION` in `Notifications.tsx`).
+const DEFAULT_CHANNEL_TYPE: &str = "social.colibri.channel.text";
 
 /// Replaces every spoiler-covered range of `text` with a placeholder so hidden
 /// content never appears in a push preview
@@ -424,9 +429,30 @@ async fn fcm_notification_context(
         .and_then(extract_blob_cid)
         .map(|cid| blob_url(author_did, &cid));
 
+    // The channel's AT-URI collection is always the plain `social.colibri.channel`
+    // NSID regardless of kind — the actual text/voice/forum/link type lives in
+    // the record's own `type` field, so it needs its own lookup (mirrors how
+    // the client reads `channel.type` when building this same URL, e.g.
+    // `Category.tsx`'s `channelRoutePrefix`).
+    let channel_type = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(&community_did))
+        .filter(record_data::Column::Nsid.eq(CHANNEL_NSID))
+        .filter(record_data::Column::Rkey.eq(&channel.rkey))
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| {
+            r.data
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| String::from(DEFAULT_CHANNEL_TYPE));
+
     let deep_link = format!(
-        "social.colibri:/channel/{community_segment}/{}/{}",
-        channel.collection, channel.rkey
+        "social.colibri:/channel/{community_segment}/{channel_type}/{}",
+        channel.rkey
     );
 
     FcmNotificationContext {
@@ -675,23 +701,38 @@ mod tests {
 
     const AUTHOR_DID: &str = "did:plc:author";
 
-    /// Appends the three empty query results `hydrate_actors` issues in order
-    /// (self-records, user_states, repos) when it can't resolve anything for
-    /// the author — `hydrate_actors` itself then falls back to the bare DID
-    /// as the display name (mirroring every other actor-bearing surface), so
-    /// `author_name` ends up as `AUTHOR_DID` rather than our own "Someone"
-    /// fallback (which only kicks in if `hydrate_actors` errors outright).
-    fn mock_db_with_unresolvable_author(db: MockDatabase) -> sea_orm::DatabaseConnection {
+    fn channel_record(channel_type: &str) -> record_data::Model {
+        record_data::Model {
+            id: 3,
+            did: String::from("did:plc:community"),
+            nsid: String::from(CHANNEL_NSID),
+            rkey: String::from("general"),
+            data: json!({ "type": channel_type }),
+            indexed_at: String::from("2026-06-25T00:00:00.000Z"),
+        }
+    }
+
+    /// Appends the query results for everything `fcm_notification_context`
+    /// looks up *after* the community record (which the caller has already
+    /// appended): the three `hydrate_actors` issues in order (self-records,
+    /// user_states, repos) — empty here, so it falls back to the bare DID as
+    /// the display name, mirroring every other actor-bearing surface — and
+    /// finally the channel-type lookup, also empty, falling back to
+    /// `DEFAULT_CHANNEL_TYPE`.
+    fn mock_db_with_unresolvable_author_and_channel(
+        db: MockDatabase,
+    ) -> sea_orm::DatabaseConnection {
         db.append_query_results([Vec::<record_data::Model>::new()])
             .append_query_results([Vec::<crate::models::user_states::Model>::new()])
             .append_query_results([Vec::<crate::models::repos::Model>::new()])
+            .append_query_results([Vec::<record_data::Model>::new()])
             .into_connection()
     }
 
     #[tokio::test]
     async fn fcm_notification_context_builds_deep_link_and_avatar() {
         let db =
-            mock_db_with_unresolvable_author(
+            mock_db_with_unresolvable_author_and_channel(
                 MockDatabase::new(DatabaseBackend::Postgres).append_query_results([vec![
                     community("self", Some("My Community"), Some("bafyavatar")),
                 ]]),
@@ -714,7 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_notification_context_uses_compact_segment_for_non_self_rkey() {
-        let db = mock_db_with_unresolvable_author(
+        let db = mock_db_with_unresolvable_author_and_channel(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([vec![community("byo", None, None)]]),
         );
@@ -730,7 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_notification_context_falls_back_gracefully_without_a_community_record() {
-        let db = mock_db_with_unresolvable_author(
+        let db = mock_db_with_unresolvable_author_and_channel(
             MockDatabase::new(DatabaseBackend::Postgres)
                 .append_query_results([Vec::<record_data::Model>::new()]),
         );
@@ -761,6 +802,7 @@ mod tests {
             }]])
             .append_query_results([Vec::<crate::models::user_states::Model>::new()])
             .append_query_results([Vec::<crate::models::repos::Model>::new()])
+            .append_query_results([Vec::<record_data::Model>::new()])
             .into_connection();
 
         let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
@@ -768,6 +810,27 @@ mod tests {
         assert!(context.author_avatar_url.as_deref().is_some_and(|u| {
             u.contains(&format!("did={AUTHOR_DID}")) && u.contains("cid=bafyauthor")
         }));
+    }
+
+    #[tokio::test]
+    async fn fcm_notification_context_uses_the_channel_records_own_type_not_the_uri_nsid() {
+        // Regression test: the channel AT-URI's collection is always the
+        // plain `social.colibri.channel` NSID regardless of kind (see
+        // `CHANNEL`) — the deep link's `:channelType` segment must come from
+        // the record's own `type` field, not `AtUri::parse(...).collection`.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![community("self", None, None)]])
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([Vec::<crate::models::user_states::Model>::new()])
+            .append_query_results([Vec::<crate::models::repos::Model>::new()])
+            .append_query_results([vec![channel_record("social.colibri.channel.voice")]])
+            .into_connection();
+
+        let context = fcm_notification_context(&db, CHANNEL, AUTHOR_DID).await;
+        assert_eq!(
+            context.deep_link,
+            "social.colibri:/channel/did:plc:community/social.colibri.channel.voice/general"
+        );
     }
 
     fn mute(subject: &str) -> record_data::Model {
@@ -781,7 +844,7 @@ mod tests {
         }
     }
 
-    const CHANNEL: &str = "at://did:plc:community/social.colibri.channel.text/general";
+    const CHANNEL: &str = "at://did:plc:community/social.colibri.channel/general";
 
     #[test]
     fn channel_mute_matches_exact_channel() {
