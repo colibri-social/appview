@@ -21,10 +21,9 @@ pub struct UnregisterPushResponse {
     pub unregistered: bool,
 }
 
-type UnregisterFn =
-    dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<(), DbErr>>
-        + Send
-        + Sync;
+type UnregisterFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<(), DbErr>>
+    + Send
+    + Sync;
 
 async fn unregister_push_with(
     auth: String,

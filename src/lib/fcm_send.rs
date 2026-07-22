@@ -156,10 +156,7 @@ impl FcmClient {
             }
         });
 
-        let url = format!(
-            "{}/{}/messages:send",
-            self.send_url_base, config.project_id
-        );
+        let url = format!("{}/{}/messages:send", self.send_url_base, config.project_id);
         let res = match self
             .http
             .post(&url)
@@ -236,7 +233,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/token"))
-            .and(body_string_contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer"))
+            .and(body_string_contains(
+                "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "token-1",
                 "expires_in": 3600,
@@ -303,7 +302,14 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(&config, "access-token", "dead-token", "t", "b", &HashMap::new())
+            .send(
+                &config,
+                "access-token",
+                "dead-token",
+                "t",
+                "b",
+                &HashMap::new(),
+            )
             .await;
         assert_eq!(outcome, SendOutcome::Unregistered);
     }
@@ -322,7 +328,14 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(&config, "access-token", "some-token", "t", "b", &HashMap::new())
+            .send(
+                &config,
+                "access-token",
+                "some-token",
+                "t",
+                "b",
+                &HashMap::new(),
+            )
             .await;
         assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
@@ -339,7 +352,14 @@ mod tests {
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(&config, "access-token", "some-token", "t", "b", &HashMap::new())
+            .send(
+                &config,
+                "access-token",
+                "some-token",
+                "t",
+                "b",
+                &HashMap::new(),
+            )
             .await;
         assert!(matches!(outcome, SendOutcome::Failed(_)));
     }
@@ -349,14 +369,25 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/colibri-test/messages:send"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "name": "projects/colibri-test/messages/0" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "name": "projects/colibri-test/messages/0" }),
+                ),
+            )
             .mount(&server)
             .await;
 
         let client = FcmClient::new(format!("{}/token", server.uri()), server.uri());
         let config = test_config();
         let outcome = client
-            .send(&config, "access-token", "some-token", "t", "b", &HashMap::new())
+            .send(
+                &config,
+                "access-token",
+                "some-token",
+                "t",
+                "b",
+                &HashMap::new(),
+            )
             .await;
         assert_eq!(outcome, SendOutcome::Delivered);
     }

@@ -226,7 +226,10 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
             "web" => send_web_one(&db, &sub, &payload).await,
             "fcm" => send_fcm_one(&db, &sub, &payload).await,
             other => {
-                log::warn!("push: unknown provider '{other}' for subscription {}", sub.id);
+                log::warn!(
+                    "push: unknown provider '{other}' for subscription {}",
+                    sub.id
+                );
                 continue;
             }
         };
@@ -258,7 +261,8 @@ async fn send_web_one(
 
     let body = serde_json::to_vec(payload).map_err(|e| format!("serialize payload: {e}"))?;
 
-    let subscription_info = SubscriptionInfo::new(sub.endpoint.clone(), p256dh.to_string(), auth.to_string());
+    let subscription_info =
+        SubscriptionInfo::new(sub.endpoint.clone(), p256dh.to_string(), auth.to_string());
 
     let mut sig_builder =
         VapidSignatureBuilder::from_base64(&config.private_key, &subscription_info)
