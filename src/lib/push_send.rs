@@ -383,10 +383,10 @@ async fn fcm_channel_context(db: &DatabaseConnection, channel_uri: &str) -> FcmC
         .and_then(|r| r.data.get("picture"))
         .and_then(extract_blob_cid)
         .map(|cid| {
-            return format!(
+            format!(
                 "https://{}/xrpc/com.atproto.sync.getBlob?did={community_did}&cid={cid}",
                 appview_host()
-            );
+            )
         });
 
     let deep_link = format!(
