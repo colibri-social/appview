@@ -16,17 +16,50 @@ pub struct PushKeys {
     pub auth: String,
 }
 
+/// The provider-specific half of a registration — a discriminated union so
+/// each shape can carry only what its provider actually needs (an opaque FCM
+/// token isn't a URL, and a Web Push endpoint isn't a bearer token).
+#[derive(Deserialize, Clone, Debug)]
+#[serde(tag = "$type")]
+pub enum PushSubscriptionInput {
+    #[serde(rename = "social.colibri.notification.registerPush#webPushSubscription")]
+    Web { endpoint: String, keys: PushKeys },
+    #[serde(rename = "social.colibri.notification.registerPush#fcmSubscription")]
+    Fcm { token: String },
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct RegisterPushInput {
-    /// `"web"` or `"tauri"`. Recorded for future use; only `web` is delivered.
+    /// `"web"`, `"tauri"`, or `"android"`. Recorded for future use; delivery
+    /// branches on `subscription`'s provider, not on this field.
     pub platform: String,
-    pub endpoint: String,
-    pub keys: PushKeys,
+    pub subscription: PushSubscriptionInput,
 }
 
 #[derive(Serialize, Debug)]
 pub struct RegisterPushResponse {
     pub registered: bool,
+}
+
+/// Generous upper bound on an FCM registration token's length — real tokens
+/// are ~150-200 bytes; this is headroom against abuse, not a correctness
+/// constraint (Google doesn't publish a hard cap).
+const MAX_FCM_TOKEN_LEN: usize = 4096;
+
+/// FCM tokens are opaque, not URLs — `embed_fetch::assert_url_allowed` is the
+/// wrong tool here. This is a cheap sanity check instead: non-empty, bounded,
+/// no control characters.
+fn validate_fcm_token(token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        return Err(String::from("token must not be empty"));
+    }
+    if token.len() > MAX_FCM_TOKEN_LEN {
+        return Err(String::from("token exceeds maximum length"));
+    }
+    if token.chars().any(char::is_control) {
+        return Err(String::from("token contains control characters"));
+    }
+    Ok(())
 }
 
 type RegisterFn = dyn Fn(DatabaseConnection, String, RegisterPushInput) -> BoxFuture<'static, Result<(), DbErr>>
@@ -46,14 +79,26 @@ async fn register_push_with(
         db,
         verify_auth_fn,
         |caller_did, db| async move {
-            embed_fetch::assert_url_allowed(&input.endpoint)
-                .await
-                .map_err(|e| ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("InvalidRequest"),
-                        message: format!("Invalid push endpoint: {e}"),
-                    }),
-                })?;
+            match &input.subscription {
+                PushSubscriptionInput::Web { endpoint, .. } => {
+                    embed_fetch::assert_url_allowed(endpoint)
+                        .await
+                        .map_err(|e| ErrorResponse {
+                            body: Json(ErrorBody {
+                                error: String::from("InvalidRequest"),
+                                message: format!("Invalid push endpoint: {e}"),
+                            }),
+                        })?;
+                }
+                PushSubscriptionInput::Fcm { token } => {
+                    validate_fcm_token(token).map_err(|e| ErrorResponse {
+                        body: Json(ErrorBody {
+                            error: String::from("InvalidRequest"),
+                            message: format!("Invalid FCM token: {e}"),
+                        }),
+                    })?;
+                }
+            }
             register_fn(db, caller_did, input).await?;
             Ok(Json(RegisterPushResponse { registered: true }))
         },
@@ -67,12 +112,22 @@ fn register_boxed(
     input: RegisterPushInput,
 ) -> BoxFuture<'static, Result<(), DbErr>> {
     Box::pin(async move {
+        let (provider, endpoint, p256dh, auth) = match &input.subscription {
+            PushSubscriptionInput::Web { endpoint, keys } => (
+                "web",
+                endpoint.as_str(),
+                Some(keys.p256dh.as_str()),
+                Some(keys.auth.as_str()),
+            ),
+            PushSubscriptionInput::Fcm { token } => ("fcm", token.as_str(), None, None),
+        };
         push_subscriptions::upsert(
             &db,
             &caller_did,
-            &input.endpoint,
-            &input.keys.p256dh,
-            &input.keys.auth,
+            provider,
+            endpoint,
+            p256dh,
+            auth,
             &input.platform,
         )
         .await
@@ -111,10 +166,21 @@ mod tests {
     fn sample_input() -> RegisterPushInput {
         RegisterPushInput {
             platform: String::from("web"),
-            endpoint: String::from("https://1.1.1.1/abc"),
-            keys: PushKeys {
-                p256dh: String::from("p256dh-key"),
-                auth: String::from("auth-key"),
+            subscription: PushSubscriptionInput::Web {
+                endpoint: String::from("https://1.1.1.1/abc"),
+                keys: PushKeys {
+                    p256dh: String::from("p256dh-key"),
+                    auth: String::from("auth-key"),
+                },
+            },
+        }
+    }
+
+    fn sample_fcm_input() -> RegisterPushInput {
+        RegisterPushInput {
+            platform: String::from("android"),
+            subscription: PushSubscriptionInput::Fcm {
+                token: String::from("fcm-registration-token"),
             },
         }
     }
@@ -131,7 +197,10 @@ mod tests {
               -> BoxFuture<'static, Result<(), DbErr>> {
             let captured = captured_clone.clone();
             Box::pin(async move {
-                *captured.lock().unwrap() = Some((did, input.endpoint, input.keys.p256dh));
+                let PushSubscriptionInput::Web { endpoint, keys } = input.subscription else {
+                    panic!("expected a web subscription");
+                };
+                *captured.lock().unwrap() = Some((did, endpoint, keys.p256dh));
                 Ok(())
             })
         };
@@ -156,8 +225,16 @@ mod tests {
     #[tokio::test]
     async fn rejects_endpoint_pointing_at_private_ip() {
         let db = mock_db();
-        let mut input = sample_input();
-        input.endpoint = String::from("http://127.0.0.1/abc");
+        let input = RegisterPushInput {
+            platform: String::from("web"),
+            subscription: PushSubscriptionInput::Web {
+                endpoint: String::from("http://127.0.0.1/abc"),
+                keys: PushKeys {
+                    p256dh: String::from("p256dh-key"),
+                    auth: String::from("auth-key"),
+                },
+            },
+        };
 
         let result = register_push_with(
             String::from("token"),
@@ -165,6 +242,70 @@ mod tests {
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
             &|_, _, _| Box::pin(async { panic!("should not register a blocked endpoint") }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "InvalidRequest"
+        );
+    }
+
+    #[tokio::test]
+    async fn registers_an_fcm_subscription_without_url_validation() {
+        let db = mock_db();
+        let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        let register = move |_: DatabaseConnection,
+                             did: String,
+                             input: RegisterPushInput|
+              -> BoxFuture<'static, Result<(), DbErr>> {
+            let captured = captured_clone.clone();
+            Box::pin(async move {
+                let PushSubscriptionInput::Fcm { token } = input.subscription else {
+                    panic!("expected an fcm subscription");
+                };
+                *captured.lock().unwrap() = Some((did, token));
+                Ok(())
+            })
+        };
+
+        // A bare alphanumeric string would fail `assert_url_allowed` (no
+        // scheme/host) — proves the Fcm branch never routes through it.
+        let result = register_push_with(
+            String::from("token"),
+            sample_fcm_input(),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &register,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.registered);
+        let (did, token) = captured.lock().unwrap().take().unwrap();
+        assert_eq!(did, "did:plc:me");
+        assert_eq!(token, "fcm-registration-token");
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_fcm_token() {
+        let db = mock_db();
+        let input = RegisterPushInput {
+            platform: String::from("android"),
+            subscription: PushSubscriptionInput::Fcm {
+                token: String::new(),
+            },
+        };
+
+        let result = register_push_with(
+            String::from("token"),
+            input,
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &|_, _, _| Box::pin(async { panic!("should not register an empty token") }),
         )
         .await;
 
