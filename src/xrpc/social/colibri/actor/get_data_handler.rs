@@ -43,6 +43,8 @@ pub struct ActorData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<ColibriProfileTheme>,
     pub status: ActorStatus,
+    #[serde(rename = "preferredBadge", skip_serializing_if = "Option::is_none")]
+    pub preferred_badge: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -77,6 +79,7 @@ pub fn actor_data_from_effective(
         sync_bluesky: effective.sync_bluesky,
         theme: effective.theme,
         status,
+        preferred_badge: effective.preferred_badge,
     }
 }
 

@@ -192,6 +192,7 @@ mod tests {
                     text: String::new(),
                     emoji: None,
                 },
+                preferred_badge: None,
             },
         }
     }
