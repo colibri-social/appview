@@ -67,6 +67,7 @@ pub enum ServerMessage {
         deafened: bool,
     },
     Kicked,
+    Superseded,
     #[serde(rename_all = "camelCase")]
     Error {
         message: String,

@@ -94,6 +94,13 @@ async fn parse_client_event(
         "voice_join" => {
             let vc_msg_data: VoiceChannelData = serde_json::from_value(user_message.data?).ok()?;
 
+            if let Ok(states) = get_did_states(did.clone(), db).await
+                && let Some(existing) = states.vc
+                && existing != vc_msg_data.channel
+            {
+                leave_vc_and_broadcast(&did, to_tap_broadcast, hum_outbox, db).await;
+            }
+
             hum_client::enqueue(
                 hum_outbox,
                 OutboundHum::Voice {
