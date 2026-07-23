@@ -305,8 +305,9 @@ pub struct ColibriReaction {
     /// The emoji of the reaction. Supports custom strings.
     pub emoji: String,
 
-    /// The message this reaction belongs to.
-    /// Format: record-key
+    /// The message this reaction belongs to, as its full AT-URI
+    /// (`at://{author}/social.colibri.message/{rkey}`). Historical records may
+    /// hold a bare rkey.
     #[serde(rename = "targetMessage", alias = "parent")]
     pub parent: String,
 }

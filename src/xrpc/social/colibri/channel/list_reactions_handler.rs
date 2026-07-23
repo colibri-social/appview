@@ -55,7 +55,7 @@ pub async fn assemble_reactions(
     let Some(community_did) = resolve_community_did(db, message).await? else {
         // No matching message/channel record yet (e.g., not backfilled);
         // fall back to unfiltered reactions.
-        return list_reactions_for_message(db, &message.rkey).await;
+        return list_reactions_for_message(db, message).await;
     };
 
     if is_user_banned(db, &community_did, &message.authority).await? {
@@ -66,7 +66,7 @@ pub async fn assemble_reactions(
         .await?
         .into_iter()
         .collect();
-    let reactions = list_reactions_for_message(db, &message.rkey).await?;
+    let reactions = list_reactions_for_message(db, message).await?;
     Ok(strip_banned_reactors(reactions, &banned))
 }
 

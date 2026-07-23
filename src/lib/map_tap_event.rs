@@ -839,14 +839,15 @@ async fn map_tap_event_with(
             }
         }
         "social.colibri.reaction" => {
-            // Reactions live on the REACTOR's repo and reference a bare target
-            // message rkey, so the owning community is resolved message -> channel
-            // -> community. `Global` fallback on a miss keeps the (small,
-            // idempotent) event from being silently dropped.
+            // Reactions live on the REACTOR's repo and reference the target
+            // message by its full AT-URI (historical records may hold a bare
+            // rkey), so normalize to the rkey and resolve the owning community
+            // message -> channel -> community. `Global` fallback on a miss keeps
+            // the (small, idempotent) event from being silently dropped.
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriReaction>(event_record)?;
                 let scope = resolver
-                    .community_for_message(&db, &record_data.parent)
+                    .community_for_message(&db, &AtUri::rkey_or_value(&record_data.parent))
                     .await
                     .map(EventScope::Community)
                     .unwrap_or(EventScope::Global);
@@ -880,7 +881,7 @@ async fn map_tap_event_with(
 
                 let scope = match cached.as_ref() {
                     Some(reaction) => resolver
-                        .community_for_message(&db, &reaction.parent)
+                        .community_for_message(&db, &AtUri::rkey_or_value(&reaction.parent))
                         .await
                         .map(EventScope::Community)
                         .unwrap_or(EventScope::Global),
