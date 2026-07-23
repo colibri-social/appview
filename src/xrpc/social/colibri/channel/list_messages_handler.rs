@@ -437,8 +437,10 @@ pub async fn assemble_message_page(
                 .map(|r| (r.did.clone(), r.rkey.clone())),
         )
         .collect();
-    let reactions =
-        strip_banned_reactors(group_reactions_for_messages(db, &all_messages).await?, banned);
+    let reactions = strip_banned_reactors(
+        group_reactions_for_messages(db, &all_messages).await?,
+        banned,
+    );
 
     // Collect unique author DIDs from page messages and their parents.
     let mut author_dids: Vec<String> = records

@@ -75,7 +75,11 @@ pub async fn list_reactions_for_message(
     message: &AtUri,
 ) -> Result<Vec<ReactionSummary>, DbErr> {
     let candidates = parent_candidates(&message.authority, &message.rkey);
-    let values: Vec<sea_orm::Value> = candidates.iter().cloned().map(sea_orm::Value::from).collect();
+    let values: Vec<sea_orm::Value> = candidates
+        .iter()
+        .cloned()
+        .map(sea_orm::Value::from)
+        .collect();
     let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${i}")).collect();
     let in_clause = format!(
         r#""record_data"."data"->>'parent' IN ({})"#,
