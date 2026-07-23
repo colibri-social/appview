@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::colibri::ColibriCommunity;
+use crate::lib::colibri::{ColibriCommunity, community_hub_did};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::models::record_data;
 
@@ -26,6 +26,7 @@ pub struct CommunityInfo {
     pub category_order: Vec<String>,
     #[serde(rename = "requiresApprovalToJoin")]
     pub requires_approval_to_join: bool,
+    pub appview: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -130,6 +131,8 @@ async fn get_data_with(
             }),
         })?;
 
+    let appview = community_hub_did(&stored_community);
+
     let category_order = stored_community
         .category_order
         .into_iter()
@@ -151,6 +154,7 @@ async fn get_data_with(
         picture: stored_community.picture,
         category_order,
         requires_approval_to_join: stored_community.requires_approval_to_join,
+        appview,
     };
 
     let categories = raw
@@ -388,6 +392,27 @@ mod tests {
         assert_eq!(result.roles[0].name, "Owner");
         assert_eq!(result.members.len(), 1);
         assert_eq!(result.members[0].handle, "alice.test");
+        assert_eq!(result.community.appview, "did:web:api.colibri.social");
+    }
+
+    #[tokio::test]
+    async fn surfaces_explicit_hub_appview() {
+        let db = mock_db();
+        let result = get_data_with(
+            String::from("at://did:plc:owner/social.colibri.community/self"),
+            db,
+            |_, _| {
+                Box::pin(async {
+                    let mut model = community_model();
+                    model.data["appview"] = serde_json::json!("did:web:hub.example.com");
+                    Ok(raw_data_with_community(Some(model)))
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.community.appview, "did:web:hub.example.com");
     }
 
     #[tokio::test]
