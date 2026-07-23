@@ -82,6 +82,13 @@ pub struct ColibriActorProfile {
     /// value. Absent means the user has not opted into cross-instance presence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presence_service: Option<String>,
+
+    /// Label value of the badge the user chose to display as their primary
+    /// badge. Absent means automatic (the highest-priority badge the user
+    /// holds). Treated as an opaque passthrough; badge validity is enforced
+    /// client-side against the labeler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_badge: Option<String>,
 }
 
 /// The profile a viewer should see for a user, after applying the Colibri
@@ -94,6 +101,8 @@ pub struct EffectiveProfile {
     pub description: Option<String>,
     pub theme: Option<ColibriProfileTheme>,
     pub sync_bluesky: bool,
+    /// Colibri-only, always from the Colibri record regardless of `syncBluesky`.
+    pub preferred_badge: Option<String>,
     // Surfaced for callers/tests to distinguish onboarded users; unread in prod today
     #[allow(dead_code)]
     pub has_colibri_profile: bool,
@@ -112,13 +121,17 @@ pub fn resolve_effective_profile(
     colibri_profile: Option<&ColibriActorProfile>,
     bsky_profile: Option<&ActorProfile>,
 ) -> EffectiveProfile {
-    let from_bsky = |theme: Option<ColibriProfileTheme>, sync: bool, has: bool| EffectiveProfile {
+    let from_bsky = |theme: Option<ColibriProfileTheme>,
+                     preferred_badge: Option<String>,
+                     sync: bool,
+                     has: bool| EffectiveProfile {
         display_name: bsky_profile.and_then(|b| b.display_name.clone()),
         avatar: bsky_profile.and_then(|b| b.avatar.clone()),
         banner: bsky_profile.and_then(|b| b.banner.clone()),
         description: bsky_profile.and_then(|b| b.description.clone()),
         theme,
         sync_bluesky: sync,
+        preferred_badge,
         has_colibri_profile: has,
     };
 
@@ -130,10 +143,11 @@ pub fn resolve_effective_profile(
             description: p.description.clone(),
             theme: p.theme.clone(),
             sync_bluesky: false,
+            preferred_badge: p.preferred_badge.clone(),
             has_colibri_profile: true,
         },
-        Some(p) => from_bsky(p.theme.clone(), true, true),
-        None => from_bsky(None, false, false),
+        Some(p) => from_bsky(p.theme.clone(), p.preferred_badge.clone(), true, true),
+        None => from_bsky(None, None, false, false),
     }
 }
 
