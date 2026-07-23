@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/colibri-social/appview/compare/v0.1.10...v0.1.11) - 2026-07-23
+
+### Added
+
+- preferred badges ([#62](https://github.com/colibri-social/appview/pull/62))
+
+### Fixed
+
+- voice exclusivity ([#60](https://github.com/colibri-social/appview/pull/60))
+- Include controlling appview in getData response ([#59](https://github.com/colibri-social/appview/pull/59))
+
 ## [0.1.10](https://github.com/colibri-social/appview/compare/v0.1.9...v0.1.10) - 2026-07-23
 
 ### Fixed
