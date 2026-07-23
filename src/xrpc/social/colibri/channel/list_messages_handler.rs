@@ -426,13 +426,19 @@ pub async fn assemble_message_page(
     parent_records.extend(legacy_records);
 
     // Fetch reactions for page messages and their parents in one round-trip.
-    let all_rkeys: Vec<String> = records
+    // Reactions target the full message AT-URI, so pass each message's author
+    // DID + rkey; the result is keyed by rkey (see `group_reactions_for_messages`).
+    let all_messages: Vec<(String, String)> = records
         .iter()
-        .map(|r| r.rkey.clone())
-        .chain(parent_records.values().map(|r| r.rkey.clone()))
+        .map(|r| (r.did.clone(), r.rkey.clone()))
+        .chain(
+            parent_records
+                .values()
+                .map(|r| (r.did.clone(), r.rkey.clone())),
+        )
         .collect();
     let reactions =
-        strip_banned_reactors(group_reactions_for_messages(db, &all_rkeys).await?, banned);
+        strip_banned_reactors(group_reactions_for_messages(db, &all_messages).await?, banned);
 
     // Collect unique author DIDs from page messages and their parents.
     let mut author_dids: Vec<String> = records
