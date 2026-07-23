@@ -365,6 +365,8 @@ async fn run_voice_loop(
         .await;
     }
 
+    let (session_id, evict) = sfu.register_session(&did).await;
+
     loop {
         let connected = tokio::select! {
             msg = ws_source.next() => match msg {
@@ -452,12 +454,18 @@ async fn run_voice_loop(
                 }
                 Err(RecvError::Closed) => false,
             },
+            _ = evict.notified() => {
+                send(&mut ws_sink, &ServerMessage::Superseded).await;
+                false
+            }
         };
 
         if !connected {
             break;
         }
     }
+
+    sfu.deregister_session(&did, session_id).await;
 
     for producer_id in &my_producer_ids {
         channel.remove_producer(producer_id);

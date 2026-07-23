@@ -5,11 +5,11 @@ mod backend {
     use std::num::{NonZeroU8, NonZeroU16, NonZeroU32};
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use mediasoup::prelude::*;
     use mediasoup::rtp_observer::RtpObserverAddProducerOptions;
-    use rocket::tokio::sync::{RwLock, broadcast};
+    use rocket::tokio::sync::{Notify, RwLock, broadcast};
 
     use crate::lib::voice_control::{VoiceAction, VoiceControlCommand};
 
@@ -239,12 +239,19 @@ mod backend {
         }
     }
 
+    struct VoiceSession {
+        id: u64,
+        evict: Arc<Notify>,
+    }
+
     pub struct Sfu {
         #[allow(dead_code)]
         worker_manager: WorkerManager,
         workers: Vec<Worker>,
         next_worker: AtomicUsize,
         channels: RwLock<HashMap<String, Arc<ChannelSfu>>>,
+        sessions: RwLock<HashMap<String, Vec<VoiceSession>>>,
+        next_session_id: AtomicU64,
     }
 
     impl Sfu {
@@ -265,6 +272,33 @@ mod backend {
                 workers,
                 next_worker: AtomicUsize::new(0),
                 channels: RwLock::new(HashMap::new()),
+                sessions: RwLock::new(HashMap::new()),
+                next_session_id: AtomicU64::new(0),
+            }
+        }
+
+        pub async fn register_session(&self, did: &str) -> (u64, Arc<Notify>) {
+            let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+            let evict = Arc::new(Notify::new());
+            let mut sessions = self.sessions.write().await;
+            let entry = sessions.entry(did.to_string()).or_default();
+            for existing in entry.drain(..) {
+                existing.evict.notify_one();
+            }
+            entry.push(VoiceSession {
+                id,
+                evict: evict.clone(),
+            });
+            (id, evict)
+        }
+
+        pub async fn deregister_session(&self, did: &str, id: u64) {
+            let mut sessions = self.sessions.write().await;
+            if let Some(entry) = sessions.get_mut(did) {
+                entry.retain(|s| s.id != id);
+                if entry.is_empty() {
+                    sessions.remove(did);
+                }
             }
         }
 
