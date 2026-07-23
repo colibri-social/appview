@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "colibri-appview"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 
 [profile.release]
