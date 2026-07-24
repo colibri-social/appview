@@ -97,9 +97,22 @@ pub async fn get_authorized_communities(
         // REMOVABLE MIGRATION SCAFFOLDING: a legacy community stamped with
         // `migratedTo` has been replaced, hide it from everyone (its owner via
         // branch 1, its members via branches 2/3). The replacement surfaces
-        // via the member records the migration wrote.
+        // via the member records the migration wrote. The second condition is
+        // the reverse lookup: the replacement community's `migratedFrom` also
+        // retires the legacy record, covering legacy rows whose `migratedTo`
+        // stamp never reached this AppView's cache.
         .filter(Expr::cust(
             r#""record_data"."data"->>'migratedTo' IS NULL"#,
+        ))
+        .filter(Expr::cust(
+            r#"
+            NOT EXISTS (
+                SELECT 1 FROM record_data mig
+                WHERE "mig"."nsid" = 'social.colibri.community'
+                  AND "mig"."data"->>'migratedFrom' =
+                      'at://' || "record_data"."did" || '/social.colibri.community/' || "record_data"."rkey"
+            )
+            "#,
         ))
         .filter(
             Condition::any()
