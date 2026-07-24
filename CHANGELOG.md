@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/colibri-social/appview/compare/v0.1.11...v0.1.12) - 2026-07-24
+
+### Fixed
+
+- Migration ([#63](https://github.com/colibri-social/appview/pull/63))
+
 ## [0.1.11](https://github.com/colibri-social/appview/compare/v0.1.10...v0.1.11) - 2026-07-23
 
 ### Added
