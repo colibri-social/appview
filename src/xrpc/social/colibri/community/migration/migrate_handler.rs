@@ -12,9 +12,11 @@
 //! - imports every legacy member (anyone with a `social.colibri.membership`
 //!   record pointing at the legacy community), bypassing the approval queue.
 //!
-//! The legacy community record itself is stamped with `migratedTo` by the
-//! *client* afterwards — the AppView holds no credentials for the owner's
-//! personal DID where the legacy community lives.
+//! The legacy community *record* is stamped with `migratedTo` by the *client*
+//! afterwards — the AppView holds no credentials for the owner's personal DID
+//! where the legacy community lives. The AppView's own `record_data` cache,
+//! however, is stamped (and populated with the new community's records) right
+//! here, so its reads reflect the migration without waiting for tap.
 //!
 //! The `kind` discriminator lets this endpoint host future migrations; today
 //! only `"legacy-community"` is handled.
@@ -142,6 +144,7 @@ type UploadBlobFn = dyn Fn(String, String, Vec<u8>, String) -> BoxFuture<'static
     + Send
     + Sync;
 type RegisterDidsFn = dyn Fn(Vec<String>) -> BoxFuture<'static, ()> + Send + Sync;
+type CacheUpsertFn = dyn Fn(String, String, String, Value) -> BoxFuture<'static, ()> + Send + Sync;
 
 // ---- Pure structure planner (unit-tested) -------------------------------
 
@@ -283,6 +286,7 @@ async fn migrate_with(
     create_record_fn: &CreateRecordFn,
     upload_blob_fn: &UploadBlobFn,
     register_dids_fn: &RegisterDidsFn,
+    cache_upsert_fn: &CacheUpsertFn,
 ) -> Result<Json<MigrateResponse>, ErrorResponse> {
     let mig_id = generate_tid();
 
@@ -353,6 +357,14 @@ async fn migrate_with(
         "community",
     )
     .await?;
+    cache_record(
+        cache_upsert_fn,
+        &target.did,
+        COMMUNITY_NSID,
+        COMMUNITY_RKEY,
+        &planned.community,
+    )
+    .await;
 
     // 2. Categories.
     for (rkey, record) in &planned.categories {
@@ -366,6 +378,7 @@ async fn migrate_with(
             "category",
         )
         .await?;
+        cache_record(cache_upsert_fn, &target.did, CATEGORY_NSID, rkey, record).await;
     }
 
     // 3. Channels.
@@ -380,6 +393,7 @@ async fn migrate_with(
             "channel",
         )
         .await?;
+        cache_record(cache_upsert_fn, &target.did, CHANNEL_NSID, rkey, record).await;
     }
 
     // 4. Owner role (protected, full permission catalog).
@@ -408,6 +422,14 @@ async fn migrate_with(
         "role",
     )
     .await?;
+    cache_record(
+        cache_upsert_fn,
+        &target.did,
+        "social.colibri.role",
+        &owner_role_rkey,
+        &owner_role,
+    )
+    .await;
 
     // 5. Owner member (the migrating caller).
     let owner_member = ColibriMember {
@@ -418,16 +440,25 @@ async fn migrate_with(
         nickname: None,
         from_membership: None,
     };
+    let owner_member_rkey = generate_tid();
     write_record(
         create_record_fn,
         &target,
         "social.colibri.member",
-        Some(generate_tid()),
+        Some(owner_member_rkey.clone()),
         &owner_member,
         &mig_id,
         "member",
     )
     .await?;
+    cache_record(
+        cache_upsert_fn,
+        &target.did,
+        "social.colibri.member",
+        &owner_member_rkey,
+        &owner_member,
+    )
+    .await;
 
     // 6. Import every legacy member (bypassing approval). The owner is already
     //    a member above, so skip any self-membership.
@@ -446,18 +477,29 @@ async fn migrate_with(
             nickname: None,
             from_membership: Some(member.membership_uri),
         };
+        let member_rkey = generate_tid();
         match write_record(
             create_record_fn,
             &target,
             "social.colibri.member",
-            Some(generate_tid()),
+            Some(member_rkey.clone()),
             &record,
             &mig_id,
             "imported-member",
         )
         .await
         {
-            Ok(_) => imported += 1,
+            Ok(_) => {
+                imported += 1;
+                cache_record(
+                    cache_upsert_fn,
+                    &target.did,
+                    "social.colibri.member",
+                    &member_rkey,
+                    &record,
+                )
+                .await;
+            }
             Err(e) => {
                 // A single member failing shouldn't abort the whole migration.
                 log::error!(
@@ -487,6 +529,28 @@ async fn migrate_with(
         "actor.data",
     )
     .await?;
+    cache_record(
+        cache_upsert_fn,
+        &target.did,
+        "social.colibri.actor.data",
+        "self",
+        &actor_data,
+    )
+    .await;
+
+    // 8. Retire the legacy community in the local index immediately — hiding
+    //    it must not depend on the client's `migratedTo` stamp surviving the
+    //    PDS → firehose → tap round trip.
+    let mut retired = old.community.clone();
+    retired.migrated_to = Some(community_ref.uri.clone());
+    cache_record(
+        cache_upsert_fn,
+        &source.authority,
+        COMMUNITY_NSID,
+        &source.rkey,
+        &retired,
+    )
+    .await;
 
     register_dids_fn(vec![target.did.clone()]).await;
 
@@ -564,6 +628,20 @@ async fn write_record<T: Serialize>(
         log::error!("[migrate {mig_id}] write_record({label}) failed: {e}");
         pds_error(format!("createRecord({label}) failed: {e}"))
     })
+}
+
+/// Mirrors a just-written record into the local `record_data` cache so reads
+/// issued right after the migration returns see it without waiting for tap.
+async fn cache_record<T: Serialize>(
+    cache_upsert_fn: &CacheUpsertFn,
+    did: &str,
+    nsid: &str,
+    rkey: &str,
+    record: &T,
+) {
+    if let Ok(value) = serde_json::to_value(record) {
+        cache_upsert_fn(did.to_string(), nsid.to_string(), rkey.to_string(), value).await;
+    }
 }
 
 // ---- Error helpers ------------------------------------------------------
@@ -894,6 +972,15 @@ pub async fn migrate(
             Box::pin(async move { fetch_legacy_members_prod(db, uri).await })
         };
 
+    let db_for_cache = db_conn.clone();
+    let cache_upsert_fn =
+        move |did: String, nsid: String, rkey: String, data: Value| -> BoxFuture<'static, ()> {
+            let db = db_for_cache.clone();
+            Box::pin(async move {
+                crate::lib::community_write::cache_upsert(&db, &did, &nsid, &rkey, data).await
+            })
+        };
+
     migrate_with(
         auth.to_string(),
         input,
@@ -904,6 +991,7 @@ pub async fn migrate(
         &create_record_boxed,
         &upload_blob_boxed,
         &register_dids_boxed,
+        &cache_upsert_fn,
     )
     .await
 }
@@ -1085,6 +1173,7 @@ mod tests {
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not write") }),
             &|_, _, _, _| Box::pin(async { panic!("should not upload") }),
             &|_| Box::pin(async {}),
+            &|_, _, _, _| Box::pin(async { panic!("should not cache") }),
         )
         .await;
         assert_eq!(
@@ -1106,10 +1195,13 @@ mod tests {
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not write") }),
             &|_, _, _, _| Box::pin(async { panic!("should not upload") }),
             &|_| Box::pin(async {}),
+            &|_, _, _, _| Box::pin(async { panic!("should not cache") }),
         )
         .await;
         assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
     }
+
+    type CapturedCache = Arc<Mutex<Vec<(String, String, String, Value)>>>;
 
     #[tokio::test]
     async fn writes_full_migration_and_imports_members() {
@@ -1117,6 +1209,8 @@ mod tests {
         let create_record = record_capturer(records.clone());
         let registered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
         let reg = registered.clone();
+        let cached: CapturedCache = Arc::new(Mutex::new(vec![]));
+        let cache = cached.clone();
 
         let result = migrate_with(
             String::from("token"),
@@ -1151,6 +1245,12 @@ mod tests {
                     reg.lock().unwrap().extend(dids);
                 })
             },
+            &move |did, nsid, rkey, data| {
+                let cache = cache.clone();
+                Box::pin(async move {
+                    cache.lock().unwrap().push((did, nsid, rkey, data));
+                })
+            },
         )
         .await
         .unwrap();
@@ -1176,6 +1276,33 @@ mod tests {
         assert_eq!(
             *registered.lock().unwrap(),
             vec![String::from("did:plc:new")]
+        );
+
+        // Every written record was mirrored into the local cache, plus the
+        // legacy community row stamped with `migratedTo`.
+        let cached = cached.lock().unwrap();
+        let cache_count = |nsid: &str| {
+            cached
+                .iter()
+                .filter(|(did, n, _, _)| did == "did:plc:new" && n == nsid)
+                .count()
+        };
+        assert_eq!(cache_count(COMMUNITY_NSID), 1);
+        assert_eq!(cache_count(CATEGORY_NSID), 1);
+        assert_eq!(cache_count(CHANNEL_NSID), 1);
+        assert_eq!(cache_count("social.colibri.role"), 1);
+        assert_eq!(cache_count("social.colibri.member"), 2);
+        assert_eq!(cache_count("social.colibri.actor.data"), 1);
+
+        let stamped = cached
+            .iter()
+            .find(|(did, nsid, rkey, _)| {
+                did == "did:plc:owner" && nsid == COMMUNITY_NSID && rkey == "legacy-rkey"
+            })
+            .expect("legacy community row must be stamped in the cache");
+        assert_eq!(
+            stamped.3.get("migratedTo").and_then(|v| v.as_str()),
+            Some("at://did:plc:new/social.colibri.community/self")
         );
     }
 }
