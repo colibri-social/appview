@@ -197,6 +197,7 @@ async fn update_channel_with(
     clear_allowed_roles: Option<bool>,
     allowed_members: Vec<String>,
     clear_allowed_members: Option<bool>,
+    category: Option<String>,
     auth: String,
     db: DatabaseConnection,
     verify_auth_fn: &VerifyAuthFn,
@@ -236,6 +237,44 @@ async fn update_channel_with(
             }
             if let Some(d) = description {
                 rec.description = Some(d);
+            }
+
+            // Moving a channel between categories touches three records: the
+            // channel's own `category` (which is what decides where the channel
+            // is shown) plus both categories' `channelOrder`. The destination is
+            // addressed by AT-URI like everywhere else on the wire, but stored
+            // as a bare rkey.
+            let move_to = match category.as_deref() {
+                Some(uri) => {
+                    let rkey = AtUri::parse(uri)
+                        .map(|u| u.rkey)
+                        .unwrap_or_else(|| uri.to_string());
+                    (rkey != rec.category).then_some(rkey)
+                }
+                None => None,
+            };
+
+            let mut moved = None;
+            if let Some(destination_rkey) = move_to {
+                let destination_data =
+                    community_write::read_cached(&db, community_did, CATEGORY_NSID, &destination_rkey)
+                        .await?
+                        .ok_or_else(|| {
+                            invalid_request(format!("Category {destination_rkey} not found."))
+                        })?;
+                let mut destination: ColibriCategory = serde_json::from_value(destination_data)
+                    .map_err(|e| {
+                        invalid_request(format!("Cached category record is malformed: {e}"))
+                    })?;
+                if !destination
+                    .channel_order
+                    .iter()
+                    .any(|rkey| rkey == channel_rkey)
+                {
+                    destination.channel_order.push(channel_rkey.clone());
+                }
+                let source_rkey = std::mem::replace(&mut rec.category, destination_rkey.clone());
+                moved = Some((source_rkey, destination_rkey, destination));
             }
 
             // Only an admin may toggle ownerOnly: it's a channel-wide lock
@@ -326,6 +365,40 @@ async fn update_channel_with(
             community_write::put_record(&db, community_did, CHANNEL_NSID, channel_rkey, data)
                 .await?;
 
+            if let Some((source_rkey, destination_rkey, destination)) = moved {
+                if let Some(source_data) =
+                    community_write::read_cached(&db, community_did, CATEGORY_NSID, &source_rkey)
+                        .await?
+                {
+                    let mut source: ColibriCategory =
+                        serde_json::from_value(source_data).map_err(|e| {
+                            invalid_request(format!("Cached category record is malformed: {e}"))
+                        })?;
+                    source.channel_order.retain(|rkey| rkey != channel_rkey);
+                    let source_data = serde_json::to_value(&source)
+                        .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+                    community_write::put_record(
+                        &db,
+                        community_did,
+                        CATEGORY_NSID,
+                        &source_rkey,
+                        source_data,
+                    )
+                    .await?;
+                }
+
+                let destination_data = serde_json::to_value(&destination)
+                    .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
+                community_write::put_record(
+                    &db,
+                    community_did,
+                    CATEGORY_NSID,
+                    &destination_rkey,
+                    destination_data,
+                )
+                .await?;
+            }
+
             Ok(Json(ChannelUriResponse { uri: channel_uri }))
         },
     )
@@ -333,7 +406,7 @@ async fn update_channel_with(
 }
 
 #[post(
-    "/xrpc/social.colibri.channel.update?<channel>&<name>&<description>&<ownerOnly>&<allowedRoles>&<clearAllowedRoles>&<allowedMembers>&<clearAllowedMembers>&<auth>"
+    "/xrpc/social.colibri.channel.update?<channel>&<name>&<description>&<ownerOnly>&<allowedRoles>&<clearAllowedRoles>&<allowedMembers>&<clearAllowedMembers>&<category>&<auth>"
 )]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn update_channel(
@@ -345,6 +418,7 @@ pub async fn update_channel(
     clearAllowedRoles: Option<bool>,
     allowedMembers: Vec<String>,
     clearAllowedMembers: Option<bool>,
+    category: Option<&str>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
@@ -357,6 +431,7 @@ pub async fn update_channel(
         clearAllowedRoles,
         allowedMembers,
         clearAllowedMembers,
+        category.map(str::to_string),
         auth.to_string(),
         db.inner().clone(),
         &verify_auth_boxed,
@@ -455,7 +530,7 @@ pub async fn delete_channel(
 mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::{member, mock_db, role, role_with_override};
+    use crate::lib::test_fixtures::{member, mock_db, owner_authz, role, role_with_override};
     use crate::models::record_data;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -501,6 +576,7 @@ mod tests {
             None,
             vec![],
             None,
+            None,
             String::from("token"),
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
@@ -544,6 +620,7 @@ mod tests {
             vec![],
             None,
             vec![],
+            None,
             None,
             String::from("token"),
             db,
@@ -647,6 +724,7 @@ mod tests {
             None,
             vec![String::from("did:plc:owner-human")],
             None,
+            None,
             String::from("token"),
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
@@ -664,6 +742,99 @@ mod tests {
             assert!(
                 !body.message.contains("equal or higher role"),
                 "owner was wrongly rejected by the hierarchy guard: {}",
+                body.message
+            );
+        }
+    }
+
+    // Moving a channel rewrites both categories' `channelOrder`, so the
+    // destination has to exist before anything is written — otherwise the
+    // channel would end up pointing at a category nothing can list it under.
+    #[tokio::test]
+    async fn update_channel_rejects_move_to_unknown_category() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 1,
+                did: String::from("did:plc:owner"),
+                nsid: String::from(CHANNEL_NSID),
+                rkey: String::from("chan1"),
+                data: channel_record(),
+                indexed_at: String::new(),
+            }]])
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .into_connection();
+
+        let result = update_channel_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan1"),
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            vec![],
+            None,
+            Some(String::from(
+                "at://did:plc:owner/social.colibri.category/gone",
+            )),
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
+            &move |_, _, _| Box::pin(async { Ok(owner_authz()) }),
+        )
+        .await;
+
+        let body = result
+            .expect_err("expected InvalidRequest")
+            .body
+            .into_inner();
+        assert_eq!(body.error, "InvalidRequest");
+        assert!(body.message.contains("gone"));
+    }
+
+    // Passing the channel's current category must not be treated as a move: the
+    // client sends the full option bag on every edit, so a no-op `category`
+    // would otherwise rewrite two category records on every rename.
+    #[tokio::test]
+    async fn update_channel_ignores_category_that_did_not_change() {
+        let _ = crate::lib::crypto::install_master_key(vec![0u8; 32]);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 1,
+                did: String::from("did:plc:owner"),
+                nsid: String::from(CHANNEL_NSID),
+                rkey: String::from("chan1"),
+                data: channel_record(),
+                indexed_at: String::new(),
+            }]])
+            .into_connection();
+
+        let result = update_channel_with(
+            String::from("at://did:plc:owner/social.colibri.channel/chan1"),
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            vec![],
+            None,
+            Some(String::from(
+                "at://did:plc:owner/social.colibri.category/cat1",
+            )),
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
+            &move |_, _, _| Box::pin(async { Ok(owner_authz()) }),
+        )
+        .await;
+
+        // The PDS write itself can't be mocked; all that matters is that the
+        // destination lookup never ran and rejected the request.
+        if let Err(e) = result {
+            let body = e.body.into_inner();
+            assert!(
+                !body.message.contains("not found"),
+                "no-op category was treated as a move: {}",
                 body.message
             );
         }

@@ -21,6 +21,22 @@ pub struct ReorderResponse {
     pub uri: String,
 }
 
+/// Clients address records by AT-URI, but order arrays store bare rkeys. A value
+/// that is neither is rejected rather than stored verbatim — writing it through
+/// would corrupt the order with something no read path can resolve.
+fn normalize_order(values: &[String], label: &str) -> Result<Vec<String>, ErrorResponse> {
+    values
+        .iter()
+        .map(|value| match AtUri::parse(value) {
+            Some(uri) => Ok(uri.rkey),
+            None if !value.is_empty() && !value.contains('/') => Ok(value.clone()),
+            None => Err(invalid_request(format!(
+                "{label} contains an entry that is neither an AT-URI nor a record key: {value}"
+            ))),
+        })
+        .collect()
+}
+
 // ---- community.reorderChannels ---------------------------------------------
 
 async fn reorder_channels_with(
@@ -59,15 +75,16 @@ async fn reorder_channels_with(
                 invalid_request(format!("Cached category record is malformed: {e}"))
             })?;
 
-            // The frontend sends AT-URIs; extract just the rkey from each.
-            rec.channel_order = channel_order
-                .iter()
-                .map(|uri| {
-                    AtUri::parse(uri)
-                        .map(|u| u.rkey)
-                        .unwrap_or_else(|| uri.clone())
-                })
-                .collect();
+            let next_order = normalize_order(&channel_order, "channelOrder")?;
+            // Rocket's lenient `Vec<String>` query guard yields an empty vec when
+            // the params are missing entirely, which would silently wipe a real
+            // order and report success.
+            if next_order.is_empty() && !rec.channel_order.is_empty() {
+                return Err(invalid_request(
+                    "channelOrder must not be empty for a category that has channels.",
+                ));
+            }
+            rec.channel_order = next_order;
 
             let data =
                 serde_json::to_value(&rec).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
@@ -133,15 +150,13 @@ async fn reorder_categories_with(
                 invalid_request(format!("Cached community record is malformed: {e}"))
             })?;
 
-            // Accept either AT-URIs or bare rkeys.
-            community.category_order = category_order
-                .iter()
-                .map(|uri| {
-                    AtUri::parse(uri)
-                        .map(|u| u.rkey)
-                        .unwrap_or_else(|| uri.clone())
-                })
-                .collect();
+            let next_order = normalize_order(&category_order, "categoryOrder")?;
+            if next_order.is_empty() && !community.category_order.is_empty() {
+                return Err(invalid_request(
+                    "categoryOrder must not be empty for a community that has categories.",
+                ));
+            }
+            community.category_order = next_order;
 
             let data = serde_json::to_value(&community)
                 .map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;

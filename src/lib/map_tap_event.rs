@@ -46,6 +46,19 @@ fn make_event_uri(event_record: &TapMessageRecord) -> String {
     )
 }
 
+/// Records reference sibling records by bare rkey, but clients address them by
+/// full AT-URI (the read handlers expand the same way). Events must match.
+fn expand_rkey(authority: &str, nsid: &str, rkey: &str) -> String {
+    format!("at://{authority}/{nsid}/{rkey}")
+}
+
+fn expand_rkeys(authority: &str, nsid: &str, rkeys: Vec<String>) -> Vec<String> {
+    rkeys
+        .into_iter()
+        .map(|rkey| expand_rkey(authority, nsid, &rkey))
+        .collect()
+}
+
 fn parse_payload<T: DeserializeOwned>(
     event_record: &TapMessageRecord,
 ) -> Result<T, serde_json::Error> {
@@ -380,7 +393,11 @@ async fn map_tap_event_with(
                         data: Some(ColibriServerEventData::Community(CommunityEventData {
                             event: String::from("upsert"),
                             uri,
-                            category_order: Some(record_data.category_order),
+                            category_order: Some(expand_rkeys(
+                                &event_record.did,
+                                "social.colibri.category",
+                                record_data.category_order,
+                            )),
                             description: Some(record_data.description),
                             name: Some(record_data.name),
                             picture: record_data.picture,
@@ -660,7 +677,11 @@ async fn map_tap_event_with(
                         data: Some(ColibriServerEventData::Category(CategoryEventData {
                             event: String::from("upsert"),
                             uri,
-                            channel_order: Some(record_data.channel_order),
+                            channel_order: Some(expand_rkeys(
+                                &event_record.did,
+                                "social.colibri.channel",
+                                record_data.channel_order,
+                            )),
                             community: Some(community_uri),
                             name: Some(record_data.name),
                         })),
@@ -703,11 +724,19 @@ async fn map_tap_event_with(
                             uri,
                             channel_type: Some(record_data.channel_type),
                             community: Some(community_uri),
-                            category: Some(record_data.category),
+                            category: Some(expand_rkey(
+                                &event_record.did,
+                                "social.colibri.category",
+                                &record_data.category,
+                            )),
                             description: record_data.description,
                             name: Some(record_data.name),
                             owner_only: record_data.owner_only,
-                            allowed_roles: Some(record_data.allowed_roles),
+                            allowed_roles: Some(expand_rkeys(
+                                &event_record.did,
+                                "social.colibri.role",
+                                record_data.allowed_roles,
+                            )),
                             allowed_members: Some(record_data.allowed_members),
                         })),
                     },
