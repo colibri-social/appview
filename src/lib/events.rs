@@ -325,8 +325,8 @@ pub struct NotificationEventData {
 /// state changed on one device, pushed to their other connected clients so
 /// unread badges update live. `event` is `"channel_read"` (the read cursor
 /// advanced; clients clear the channel's white dot) or `"message_seen"` (a
-/// message's ping was cleared; clients decrement the channel's ping count by
-/// `cleared`).
+/// message's pings were cleared; clients decrement the channel's ping count by
+/// `cleared`, the number of mention/reply notifications cleared).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SeenEventData {
     pub event: String,

@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::lib::events::{SeenEvent, SeenEventData};
 use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::notifications;
+use crate::lib::notifications::MarkSeenOutcome;
 use crate::lib::responses::ErrorResponse;
 use crate::lib::tap::CommsBridge;
 use crate::lib::time::current_iso8601_utc;
@@ -14,9 +15,16 @@ use crate::lib::time::current_iso8601_utc;
 #[derive(Serialize, Debug)]
 pub struct UpdateSeenForMessageResponse {
     pub updated: u64,
+    #[serde(rename = "clearedPings")]
+    pub cleared_pings: u64,
 }
 
-type MarkSeenFn = dyn Fn(DatabaseConnection, String, String, String) -> BoxFuture<'static, Result<u64, DbErr>>
+type MarkSeenFn = dyn Fn(
+        DatabaseConnection,
+        String,
+        String,
+        String,
+    ) -> BoxFuture<'static, Result<MarkSeenOutcome, DbErr>>
     + Send
     + Sync;
 type FetchChannelFn = dyn Fn(DatabaseConnection, String, String) -> BoxFuture<'static, Result<Option<String>, DbErr>>
@@ -45,12 +53,12 @@ async fn update_seen_for_message_with(
             // tell the user's other clients which channel badge to decrement.
             let channel =
                 fetch_channel_fn(db.clone(), caller_did.clone(), message_uri.clone()).await?;
-            let updated =
+            let outcome =
                 mark_seen_fn(db, caller_did.clone(), message_uri.clone(), seen_at).await?;
 
             // Only broadcast when something actually changed (idempotent re-clears
             // shouldn't echo) and we know which channel to target.
-            if updated > 0
+            if outcome.updated > 0
                 && let Some(channel_uri) = channel
             {
                 broadcast_fn(SeenEvent {
@@ -59,12 +67,15 @@ async fn update_seen_for_message_with(
                         event: String::from("message_seen"),
                         channel_uri,
                         message_uri: Some(message_uri),
-                        cleared: Some(updated),
+                        cleared: Some(outcome.cleared_pings),
                     },
                 });
             }
 
-            Ok(Json(UpdateSeenForMessageResponse { updated }))
+            Ok(Json(UpdateSeenForMessageResponse {
+                updated: outcome.updated,
+                cleared_pings: outcome.cleared_pings,
+            }))
         },
     )
     .await
@@ -75,7 +86,7 @@ fn mark_seen_boxed(
     did: String,
     message_uri: String,
     seen_at: String,
-) -> BoxFuture<'static, Result<u64, DbErr>> {
+) -> BoxFuture<'static, Result<MarkSeenOutcome, DbErr>> {
     Box::pin(async move {
         notifications::mark_seen_for_message(&db, &did, &message_uri, &seen_at).await
     })
@@ -136,11 +147,14 @@ mod tests {
                               did: String,
                               message: String,
                               _seen_at: String|
-              -> BoxFuture<'static, Result<u64, DbErr>> {
+              -> BoxFuture<'static, Result<MarkSeenOutcome, DbErr>> {
             let captured = captured_clone.clone();
             Box::pin(async move {
                 *captured.lock().unwrap() = Some((did, message));
-                Ok(2)
+                Ok(MarkSeenOutcome {
+                    updated: 2,
+                    cleared_pings: 1,
+                })
             })
         };
 
@@ -163,6 +177,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.updated, 2);
+        assert_eq!(result.cleared_pings, 1);
         let (did, message) = captured.lock().unwrap().take().unwrap();
         assert_eq!(did, "did:plc:me");
         assert_eq!(message, "at://did:plc:author/social.colibri.message/m1");
@@ -175,7 +190,7 @@ mod tests {
             events[0].data.channel_uri,
             "at://did:plc:owner/social.colibri.channel/chan-a"
         );
-        assert_eq!(events[0].data.cleared, Some(2));
+        assert_eq!(events[0].data.cleared, Some(1));
     }
 
     #[tokio::test]
@@ -189,7 +204,14 @@ mod tests {
             String::from("token"),
             db,
             &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
-            &|_, _, _, _| Box::pin(async { Ok(0) }),
+            &|_, _, _, _| {
+                Box::pin(async {
+                    Ok(MarkSeenOutcome {
+                        updated: 0,
+                        cleared_pings: 0,
+                    })
+                })
+            },
             &|_, _, _| {
                 Box::pin(async {
                     Ok(Some(String::from(

@@ -4,11 +4,12 @@
 //! client:
 //!
 //! - `has_unread_messages` (white dot): the channel's newest message is newer
-//!   than the user's last-read cursor. When the user has no cursor yet, we fall
-//!   back to their **join time** — messages posted before they joined never
-//!   count as unread (otherwise a fresh join would light up every channel with
-//!   history). With neither a cursor nor a known join boundary, any message
-//!   counts as unread.
+//!   than the user's last-read cursor. A newest message authored by the user
+//!   themself never counts as unread — sending implies having read the
+//!   channel. When the user has no cursor yet, we fall back to their **join
+//!   time** — messages posted before they joined never count as unread
+//!   (otherwise a fresh join would light up every channel with history). With
+//!   neither a cursor nor a known join boundary, any message counts as unread.
 //! - `unread_ping_count` (red badge): how many notifications (mentions/replies)
 //!   for the user in this channel are still unseen.
 //!
@@ -53,15 +54,15 @@ pub struct ChannelUnreadStatus {
     pub unread_ping_count: u64,
 }
 
-/// The newest message in a channel as `(rkey, indexed_at)`, or `None` if the
-/// channel has no messages. Matches messages that store either the full channel
-/// AT-URI (new format) or the bare channel rkey (legacy format), mirroring
-/// `list_messages_handler::fetch_message_page`.
+/// The newest message in a channel as `(rkey, indexed_at, author_did)`, or
+/// `None` if the channel has no messages. Matches messages that store either
+/// the full channel AT-URI (new format) or the bare channel rkey (legacy
+/// format), mirroring `list_messages_handler::fetch_message_page`.
 async fn latest_message(
     db: &DatabaseConnection,
     channel_uri: &str,
     channel_rkey: &str,
-) -> Result<Option<(String, String)>, DbErr> {
+) -> Result<Option<(String, String, String)>, DbErr> {
     let record = record_data::Entity::find()
         .filter(record_data::Column::Nsid.eq(MESSAGE_NSID))
         .filter(Expr::cust_with_values(
@@ -75,7 +76,7 @@ async fn latest_message(
         .limit(1)
         .one(db)
         .await?;
-    Ok(record.map(|r| (r.rkey, r.indexed_at)))
+    Ok(record.map(|r| (r.rkey, r.indexed_at, r.did)))
 }
 
 /// The caller's "join boundary" for a community: the AppView-ingestion
@@ -113,22 +114,26 @@ async fn join_boundary_indexed_at(
 }
 
 /// Decides whether a channel has unread messages for a user, given the newest
-/// message `(rkey, indexed_at)`, the user's read-cursor rkey (if any), and the
-/// user's join boundary `indexed_at` (if known).
+/// message `(rkey, indexed_at, author_did)`, the user's read-cursor rkey (if
+/// any), and the user's join boundary `indexed_at` (if known).
 ///
 /// - No messages → not unread.
+/// - Newest message authored by the caller → not unread (sending a message
+///   implies having read the channel, regardless of cursor state).
 /// - Has a cursor → newest rkey strictly after the cursor rkey (the join
 ///   boundary is irrelevant: you can't have read before joining).
 /// - No cursor → unread only if the newest message was indexed after the join
 ///   boundary. With no boundary either, any message counts as unread.
 fn channel_has_unread(
-    latest: Option<(&str, &str)>,
+    latest: Option<(&str, &str, &str)>,
+    caller_did: &str,
     cursor_rkey: Option<&str>,
     join_boundary: Option<&str>,
 ) -> bool {
     match latest {
         None => false,
-        Some((rkey, indexed_at)) => match cursor_rkey {
+        Some((_, _, author)) if author == caller_did => false,
+        Some((rkey, indexed_at, _)) => match cursor_rkey {
             Some(cursor) => rkey > cursor,
             None => match join_boundary {
                 Some(boundary) => indexed_at > boundary,
@@ -222,7 +227,10 @@ pub async fn community_channel_unread_status(
     for (channel, channel_uri) in channel_records.into_iter().zip(channel_uris) {
         let latest = latest_message(db, &channel_uri, &channel.rkey).await?;
         let has_unread_messages = channel_has_unread(
-            latest.as_ref().map(|(r, i)| (r.as_str(), i.as_str())),
+            latest
+                .as_ref()
+                .map(|(r, i, a)| (r.as_str(), i.as_str(), a.as_str())),
+            caller_did,
             cursor_rkeys.get(&channel_uri).map(String::as_str),
             join_boundary.as_deref(),
         );
@@ -299,9 +307,10 @@ mod tests {
 
     #[test]
     fn no_messages_is_never_unread() {
-        assert!(!channel_has_unread(None, None, None));
+        assert!(!channel_has_unread(None, "did:plc:me", None, None));
         assert!(!channel_has_unread(
             None,
+            "did:plc:me",
             Some("aaa"),
             Some("2026-01-01T00:00:00.000Z")
         ));
@@ -311,19 +320,22 @@ mod tests {
     fn with_cursor_compares_rkeys_and_ignores_join_boundary() {
         // Newest message after the cursor → unread.
         assert!(channel_has_unread(
-            Some(("bbb", "2020-01-01T00:00:00.000Z")),
+            Some(("bbb", "2020-01-01T00:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
             Some("aaa"),
             // A future join boundary must not suppress this — cursor wins.
             Some("2999-01-01T00:00:00.000Z"),
         ));
         // Newest message at/before the cursor → read.
         assert!(!channel_has_unread(
-            Some(("aaa", "2026-01-01T00:00:00.000Z")),
+            Some(("aaa", "2026-01-01T00:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
             Some("aaa"),
             None,
         ));
         assert!(!channel_has_unread(
-            Some(("aaa", "2026-01-01T00:00:00.000Z")),
+            Some(("aaa", "2026-01-01T00:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
             Some("bbb"),
             None,
         ));
@@ -333,19 +345,22 @@ mod tests {
     fn without_cursor_uses_join_boundary() {
         // Message indexed after the user joined → unread.
         assert!(channel_has_unread(
-            Some(("bbb", "2026-06-25T12:00:00.000Z")),
+            Some(("bbb", "2026-06-25T12:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
             None,
             Some("2026-06-25T11:00:00.000Z"),
         ));
         // Message indexed before the user joined → not unread (the join case).
         assert!(!channel_has_unread(
-            Some(("bbb", "2026-06-25T10:00:00.000Z")),
+            Some(("bbb", "2026-06-25T10:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
             None,
             Some("2026-06-25T11:00:00.000Z"),
         ));
         // Exactly at the boundary → not unread (strictly-after semantics).
         assert!(!channel_has_unread(
-            Some(("bbb", "2026-06-25T11:00:00.000Z")),
+            Some(("bbb", "2026-06-25T11:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
             None,
             Some("2026-06-25T11:00:00.000Z"),
         ));
@@ -354,7 +369,24 @@ mod tests {
     #[test]
     fn without_cursor_or_boundary_any_message_is_unread() {
         assert!(channel_has_unread(
-            Some(("bbb", "2026-06-25T10:00:00.000Z")),
+            Some(("bbb", "2026-06-25T10:00:00.000Z", "did:plc:other")),
+            "did:plc:me",
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn own_newest_message_is_never_unread() {
+        assert!(!channel_has_unread(
+            Some(("bbb", "2026-06-25T12:00:00.000Z", "did:plc:me")),
+            "did:plc:me",
+            Some("aaa"),
+            None,
+        ));
+        assert!(!channel_has_unread(
+            Some(("bbb", "2026-06-25T12:00:00.000Z", "did:plc:me")),
+            "did:plc:me",
             None,
             None,
         ));

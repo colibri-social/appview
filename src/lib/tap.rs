@@ -801,7 +801,7 @@ async fn process_event(
     // Persists rows + broadcasts to live WS subscribers, so each notification is
     // written exactly once regardless of subscriber count.
     if record.collection == "social.colibri.message"
-        && record.action != "delete"
+        && record.action == "create"
         && let Some(payload) = record.record.clone()
         && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
     {
@@ -824,6 +824,56 @@ async fn process_event(
             }
             Err(e) => {
                 log::error!("notification indexing failed for {message_uri}: {e}");
+            }
+        }
+    }
+
+    if record.collection == "social.colibri.message" && record.action == "delete" {
+        let message_uri = format!("at://{}/{}/{}", record.did, record.collection, record.rkey);
+        match crate::lib::notifications::delete_for_message(db, &message_uri).await {
+            Ok(rows) => {
+                let mut by_recipient: std::collections::HashMap<String, (String, u64)> =
+                    std::collections::HashMap::new();
+                for row in rows {
+                    let entry = by_recipient
+                        .entry(row.recipient_did.clone())
+                        .or_insert_with(|| (row.channel_uri.clone(), 0));
+                    if row.seen_at.is_none()
+                        && (row.kind == crate::lib::notifications::KIND_MENTION
+                            || row.kind == crate::lib::notifications::KIND_REPLY)
+                    {
+                        entry.1 += 1;
+                    }
+                }
+
+                for (recipient_did, (channel_uri, cleared_pings)) in by_recipient {
+                    if cleared_pings > 0 {
+                        let _ = seen_tx.send(SeenEvent {
+                            recipient_did: recipient_did.clone(),
+                            data: SeenEventData {
+                                event: String::from("message_seen"),
+                                channel_uri: channel_uri.clone(),
+                                message_uri: Some(message_uri.clone()),
+                                cleared: Some(cleared_pings),
+                            },
+                        });
+                    }
+
+                    let push_db = db.clone();
+                    let push_message_uri = message_uri.clone();
+                    rocket::tokio::spawn(async move {
+                        crate::lib::push_send::deliver_dismissal(
+                            push_db,
+                            recipient_did,
+                            channel_uri,
+                            push_message_uri,
+                        )
+                        .await;
+                    });
+                }
+            }
+            Err(e) => {
+                log::error!("notification cleanup failed for {message_uri}: {e}");
             }
         }
     }

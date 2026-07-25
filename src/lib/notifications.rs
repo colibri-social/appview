@@ -457,6 +457,7 @@ pub async fn index_message_notifications(
     if let Some(parent_rkey) = message.parent.as_ref()
         && let Some(parent_author) = fetch_parent_author(db, &message.channel, parent_rkey).await?
         && parent_author != author_did
+        && !seen.contains(&(parent_author.clone(), KIND_MENTION))
     {
         let key = (parent_author.clone(), KIND_REPLY);
         if seen.insert(key) {
@@ -630,11 +631,12 @@ pub async fn hydrate_messages(
     Ok(out)
 }
 
-/// Counts unseen notifications for a recipient.
+/// Counts unseen mention/reply notifications for a recipient.
 pub async fn unseen_count(db: &DatabaseConnection, recipient_did: &str) -> Result<u64, DbErr> {
     notifications::Entity::find()
         .filter(notifications::Column::RecipientDid.eq(recipient_did))
         .filter(notifications::Column::SeenAt.is_null())
+        .filter(notifications::Column::Kind.is_in([KIND_MENTION, KIND_REPLY]))
         .filter(sea_orm::prelude::Expr::cust(
             r#""notifications"."channel_uri" LIKE 'at://%'"#,
         ))
@@ -648,9 +650,9 @@ struct ChannelUnseenCount {
     unseen_count: i64,
 }
 
-/// Counts unseen notifications for a recipient across several channels in one
-/// grouped query, in place of one round-trip per channel. Channels with zero
-/// unseen notifications are simply absent from the returned map.
+/// Counts unseen mention/reply notifications for a recipient across several
+/// channels in one grouped query, in place of one round-trip per channel.
+/// Channels with zero unseen pings are simply absent from the returned map.
 pub async fn unseen_counts_for_channels(
     db: &DatabaseConnection,
     recipient_did: &str,
@@ -670,6 +672,7 @@ pub async fn unseen_counts_for_channels(
         .filter(notifications::Column::RecipientDid.eq(recipient_did))
         .filter(notifications::Column::ChannelUri.is_in(channel_uris.to_vec()))
         .filter(notifications::Column::SeenAt.is_null())
+        .filter(notifications::Column::Kind.is_in([KIND_MENTION, KIND_REPLY]))
         .group_by(notifications::Column::ChannelUri)
         .into_model::<ChannelUnseenCount>()
         .all(db)
@@ -716,17 +719,35 @@ pub async fn channel_for_message_notification(
     Ok(row.map(|r| r.channel_uri))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkSeenOutcome {
+    pub updated: u64,
+    pub cleared_pings: u64,
+}
+
 /// Marks every unseen notification for the recipient that points at a specific
-/// message as seen at `seen_at`. Returns the number of rows updated. Used for
-/// per-message ping clearing (a single message may carry both a mention and a
-/// reply notification for the same recipient).
+/// message as seen at `seen_at`. Returns how many rows were updated in total
+/// and how many of those were pings (mentions/replies). Used for per-message
+/// ping clearing.
 pub async fn mark_seen_for_message(
     db: &DatabaseConnection,
     recipient_did: &str,
     message_uri: &str,
     seen_at: &str,
-) -> Result<u64, DbErr> {
-    let res = notifications::Entity::update_many()
+) -> Result<MarkSeenOutcome, DbErr> {
+    let pings = notifications::Entity::update_many()
+        .col_expr(
+            notifications::Column::SeenAt,
+            sea_query::Expr::value(seen_at),
+        )
+        .filter(notifications::Column::RecipientDid.eq(recipient_did))
+        .filter(notifications::Column::MessageUri.eq(message_uri))
+        .filter(notifications::Column::SeenAt.is_null())
+        .filter(notifications::Column::Kind.is_in([KIND_MENTION, KIND_REPLY]))
+        .exec(db)
+        .await?;
+
+    let rest = notifications::Entity::update_many()
         .col_expr(
             notifications::Column::SeenAt,
             sea_query::Expr::value(seen_at),
@@ -736,7 +757,32 @@ pub async fn mark_seen_for_message(
         .filter(notifications::Column::SeenAt.is_null())
         .exec(db)
         .await?;
-    Ok(res.rows_affected)
+
+    Ok(MarkSeenOutcome {
+        updated: pings.rows_affected + rest.rows_affected,
+        cleared_pings: pings.rows_affected,
+    })
+}
+
+pub async fn delete_for_message(
+    db: &DatabaseConnection,
+    message_uri: &str,
+) -> Result<Vec<notifications::Model>, DbErr> {
+    let rows = notifications::Entity::find()
+        .filter(notifications::Column::MessageUri.eq(message_uri))
+        .all(db)
+        .await?;
+
+    if rows.is_empty() {
+        return Ok(rows);
+    }
+
+    notifications::Entity::delete_many()
+        .filter(notifications::Column::MessageUri.eq(message_uri))
+        .exec(db)
+        .await?;
+
+    Ok(rows)
 }
 
 /// Marks every unseen notification for the recipient with `indexed_at <= now`
@@ -1236,5 +1282,204 @@ mod tests {
             .await
             .unwrap();
         assert!(counts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unseen_counts_for_channels_only_counts_mentions_and_replies() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<std::collections::BTreeMap<&str, sea_orm::Value>>::new()])
+            .into_connection();
+
+        unseen_counts_for_channels(
+            &db,
+            "did:plc:me",
+            &[String::from("at://did:plc:owner/social.colibri.channel/a")],
+        )
+        .await
+        .unwrap();
+
+        let log = db.into_transaction_log();
+        let stmt = format!("{:?}", log[0]);
+        assert!(stmt.contains("kind"));
+        assert!(stmt.contains("mention"));
+        assert!(stmt.contains("reply"));
+        assert!(!stmt.contains("\"message\""));
+    }
+
+    #[tokio::test]
+    async fn unseen_count_only_counts_mentions_and_replies() {
+        use std::collections::BTreeMap;
+
+        let rows = vec![BTreeMap::from([("num_items", sea_orm::Value::from(0i64))])];
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([rows])
+            .into_connection();
+
+        unseen_count(&db, "did:plc:me").await.unwrap();
+
+        let log = db.into_transaction_log();
+        let stmt = format!("{:?}", log[0]);
+        assert!(stmt.contains("kind"));
+        assert!(stmt.contains("mention"));
+        assert!(stmt.contains("reply"));
+    }
+
+    #[tokio::test]
+    async fn mark_seen_for_message_reports_pings_and_total_separately() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([
+                sea_orm::MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 1,
+                },
+                sea_orm::MockExecResult {
+                    last_insert_id: 0,
+                    rows_affected: 2,
+                },
+            ])
+            .into_connection();
+
+        let outcome = mark_seen_for_message(
+            &db,
+            "did:plc:me",
+            "at://did:plc:author/social.colibri.message/m1",
+            "2026-07-25T00:00:00Z",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            MarkSeenOutcome {
+                updated: 3,
+                cleared_pings: 1,
+            }
+        );
+
+        let log = db.into_transaction_log();
+        assert_eq!(log.len(), 2);
+        let first = format!("{:?}", log[0]);
+        assert!(first.contains("kind"));
+        assert!(first.contains("mention"));
+        assert!(first.contains("reply"));
+        let second = format!("{:?}", log[1]);
+        assert!(!second.contains("mention"));
+    }
+
+    #[tokio::test]
+    async fn delete_for_message_returns_rows_then_deletes_them() {
+        let row = notifications::Model {
+            id: 7,
+            recipient_did: String::from("did:plc:me"),
+            kind: String::from(KIND_MENTION),
+            message_uri: String::from("at://did:plc:author/social.colibri.message/m1"),
+            author_did: String::from("did:plc:author"),
+            channel_uri: String::from("at://did:plc:owner/social.colibri.channel/a"),
+            indexed_at: String::from("2026-07-25T00:00:00Z"),
+            seen_at: None,
+            mention_role_name: None,
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![row.clone()]])
+            .append_exec_results([sea_orm::MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let rows = delete_for_message(&db, "at://did:plc:author/social.colibri.message/m1")
+            .await
+            .unwrap();
+
+        assert_eq!(rows, vec![row]);
+        let log = db.into_transaction_log();
+        assert_eq!(log.len(), 2);
+        let delete_stmt = format!("{:?}", log[1]);
+        assert!(delete_stmt.contains("DELETE"));
+        assert!(delete_stmt.contains("message_uri"));
+    }
+
+    #[tokio::test]
+    async fn delete_for_message_skips_delete_when_no_rows_exist() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<notifications::Model>::new()])
+            .into_connection();
+
+        let rows = delete_for_message(&db, "at://did:plc:author/social.colibri.message/m1")
+            .await
+            .unwrap();
+
+        assert!(rows.is_empty());
+        let log = db.into_transaction_log();
+        assert_eq!(log.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn index_message_notifications_collapses_reply_into_mention() {
+        let channel_record = record_data::Model {
+            id: 1,
+            did: String::from("did:plc:community"),
+            nsid: String::from(CHANNEL_NSID),
+            rkey: String::from("general"),
+            data: json!({}),
+            indexed_at: String::new(),
+        };
+        let parent_record = record_data::Model {
+            id: 2,
+            did: String::from("did:plc:parent"),
+            nsid: String::from("social.colibri.message"),
+            rkey: String::from("p1"),
+            data: json!({}),
+            indexed_at: String::new(),
+        };
+        let inserted_row = notifications::Model {
+            id: 1,
+            recipient_did: String::from("did:plc:parent"),
+            kind: String::from(KIND_MENTION),
+            message_uri: String::from("at://did:plc:author/social.colibri.message/m1"),
+            author_did: String::from("did:plc:author"),
+            channel_uri: String::from(ALL_MESSAGES_CHANNEL),
+            indexed_at: String::from("2026-07-25T00:00:00Z"),
+            seen_at: None,
+            mention_role_name: None,
+        };
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![channel_record]])
+            .append_query_results([vec![parent_record]])
+            .append_query_results([vec![member("did:plc:author"), member("did:plc:parent")]])
+            .append_query_results([Vec::<user_states::Model>::new()])
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "id",
+                sea_orm::Value::from(1i64),
+            )])]])
+            .append_query_results([vec![inserted_row]])
+            .into_connection();
+
+        let mut message = message_with_facets(
+            json!([
+                {
+                    "index": {"byteStart": 0, "byteEnd": 5},
+                    "features": [
+                        {"$type": "social.colibri.richtext.facet#mention", "did": "did:plc:parent"}
+                    ]
+                }
+            ]),
+            Some("p1"),
+        );
+        message.channel = String::from(ALL_MESSAGES_CHANNEL);
+
+        let rows = index_message_notifications(
+            &db,
+            "did:plc:author",
+            "at://did:plc:author/social.colibri.message/m1",
+            &message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row.kind, KIND_MENTION);
+        assert_eq!(rows[0].row.recipient_did, "did:plc:parent");
     }
 }
