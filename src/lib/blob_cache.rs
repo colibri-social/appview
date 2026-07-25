@@ -1,10 +1,13 @@
 //! A bounded in-memory LRU cache for blob bytes.
 //!
 //! Blobs are content-addressed by CID (immutable), so a fetched blob is valid
-//! forever and can be shared across DIDs. The PDS upstream doesn't honour HTTP
+//! forever and can be shared across DIDs. Entries are keyed by an opaque string
+//! built from that CID plus the rendition being served (see
+//! `get_blob_handler::cache_key`), so a resized avatar variant and the original
+//! bytes coexist without colliding. The PDS upstream doesn't honour HTTP
 //! Range, so to serve cheap byte-ranges (seeking, media duration) the AppView
 //! holds the full bytes locally and slices them. Keeping recently-served blobs
-//! in RAM means the PDS is hit at most once per CID while it stays hot, and
+//! in RAM means the PDS is hit at most once per key while it stays hot, and
 //! every range request after that is a zero-copy `Bytes::slice`.
 //!
 //! Eviction is by total byte size (least-recently-used first), not entry count.
@@ -31,7 +34,7 @@ struct Inner {
     total: u64,
 }
 
-/// Thread-safe, size-bounded LRU of blob bytes keyed by CID.
+/// Thread-safe, size-bounded LRU of blob bytes keyed by CID and rendition.
 pub struct BlobCache {
     inner: Mutex<Inner>,
     cap: u64,
@@ -62,16 +65,16 @@ impl BlobCache {
         Self::new(cap)
     }
 
-    /// Returns the cached blob for `cid`, marking it most-recently-used.
-    pub fn get(&self, cid: &str) -> Option<CacheEntry> {
-        self.inner.lock().unwrap().map.get(cid).cloned()
+    /// Returns the cached blob for `key`, marking it most-recently-used.
+    pub fn get(&self, key: &str) -> Option<CacheEntry> {
+        self.inner.lock().unwrap().map.get(key).cloned()
     }
 
-    /// Inserts (or replaces) `cid`'s blob, then evicts least-recently-used
+    /// Inserts (or replaces) `key`'s blob, then evicts least-recently-used
     /// entries until the cache is back within its byte ceiling. A blob larger
     /// than the whole ceiling is not cached at all, so it can't evict
     /// everything else for a single use.
-    pub fn insert(&self, cid: &str, entry: CacheEntry) {
+    pub fn insert(&self, key: &str, entry: CacheEntry) {
         let size = entry.bytes.len() as u64;
         if size > self.cap {
             return;
@@ -80,7 +83,7 @@ impl BlobCache {
         let mut guard = self.inner.lock().unwrap();
         let inner = &mut *guard;
 
-        if let Some(old) = inner.map.put(cid.to_string(), entry) {
+        if let Some(old) = inner.map.put(key.to_string(), entry) {
             inner.total = inner.total.saturating_sub(old.bytes.len() as u64);
         }
         inner.total += size;

@@ -6,16 +6,25 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
+use lru::LruCache;
 use reqwest::{Client, Response, Url, redirect::Policy};
 use scraper::{Html, Selector};
 use serde::Serialize;
 
 /// How long an outbound fetch may take before it's abandoned.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+/// The budget for fetching a blob, which moves a real payload (an avatar, an
+/// attachment) rather than a page of HTML
+pub const BLOB_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum number of redirects we'll follow (each one is re-validated).
 const MAX_REDIRECTS: usize = 5;
+/// How many pinned clients to keep alive. Each one owns a connection pool, so
+/// this is really "how many upstream hosts stay warm at once".
+const CLIENT_CACHE_CAPACITY: usize = 256;
 /// A browser-ish UA — many sites only emit OG tags for "real" user agents.
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; ColibriBot/1.0; +https://colibri.social)";
 
@@ -165,20 +174,70 @@ async fn assert_host_allowed(url: &Url) -> Result<Vec<SocketAddr>, FetchError> {
     Ok(addrs)
 }
 
-fn pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<Client, FetchError> {
-    Client::builder()
-        .timeout(FETCH_TIMEOUT)
+/// Identifies a pinned client by exactly the things that make it safe to reuse:
+/// the host it was built for, the addresses it is pinned to, and its timeout
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ClientKey {
+    host: String,
+    addrs: Vec<SocketAddr>,
+    timeout: Duration,
+}
+
+static CLIENT_CACHE: LazyLock<Mutex<LruCache<ClientKey, Client>>> = LazyLock::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(CLIENT_CACHE_CAPACITY).expect("capacity is non-zero"),
+    ))
+});
+
+/// A client pinned to `addrs`, reused across calls. Building a `reqwest::Client`
+/// is not cheap, it constructs a fresh connection pool and loads the TLS root
+/// store, so doing it per request meant every blob fetch paid a full TLS
+/// handshake against a PDS we were already talking to.
+fn pinned_client(
+    host: &str,
+    addrs: &[SocketAddr],
+    timeout: Duration,
+) -> Result<Client, FetchError> {
+    let mut pinned = addrs.to_vec();
+    pinned.sort();
+
+    let key = ClientKey {
+        host: host.to_string(),
+        addrs: pinned,
+        timeout,
+    };
+
+    if let Some(client) = CLIENT_CACHE.lock().unwrap().get(&key) {
+        return Ok(client.clone());
+    }
+
+    let client = Client::builder()
+        .timeout(timeout)
         .redirect(Policy::none())
         .user_agent(USER_AGENT)
+        .pool_idle_timeout(Duration::from_secs(90))
         .resolve_to_addrs(host, addrs)
         .build()
-        .map_err(|e| FetchError::Upstream(e.to_string()))
+        .map_err(|e| FetchError::Upstream(e.to_string()))?;
+
+    CLIENT_CACHE.lock().unwrap().put(key, client.clone());
+
+    Ok(client)
 }
 
 /// SSRF-safe GET: validates the host (and every redirect target) against the
 /// private-address blocklist, pins each hop's connection to the exact
 /// addresses just validated, and follows up to [`MAX_REDIRECTS`] redirects
 pub async fn guarded_get(raw_url: &str) -> Result<Response, FetchError> {
+    guarded_get_with_timeout(raw_url, FETCH_TIMEOUT).await
+}
+
+/// [`guarded_get`] with an explicit time budget, for callers moving payloads
+/// that a scrape-sized timeout would cut off (see [`BLOB_FETCH_TIMEOUT`]).
+pub async fn guarded_get_with_timeout(
+    raw_url: &str,
+    timeout: Duration,
+) -> Result<Response, FetchError> {
     let mut current = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
 
     for _ in 0..=MAX_REDIRECTS {
@@ -187,7 +246,7 @@ pub async fn guarded_get(raw_url: &str) -> Result<Response, FetchError> {
             .host_str()
             .ok_or_else(|| FetchError::InvalidUrl("missing host".into()))?
             .to_string();
-        let client = pinned_client(&host, &addrs)?;
+        let client = pinned_client(&host, &addrs, timeout)?;
 
         let resp = client
             .get(current.clone())
@@ -233,7 +292,7 @@ pub async fn guarded_client_for(raw_url: &str) -> Result<(Client, Url), FetchErr
     let host = url
         .host_str()
         .ok_or_else(|| FetchError::InvalidUrl("missing host".into()))?;
-    let client = pinned_client(host, &addrs)?;
+    let client = pinned_client(host, &addrs, FETCH_TIMEOUT)?;
     Ok((client, url))
 }
 
@@ -368,6 +427,64 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
 mod tests {
     use super::*;
     use rocket::tokio;
+
+    fn cached_clients_for(host: &str) -> usize {
+        CLIENT_CACHE
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(key, _)| key.host == host)
+            .count()
+    }
+
+    #[test]
+    fn repeated_fetches_to_one_host_share_a_client() {
+        let host = "client-reuse.test";
+        let addrs = vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()];
+
+        for _ in 0..5 {
+            pinned_client(host, &addrs, FETCH_TIMEOUT).unwrap();
+        }
+
+        assert_eq!(cached_clients_for(host), 1);
+    }
+
+    /// The pin is the security boundary: a client validated against one set of
+    /// addresses must never be handed to a request that resolved elsewhere.
+    #[test]
+    fn a_different_resolution_gets_a_different_client() {
+        let host = "rebind.test";
+        let first = vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()];
+        let second = vec!["93.184.216.35:443".parse::<SocketAddr>().unwrap()];
+
+        pinned_client(host, &first, FETCH_TIMEOUT).unwrap();
+        pinned_client(host, &second, FETCH_TIMEOUT).unwrap();
+
+        assert_eq!(cached_clients_for(host), 2);
+    }
+
+    #[test]
+    fn address_ordering_does_not_split_the_cache() {
+        let host = "multi-a.test";
+        let a = "93.184.216.34:443".parse::<SocketAddr>().unwrap();
+        let b = "93.184.216.35:443".parse::<SocketAddr>().unwrap();
+
+        pinned_client(host, &[a, b], FETCH_TIMEOUT).unwrap();
+        pinned_client(host, &[b, a], FETCH_TIMEOUT).unwrap();
+
+        assert_eq!(cached_clients_for(host), 1);
+    }
+
+    #[test]
+    fn timeouts_are_not_shared_between_clients() {
+        let host = "timeouts.test";
+        let addrs = vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()];
+
+        pinned_client(host, &addrs, FETCH_TIMEOUT).unwrap();
+        pinned_client(host, &addrs, BLOB_FETCH_TIMEOUT).unwrap();
+
+        assert_eq!(cached_clients_for(host), 2);
+    }
 
     #[test]
     fn blocks_loopback_and_private_ips() {
