@@ -19,7 +19,7 @@ use crate::lib::at_uri::AtUri;
 use crate::lib::community_credentials;
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{self, ErrorBody, ErrorResponse};
 use crate::models::record_data;
 use rocket::serde::json::Json;
 
@@ -30,7 +30,11 @@ pub fn creds_err_to_db(e: community_credentials::CredentialsError) -> DbErr {
 }
 
 pub fn pds_err_to_db(e: PdsError) -> DbErr {
-    DbErr::Custom(format!("pds write failed: {e}"))
+    let message = format!("pds write failed: {e}");
+    if e.classify().is_unavailable() {
+        return DbErr::Custom(format!("{}{message}", responses::PDS_UNAVAILABLE_MARKER));
+    }
+    DbErr::Custom(message)
 }
 
 pub fn not_found_error(message: impl Into<String>) -> ErrorResponse {

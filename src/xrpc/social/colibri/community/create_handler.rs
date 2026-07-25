@@ -37,7 +37,7 @@ use crate::lib::events::{CommunityCreationProgressData, CommunityCreationProgres
 use crate::lib::moderation::generate_tid;
 use crate::lib::pds_client::{self, CreatedAccount, PdsError, PdsSession, RecordRef};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{self, ErrorBody, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::tap::CommsBridge;
 use crate::lib::time::current_iso8601_utc;
@@ -182,7 +182,7 @@ async fn create_with(
     .await
     .map_err(|e| {
         log::error!("community.create: createAccount on {pds_endpoint} failed: {e}");
-        pds_error(format!("createAccount failed: {e}"))
+        pds_error(&e, format!("createAccount failed: {e}"))
     })?;
 
     let community_did = account.did.clone();
@@ -220,7 +220,7 @@ async fn create_with(
                 "community.create: createSession for {community_did} failed: {e} \
                  — credentials persisted, bootstrap recoverable via follow-up call"
             );
-            pds_error(format!("createSession failed: {e}"))
+            pds_error(&e, format!("createSession failed: {e}"))
         })?;
 
     bootstrap_community(
@@ -294,7 +294,7 @@ async fn bootstrap_community(
             .await
             .map_err(|e| {
                 log::error!("community.create: uploadBlob for {community_did} failed: {e}");
-                pds_error(format!("uploadBlob failed: {e}"))
+                pds_error(&e, format!("uploadBlob failed: {e}"))
             })?;
             log::debug!("uploaded picture blob for {community_did} ({mime}, {byte_len} bytes)");
             Some(blob)
@@ -539,7 +539,7 @@ async fn create_byo_with(
     .await
     .map_err(|e| {
         log::error!("community.create (byo): createSession failed: {e}");
-        pds_error(format!("createSession failed: {e}"))
+        pds_error(&e, format!("createSession failed: {e}"))
     })?;
     let community_did = session.did.clone();
     log::info!("community.create (byo): verified control of {community_did}");
@@ -683,7 +683,7 @@ where
         value.clone(),
     )
     .await
-    .map_err(|e| pds_error(format!("createRecord({label}) failed: {e}")))?;
+    .map_err(|e| pds_error(&e, format!("createRecord({label}) failed: {e}")))?;
 
     Ok((record_ref, value))
 }
@@ -697,7 +697,14 @@ fn auth_error(err: ServiceAuthError) -> ErrorResponse {
     }
 }
 
-fn pds_error(message: String) -> ErrorResponse {
+/// Wraps a PDS failure, promoting the ones that mean the endpoint itself is
+/// unreachable or isn't a PDS to [`responses::PDS_UNAVAILABLE`] so a client can
+/// tell a misconfigured deployment from a rejected request.
+fn pds_error(err: &PdsError, message: String) -> ErrorResponse {
+    if err.classify().is_unavailable() {
+        return responses::pds_unavailable(message);
+    }
+
     ErrorResponse {
         body: Json(ErrorBody {
             error: String::from("UpstreamError"),

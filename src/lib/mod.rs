@@ -36,6 +36,7 @@ pub mod notification_preferences;
 pub mod notifications;
 pub mod owner_role_heal;
 pub mod pds_client;
+pub mod pds_status;
 pub mod permissions;
 pub mod push_send;
 pub mod push_subscriptions;

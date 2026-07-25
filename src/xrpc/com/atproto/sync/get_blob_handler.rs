@@ -15,9 +15,10 @@ use crate::lib::blob_cache::{BlobCache, CacheEntry};
 use crate::lib::embed_fetch;
 use crate::lib::http::HTTP;
 use crate::lib::image_variant::{self, Variant};
+use crate::lib::pds_client;
 use crate::lib::range::{RangeResult, parse_range};
 use crate::lib::repo_endpoint::{self, RepoEndpoint};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{self, ErrorBody, ErrorResponse};
 use rocket::serde::json::Json;
 
 /// Blobs are content-addressed (immutable), so they can be cached aggressively.
@@ -252,6 +253,13 @@ async fn fetch_upstream(
     // its credentials row
     let endpoint = match repo_endpoint::resolve(db, did).await {
         Ok(e) => e,
+        // A DID with no PDS in its document is a broken deployment rather than
+        // a transient upstream fault — say so distinctly.
+        Err(e @ repo_endpoint::EndpointError::NoPdsService { .. }) => {
+            return Err(GetBlobResponse::Upstream(responses::pds_unavailable(
+                format!("Failed to resolve DID: {e}"),
+            )));
+        }
         Err(e) => {
             return Err(GetBlobResponse::Upstream(ErrorResponse {
                 body: Json(ErrorBody {
@@ -281,13 +289,11 @@ async fn fetch_upstream(
     };
     let resp = match fetched {
         Ok(r) => r,
+        // Nothing answered at the endpoint at all.
         Err(e) => {
-            return Err(GetBlobResponse::Upstream(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("UpstreamError"),
-                    message: format!("Blob fetch failed: {e}"),
-                }),
-            }));
+            return Err(GetBlobResponse::Upstream(responses::pds_unavailable(
+                format!("Blob fetch failed: {e}"),
+            )));
         }
     };
 
@@ -298,10 +304,18 @@ async fn fetch_upstream(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
+        let message = format!("PDS returned {status}: {body}");
+        // A PDS answers with an XRPC error envelope. A 4xx carrying a plain
+        // HTML error page means whatever is at this endpoint isn't a PDS
+        if status < 500 && !pds_client::looks_like_xrpc_error(&body) {
+            return Err(GetBlobResponse::Upstream(responses::pds_unavailable(
+                message,
+            )));
+        }
         return Err(GetBlobResponse::Upstream(ErrorResponse {
             body: Json(ErrorBody {
                 error: String::from("UpstreamError"),
-                message: format!("PDS returned {status}: {body}"),
+                message,
             }),
         }));
     }

@@ -25,6 +25,61 @@ pub enum PdsError {
     MissingField(&'static str),
 }
 
+/// Why a PDS call failed, coarse enough to be worth telling a client about.
+///
+/// The distinction that matters is *configuration* versus *operation*
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdsFailure {
+    /// No reply at all: connection refused, DNS failure, TLS error, timeout.
+    Unreachable,
+    /// Something answered, but it doesn't speak the AT Protocol
+    NotAPds,
+    /// A real PDS answered with an error.
+    Rejected,
+}
+
+impl PdsFailure {
+    /// Whether this failure means the endpoint itself is misconfigured, rather
+    /// than a single request being turned down.
+    pub fn is_unavailable(self) -> bool {
+        matches!(self, PdsFailure::Unreachable | PdsFailure::NotAPds)
+    }
+}
+
+impl PdsError {
+    pub fn classify(&self) -> PdsFailure {
+        match self {
+            PdsError::Http(e) if e.is_connect() || e.is_timeout() => PdsFailure::Unreachable,
+            PdsError::Http(_) => PdsFailure::Rejected,
+            PdsError::Fetch(FetchError::Upstream(_) | FetchError::TooManyRedirects) => {
+                PdsFailure::Unreachable
+            }
+            PdsError::Fetch(FetchError::Blocked(_) | FetchError::InvalidUrl(_)) => {
+                PdsFailure::NotAPds
+            }
+            // A PDS answers XRPC errors as JSON with an `error` field. A 4xx
+            // carrying anything else means the route doesn't exist there and whatever is at this
+            // address isn't a PDS.
+            PdsError::BadStatus { status, body }
+                if *status < 500 && !looks_like_xrpc_error(body) =>
+            {
+                PdsFailure::NotAPds
+            }
+            PdsError::BadStatus { .. } | PdsError::MissingField(_) => PdsFailure::Rejected,
+        }
+    }
+}
+
+/// Whether `body` is an AT Protocol XRPC error envelope (`{"error": "..."}`).
+/// Anything else coming back from an endpoint we expect to be a PDS means it
+/// isn't one.
+pub fn looks_like_xrpc_error(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
+        .is_some()
+}
+
 /// Opaque-from-our-perspective session bundle returned by `createSession`.
 /// We hold the access JWT for the duration of one logical operation and
 /// re-authenticate per call; this trades a session round-trip for not having
@@ -447,6 +502,50 @@ mod tests {
     use rocket::tokio;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn an_html_404_means_the_endpoint_is_not_a_pds() {
+        let err = PdsError::BadStatus {
+            status: 404,
+            body: String::from("<!doctype html><title>Not found</title>"),
+        };
+        assert_eq!(err.classify(), PdsFailure::NotAPds);
+        assert!(err.classify().is_unavailable());
+    }
+
+    #[test]
+    fn an_xrpc_error_envelope_is_a_rejection() {
+        let err = PdsError::BadStatus {
+            status: 400,
+            body: String::from(r#"{"error":"InvalidRequest","message":"bad handle"}"#),
+        };
+        assert_eq!(err.classify(), PdsFailure::Rejected);
+        assert!(!err.classify().is_unavailable());
+    }
+
+    #[test]
+    fn a_non_json_5xx_stays_a_rejection() {
+        // A real PDS behind a reverse proxy serves HTML gateway errors; that
+        // must not read as "this isn't a PDS".
+        let err = PdsError::BadStatus {
+            status: 503,
+            body: String::from("<html>502 Bad Gateway</html>"),
+        };
+        assert_eq!(err.classify(), PdsFailure::Rejected);
+    }
+
+    #[test]
+    fn the_ssrf_guard_refusing_the_endpoint_is_a_misconfiguration() {
+        let err = PdsError::Fetch(FetchError::Blocked(String::from("127.0.0.1")));
+        assert_eq!(err.classify(), PdsFailure::NotAPds);
+    }
+
+    #[test]
+    fn a_transport_failure_is_unreachable() {
+        let err = PdsError::Fetch(FetchError::Upstream(String::from("connection refused")));
+        assert_eq!(err.classify(), PdsFailure::Unreachable);
+        assert!(err.classify().is_unavailable());
+    }
 
     #[tokio::test]
     async fn get_record_trusted_reaches_a_loopback_endpoint() {

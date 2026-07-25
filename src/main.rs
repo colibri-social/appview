@@ -126,6 +126,11 @@ async fn rocket() -> _ {
 
     log::info!("Voice SFU: {}", sfu::status());
 
+    // `require_env_var("PDS_LOC")` above only proves the variable is set. Probe
+    // it once so a placeholder or dead PDS shows up here rather than as an
+    // opaque upstream error on the first community write.
+    lib::pds_status::probe().await;
+
     let cors = CorsOptions::default()
         .allowed_origins(AllowedOrigins::all())
         .allowed_methods(
