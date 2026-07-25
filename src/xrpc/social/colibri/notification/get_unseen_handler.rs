@@ -14,6 +14,7 @@ use crate::models::notifications as notifications_model;
 #[derive(Serialize, Debug)]
 pub struct UnseenNotification {
     pub id: i64,
+    pub kind: String,
     #[serde(rename = "messageUri")]
     pub message_uri: String,
     #[serde(rename = "indexedAt")]
@@ -51,6 +52,7 @@ async fn get_unseen_with(
                 .into_iter()
                 .map(|row| UnseenNotification {
                     id: row.id,
+                    kind: row.kind,
                     message_uri: row.message_uri,
                     indexed_at: row.indexed_at,
                 })
@@ -127,6 +129,7 @@ mod tests {
 
         assert_eq!(result.notifications.len(), 2);
         assert_eq!(result.notifications[0].id, 20);
+        assert_eq!(result.notifications[0].kind, "mention");
         assert_eq!(
             result.notifications[0].message_uri,
             "at://did:plc:author/social.colibri.message/m20"

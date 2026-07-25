@@ -126,6 +126,13 @@ struct PushPayload {
     data: PushData,
 }
 
+#[derive(Serialize)]
+struct DismissPayload {
+    r#type: &'static str,
+    tag: String,
+    data: PushData,
+}
+
 /// Whether `channel_uri` is muted by the given mute records. Mirrors the
 /// client's `Mutes` logic: a mute matches when its subject is the channel
 /// itself, or is the community (same authority DID) that owns the channel —
@@ -292,16 +299,89 @@ pub async fn deliver(db: DatabaseConnection, notification: IndexedNotification) 
     }
 }
 
+pub async fn deliver_dismissal(
+    db: DatabaseConnection,
+    recipient_did: String,
+    channel_uri: String,
+    message_uri: String,
+) {
+    let subscriptions = match push_subscriptions::list_for_actor(&db, &recipient_did).await {
+        Ok(subs) => subs,
+        Err(e) => {
+            log::warn!("push: failed to list subscriptions for {recipient_did}: {e}");
+            return;
+        }
+    };
+
+    let payload = DismissPayload {
+        r#type: "dismiss",
+        tag: message_uri.clone(),
+        data: PushData {
+            channel_uri: channel_uri.clone(),
+            message_uri: message_uri.clone(),
+        },
+    };
+
+    for sub in subscriptions {
+        let result = match sub.provider.as_str() {
+            "web" => send_web_one(&db, &sub, &payload).await,
+            "fcm" => send_fcm_dismissal(&db, &sub, &channel_uri, &message_uri).await,
+            other => {
+                log::warn!(
+                    "push: unknown provider '{other}' for subscription {}",
+                    sub.id
+                );
+                continue;
+            }
+        };
+        if let Err(e) = result {
+            log::warn!("push: dismissal to subscription {} failed: {e}", sub.id);
+        }
+    }
+}
+
+async fn send_fcm_dismissal(
+    db: &DatabaseConnection,
+    sub: &crate::models::push_subscriptions::Model,
+    channel_uri: &str,
+    message_uri: &str,
+) -> Result<(), String> {
+    let Some(config) = fcm_config() else {
+        return Ok(());
+    };
+
+    let client = fcm_send::client();
+    let access_token = client.access_token(config).await?;
+
+    let mut data = HashMap::new();
+    data.insert("type", "delete");
+    data.insert("channelUri", channel_uri);
+    data.insert("messageUri", message_uri);
+    data.insert("tag", message_uri);
+
+    match client
+        .send(config, &access_token, &sub.endpoint, &data)
+        .await
+    {
+        SendOutcome::Delivered => Ok(()),
+        SendOutcome::Unregistered => {
+            let _ = push_subscriptions::delete_by_endpoint(db, "fcm", &sub.endpoint).await;
+            Ok(())
+        }
+        SendOutcome::Failed(e) => Err(e),
+    }
+}
+
 /// Builds the encrypted/signed request for a single Web Push subscription and
 /// sends it. On a `404`/`410` from the push service the subscription is
 /// pruned. The outbound request is validated and pinned the same way
 /// `embed_fetch` guards other outbound fetches — the endpoint is
 /// caller-supplied at registration time, so it's treated as untrusted here
 /// too. No-ops (returns `Ok`) if VAPID isn't configured.
-async fn send_web_one(
+async fn send_web_one<P: Serialize>(
     db: &DatabaseConnection,
     sub: &crate::models::push_subscriptions::Model,
-    payload: &PushPayload,
+    payload: &P,
 ) -> Result<(), String> {
     let Some(config) = vapid_config() else {
         return Ok(());

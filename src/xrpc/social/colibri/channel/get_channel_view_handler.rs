@@ -63,6 +63,7 @@ async fn get_channel_view_with(
                 .into_iter()
                 .map(|row| UnseenNotification {
                     id: row.id,
+                    kind: row.kind,
                     message_uri: row.message_uri,
                     indexed_at: row.indexed_at,
                 })

@@ -25,8 +25,10 @@ pub const MAX_SUBSCRIPTIONS_PER_ACTOR: u64 = 25;
 
 /// Stores (or refreshes) a push subscription. Idempotent on `(actor_did,
 /// provider, endpoint)`: a repeat registration updates the keys/platform and
-/// leaves `created_at` untouched. Rejects a genuinely new endpoint once the
-/// actor already has [`MAX_SUBSCRIPTIONS_PER_ACTOR`] registered, across all
+/// leaves `created_at` untouched. A device endpoint belongs to exactly one
+/// actor at a time, so registering it drops any rows other actors still hold
+/// for it (last login wins). Rejects a genuinely new endpoint once the actor
+/// already has [`MAX_SUBSCRIPTIONS_PER_ACTOR`] registered, across all
 /// providers combined.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert(
@@ -38,6 +40,13 @@ pub async fn upsert(
     auth: Option<&str>,
     platform: &str,
 ) -> Result<(), DbErr> {
+    push_subscriptions::Entity::delete_many()
+        .filter(push_subscriptions::Column::Provider.eq(provider))
+        .filter(push_subscriptions::Column::Endpoint.eq(endpoint))
+        .filter(push_subscriptions::Column::ActorDid.ne(actor_did))
+        .exec(db)
+        .await?;
+
     let already_registered = push_subscriptions::Entity::find()
         .filter(push_subscriptions::Column::ActorDid.eq(actor_did))
         .filter(push_subscriptions::Column::Provider.eq(provider))
@@ -170,6 +179,40 @@ mod tests {
         let rows = list_for_actor(&db, "did:plc:me").await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].endpoint, "https://push.example/a");
+    }
+
+    #[tokio::test]
+    async fn upsert_scrubs_same_endpoint_rows_of_other_actors_first() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .append_query_results([vec![push_subscriptions::Model {
+                id: 1,
+                actor_did: String::from("did:plc:me"),
+                endpoint: String::from("fcm-token-1"),
+                p256dh: None,
+                auth: None,
+                platform: String::from("android"),
+                provider: String::from("fcm"),
+                created_at: String::from("2026-07-25T00:00:00.000Z"),
+            }]])
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "id",
+                sea_orm::Value::from(1i64),
+            )])]])
+            .into_connection();
+
+        upsert(&db, "did:plc:me", "fcm", "fcm-token-1", None, None, "android")
+            .await
+            .unwrap();
+
+        let log = db.into_transaction_log();
+        let first = format!("{:?}", log[0]);
+        assert!(first.contains("DELETE"));
+        assert!(first.contains("actor_did"));
+        assert!(first.contains("endpoint"));
     }
 
     #[tokio::test]
