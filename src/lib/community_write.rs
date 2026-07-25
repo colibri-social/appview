@@ -20,6 +20,7 @@ use crate::lib::community_credentials;
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError};
 use crate::lib::responses::{self, ErrorBody, ErrorResponse};
+use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
 use rocket::serde::json::Json;
 
@@ -163,6 +164,7 @@ pub async fn cache_upsert(db: &DatabaseConnection, did: &str, nsid: &str, rkey: 
         nsid: ActiveValue::Set(nsid.to_string()),
         rkey: ActiveValue::Set(rkey.to_string()),
         data: ActiveValue::Set(data),
+        indexed_at: ActiveValue::Set(current_iso8601_utc()),
         ..Default::default()
     };
 

@@ -151,6 +151,7 @@ pub async fn write_moderation_record(
         nsid: sea_orm::ActiveValue::Set(MODERATION_NSID.to_string()),
         rkey: sea_orm::ActiveValue::Set(rkey.clone()),
         data: sea_orm::ActiveValue::Set(data.clone()),
+        indexed_at: sea_orm::ActiveValue::Set(current_iso8601_utc()),
         ..Default::default()
     };
     if let Err(e) = record_data::Entity::insert(active).exec(db).await {
@@ -432,6 +433,7 @@ pub async fn write_member_record(
         nsid: sea_orm::ActiveValue::Set(MEMBER_NSID.to_string()),
         rkey: sea_orm::ActiveValue::Set(rkey.clone()),
         data: sea_orm::ActiveValue::Set(data.clone()),
+        indexed_at: sea_orm::ActiveValue::Set(current_iso8601_utc()),
         ..Default::default()
     };
     if let Err(e) = record_data::Entity::insert(active).exec(db).await {
