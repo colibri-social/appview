@@ -22,6 +22,8 @@ pub struct CommunityInfo {
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<Value>,
     #[serde(rename = "categoryOrder")]
     pub category_order: Vec<String>,
     #[serde(rename = "requiresApprovalToJoin")]
@@ -152,6 +154,7 @@ async fn get_data_with(
         name: stored_community.name,
         description: stored_community.description,
         picture: stored_community.picture,
+        banner: stored_community.banner,
         category_order,
         requires_approval_to_join: stored_community.requires_approval_to_join,
         appview,

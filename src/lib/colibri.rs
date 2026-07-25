@@ -174,9 +174,13 @@ pub struct ColibriCommunity {
     #[serde(default)]
     pub requires_approval_to_join: bool,
 
-    /// Optional image for the community.
+    /// Optional avatar image for the community.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
+
+    /// Optional banner image for the community.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<Value>,
 
     /// Set on a legacy community once it has been migrated. Points at the new
     /// community record that replaces it. Consumers treat this community as
