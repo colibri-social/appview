@@ -2,3 +2,9 @@ target/
 .git/
 .env
 docker-compose*.yml
+.claude/
+.zed/
+.github/
+.DS_Store
+scripts/
+CHANGELOG.md

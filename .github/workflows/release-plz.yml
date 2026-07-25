@@ -43,13 +43,14 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          shared-key: release-plz
+          shared-key: release-plz-release
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
   # Open/update the release PR from unreleased commits.
   release-plz-pr:
@@ -73,10 +74,11 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          shared-key: release-plz
+          shared-key: release-plz-pr
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
