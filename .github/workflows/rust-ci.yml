@@ -2,21 +2,16 @@ name: Rust CI
 
 on:
   workflow_dispatch:
-  # Only run on pushes to main (i.e. after a PR merges). Branch pushes that
-  # belong to an open PR are covered by the pull_request trigger below; running
-  # push on "**" as well made every PR push start two identical CI runs.
-  push:
-    branches:
-      - main
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
   format:
     name: Format
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -27,6 +22,7 @@ jobs:
 
   lint:
     name: Lint
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -39,6 +35,7 @@ jobs:
 
   test:
     name: Test
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

@@ -19,7 +19,8 @@ env:
 
 jobs:
   # Build one image per architecture on a native runner (no QEMU, mediasoup
-  # compiles C++ and emulated builds are slow/fragile), push by digest.
+  # compiles C++ and emulated builds are slow/fragile), push by digest, then
+  # lift the release binary straight out of the image it just built
   docker-build:
     name: Docker image (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
@@ -28,9 +29,13 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
+            arch: amd64
             runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
           - platform: linux/arm64
+            arch: arm64
             runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v6
       - name: Compute version
@@ -52,8 +57,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             APPVIEW_VERSION=${{ steps.ver.outputs.version }}
-          cache-from: type=gha,scope=${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.arch }},mode=max
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
       - name: Export digest
         run: |
@@ -65,6 +70,29 @@ jobs:
         with:
           name: digests-${{ strategy.job-index }}
           path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+      - name: Package binary from image
+        run: |
+          set -euo pipefail
+          BIN=colibri-appview
+          IMG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+          DIST="${BIN}-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          docker pull -q "$IMG"
+          cid="$(docker create "$IMG")"
+          mkdir -p "$DIST"
+          docker cp "$cid:/app/${BIN}" "$DIST/${BIN}"
+          docker rm -v "$cid" > /dev/null
+          cp README.md LICENSE "$DIST/"
+          tar -czf "${DIST}.tar.gz" "$DIST"
+          sha256sum "${DIST}.tar.gz" > "${DIST}.tar.gz.sha256"
+      - name: Upload binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            *.tar.gz
+            *.sha256
           if-no-files-found: error
           retention-days: 1
 
@@ -111,52 +139,10 @@ jobs:
       - name: Inspect
         run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
-  # Native Linux binaries (x86_64 + aarch64), uploaded as workflow artifacts and
-  # attached to the Release later by the publish job.
-  binaries:
-    name: Binary (${{ matrix.target }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-      - name: Install Rust 1.96
-        run: rustup toolchain install 1.96 --profile minimal
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - name: Build
-        run: APPVIEW_VERSION="${GITHUB_REF_NAME#v}" cargo build --release --locked
-      - name: Package
-        run: |
-          BIN=colibri-appview
-          DIST="${BIN}-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir -p "$DIST"
-          cp "target/release/${BIN}" "$DIST/"
-          cp README.md LICENSE "$DIST/" 2>/dev/null || true
-          tar -czf "${DIST}.tar.gz" "$DIST"
-          sha256sum "${DIST}.tar.gz" > "${DIST}.tar.gz.sha256"
-      - name: Upload binary artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.target }}
-          path: |
-            *.tar.gz
-            *.sha256
-          if-no-files-found: error
-          retention-days: 1
-
   sentry-release:
     name: Sentry release
     runs-on: ubuntu-latest
-    needs: [docker-manifest, binaries]
+    needs: [docker-manifest]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -182,7 +168,7 @@ jobs:
   publish:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [docker-manifest, binaries]
+    needs: [docker-manifest]
     steps:
       - name: Download binaries
         uses: actions/download-artifact@v4
