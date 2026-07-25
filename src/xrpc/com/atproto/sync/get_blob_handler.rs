@@ -6,10 +6,13 @@ use rocket::request::Request;
 use rocket::response::{Responder, Response};
 use rocket::{State, get, response};
 
+use sea_orm::DatabaseConnection;
+
 use crate::lib::blob_cache::{BlobCache, CacheEntry};
-use crate::lib::did_document::DidDocument;
-use crate::lib::embed_fetch::{self, FetchError};
+use crate::lib::embed_fetch;
+use crate::lib::http::HTTP;
 use crate::lib::range::{RangeResult, parse_range};
+use crate::lib::repo_endpoint::{self, RepoEndpoint};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use rocket::serde::json::Json;
 
@@ -18,22 +21,6 @@ const CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// Hard ceiling on a single blob fetch, independent of the cache's own byte
 /// budget — bounds worst-case memory during the read itself.
 const MAX_BLOB_BYTES: usize = 100 * 1024 * 1024;
-
-/// Resolves a DID to its DID document by fetching from PLC directory or
-/// the did:web well-known URL. Mirrors the logic in `resolve_did_handler`.
-async fn fetch_did_document(did: &str) -> Result<DidDocument, FetchError> {
-    let url = if did.starts_with("did:web:") {
-        let host = did.trim_start_matches("did:web:");
-        format!("https://{host}/.well-known/did.json")
-    } else {
-        format!("https://plc.directory/{did}")
-    };
-    embed_fetch::guarded_get(&url)
-        .await?
-        .json::<DidDocument>()
-        .await
-        .map_err(|e| FetchError::Upstream(e.to_string()))
-}
 
 async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> Result<Bytes, String> {
     let mut bytes: Vec<u8> = Vec::new();
@@ -45,15 +32,6 @@ async fn read_capped(mut resp: reqwest::Response, max_bytes: usize) -> Result<By
         }
     }
     Ok(Bytes::from(bytes))
-}
-
-/// Extracts the `serviceEndpoint` from the `#atproto_pds` service entry in a
-/// DID document. Returns `None` if no such entry exists.
-fn pds_endpoint(doc: &DidDocument) -> Option<&str> {
-    doc.service
-        .iter()
-        .find(|s| s.id == "#atproto_pds" || s.service_type == "AtprotoPersonalDataServer")
-        .map(|s| s.service_endpoint.as_str())
 }
 
 pub enum GetBlobResponse {
@@ -111,7 +89,12 @@ impl<'r> Responder<'r, 'static> for GetBlobResponse {
     }
 }
 
-async fn get_blob_inner(did: &str, cid: &str, cache: &BlobCache) -> GetBlobResponse {
+async fn get_blob_inner(
+    did: &str,
+    cid: &str,
+    cache: &BlobCache,
+    db: &DatabaseConnection,
+) -> GetBlobResponse {
     // Cache hit: serve straight from memory (keyed by the content-addressed CID,
     // which also dedupes the same blob across DIDs).
     if let Some(entry) = cache.get(cid) {
@@ -121,8 +104,10 @@ async fn get_blob_inner(did: &str, cid: &str, cache: &BlobCache) -> GetBlobRespo
         };
     }
 
-    let doc = match fetch_did_document(did).await {
-        Ok(d) => d,
+    // For a community this AppView provisioned, the endpoint comes straight off
+    // its credentials row
+    let endpoint = match repo_endpoint::resolve(db, did).await {
+        Ok(e) => e,
         Err(e) => {
             return GetBlobResponse::Upstream(ErrorResponse {
                 body: Json(ErrorBody {
@@ -133,20 +118,22 @@ async fn get_blob_inner(did: &str, cid: &str, cache: &BlobCache) -> GetBlobRespo
         }
     };
 
-    let endpoint = match pds_endpoint(&doc) {
-        Some(e) => e.trim_end_matches('/').to_string(),
-        None => {
-            return GetBlobResponse::Upstream(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("InvalidRequest"),
-                    message: String::from("DID document has no AtprotoPersonalDataServer service."),
-                }),
-            });
-        }
+    let url = format!(
+        "{endpoint}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}",
+        endpoint = endpoint.as_str()
+    );
+    let fetched = match &endpoint {
+        RepoEndpoint::Trusted(_) => HTTP
+            .clone()
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string()),
+        RepoEndpoint::Untrusted(_) => embed_fetch::guarded_get(&url)
+            .await
+            .map_err(|e| e.to_string()),
     };
-
-    let url = format!("{endpoint}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}");
-    let resp = match embed_fetch::guarded_get(&url).await {
+    let resp = match fetched {
         Ok(r) => r,
         Err(e) => {
             return GetBlobResponse::Upstream(ErrorResponse {
@@ -210,60 +197,11 @@ async fn get_blob_inner(did: &str, cid: &str, cache: &BlobCache) -> GetBlobRespo
 /// Proxies a blob fetch to the PDS that hosts the given DID, caching the bytes
 /// in memory and serving HTTP Range requests itself (the PDS doesn't), so media
 /// players can read duration up front and seek.
-pub async fn get_blob(did: &str, cid: &str, cache: &State<BlobCache>) -> GetBlobResponse {
-    get_blob_inner(did, cid, cache.inner()).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lib::did_document::Service;
-
-    fn doc_with_pds(endpoint: &str) -> DidDocument {
-        DidDocument {
-            context: vec![],
-            id: String::from("did:plc:test"),
-            also_known_as: None,
-            verification_method: vec![],
-            service: vec![Service {
-                id: String::from("#atproto_pds"),
-                service_type: String::from("AtprotoPersonalDataServer"),
-                service_endpoint: endpoint.to_string(),
-            }],
-        }
-    }
-
-    #[test]
-    fn pds_endpoint_finds_atproto_pds_service() {
-        let doc = doc_with_pds("https://pds.example.com");
-        assert_eq!(pds_endpoint(&doc), Some("https://pds.example.com"));
-    }
-
-    #[test]
-    fn pds_endpoint_returns_none_when_absent() {
-        let doc = DidDocument {
-            context: vec![],
-            id: String::from("did:plc:test"),
-            also_known_as: None,
-            verification_method: vec![],
-            service: vec![],
-        };
-        assert!(pds_endpoint(&doc).is_none());
-    }
-
-    #[test]
-    fn pds_endpoint_matches_by_service_type_too() {
-        let doc = DidDocument {
-            context: vec![],
-            id: String::from("did:plc:test"),
-            also_known_as: None,
-            verification_method: vec![],
-            service: vec![Service {
-                id: String::from("#other"),
-                service_type: String::from("AtprotoPersonalDataServer"),
-                service_endpoint: String::from("https://pds.example.com"),
-            }],
-        };
-        assert_eq!(pds_endpoint(&doc), Some("https://pds.example.com"));
-    }
+pub async fn get_blob(
+    did: &str,
+    cid: &str,
+    cache: &State<BlobCache>,
+    db: &State<DatabaseConnection>,
+) -> GetBlobResponse {
+    get_blob_inner(did, cid, cache.inner(), db.inner()).await
 }

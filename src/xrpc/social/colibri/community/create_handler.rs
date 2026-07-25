@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use rocket::tokio::sync::broadcast;
 
+use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember, ColibriRole,
 };
@@ -137,6 +138,8 @@ type UpsertCredentialsFn =
 type UploadBlobFn = dyn Fn(String, String, Vec<u8>, String) -> BoxFuture<'static, Result<Value, PdsError>>
     + Send
     + Sync;
+/// Mirrors a just-written record into the local `record_data` index
+type CacheUpsertFn = dyn Fn(String, String, String, Value) -> BoxFuture<'static, ()> + Send + Sync;
 
 #[allow(clippy::too_many_arguments)]
 async fn create_with(
@@ -151,6 +154,7 @@ async fn create_with(
     create_record_fn: &CreateRecordFn,
     upsert_credentials_fn: &UpsertCredentialsFn,
     upload_blob_fn: &UploadBlobFn,
+    cache_upsert_fn: &CacheUpsertFn,
 ) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
     let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.create"))
         .await
@@ -221,6 +225,7 @@ async fn create_with(
 
     bootstrap_community(
         create_record_fn,
+        cache_upsert_fn,
         upload_blob_fn,
         pds_endpoint,
         access_jwt,
@@ -242,6 +247,7 @@ async fn create_with(
 #[allow(clippy::too_many_arguments)]
 async fn bootstrap_community(
     create_record_fn: &CreateRecordFn,
+    cache_upsert_fn: &CacheUpsertFn,
     upload_blob_fn: &UploadBlobFn,
     pds_endpoint: String,
     access_jwt: String,
@@ -325,6 +331,7 @@ async fn bootstrap_community(
     };
     let community_ref = write_record_logged(
         create_record_fn,
+        cache_upsert_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         &community_did,
@@ -346,6 +353,7 @@ async fn bootstrap_community(
     };
     let category_ref = write_record_logged(
         create_record_fn,
+        cache_upsert_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         &community_did,
@@ -373,6 +381,7 @@ async fn bootstrap_community(
     };
     let channel_ref = write_record_logged(
         create_record_fn,
+        cache_upsert_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         &community_did,
@@ -402,6 +411,7 @@ async fn bootstrap_community(
     };
     let role_ref = write_record_logged(
         create_record_fn,
+        cache_upsert_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         &community_did,
@@ -425,6 +435,7 @@ async fn bootstrap_community(
     };
     let member_ref = write_record_logged(
         create_record_fn,
+        cache_upsert_fn,
         pds_endpoint.clone(),
         access_jwt.clone(),
         &community_did,
@@ -453,6 +464,7 @@ async fn bootstrap_community(
     };
     write_record_logged(
         create_record_fn,
+        cache_upsert_fn,
         pds_endpoint,
         access_jwt,
         &community_did,
@@ -500,6 +512,7 @@ async fn create_byo_with(
     create_record_fn: &CreateRecordFn,
     upsert_credentials_fn: &UpsertCredentialsFn,
     upload_blob_fn: &UploadBlobFn,
+    cache_upsert_fn: &CacheUpsertFn,
 ) -> Result<Json<CreateCommunityResponse>, ErrorResponse> {
     let caller_did = verify_auth_fn(auth, String::from("social.colibri.community.create"))
         .await
@@ -551,6 +564,7 @@ async fn create_byo_with(
     emit("creating");
     let response = bootstrap_community(
         create_record_fn,
+        cache_upsert_fn,
         upload_blob_fn,
         byo.pds,
         session.access_jwt,
@@ -582,6 +596,7 @@ fn progress_event(did: &str, step: &str) -> CommunityCreationProgressEvent {
 #[allow(clippy::too_many_arguments)]
 async fn write_record_logged<T>(
     create_record_fn: &CreateRecordFn,
+    cache_upsert_fn: &CacheUpsertFn,
     pds_endpoint: String,
     access_jwt: String,
     community_did: &str,
@@ -598,13 +613,13 @@ where
         "writing {label} record for {community_did} (rkey={})",
         rkey.as_deref().unwrap_or("<auto>")
     );
-    write_record(
+    let (record_ref, value) = write_record(
         create_record_fn,
         pds_endpoint,
         access_jwt,
         repo,
         collection,
-        rkey,
+        rkey.clone(),
         record,
         label,
     )
@@ -614,12 +629,35 @@ where
             "community.create: write_record({label}) for {community_did} failed: {}",
             e.body.0.message
         );
-    })
+    })?;
+
+    // Index the record locally right away, so the community is queryable the
+    // moment this call returns rather than only once tap has backfilled the new
+    // repo. Keyed on (did, nsid, rkey), so a later firehose delivery of the same record is a no-op.
+    match AtUri::parse(&record_ref.uri).map(|u| u.rkey).or(rkey) {
+        Some(final_rkey) if !final_rkey.is_empty() => {
+            cache_upsert_fn(
+                community_did.to_string(),
+                collection.to_string(),
+                final_rkey,
+                value,
+            )
+            .await;
+        }
+        _ => log::warn!(
+            "community.create: cannot index {label} for {community_did} locally, \
+             malformed record uri {uri}",
+            uri = record_ref.uri
+        ),
+    }
+
+    Ok(record_ref)
 }
 
 /// Serializes a record payload and issues one `createRecord` call. Centralizes
-/// the error-translation boilerplate so the five bootstrap writes above all
-/// surface the same shape of error.
+/// the error-translation boilerplate so the six bootstrap writes above all
+/// surface the same shape of error. Hands back the serialized body alongside the
+/// ref so the caller can index it locally without serializing twice.
 #[allow(clippy::too_many_arguments)]
 async fn write_record<T>(
     create_record_fn: &CreateRecordFn,
@@ -630,22 +668,24 @@ async fn write_record<T>(
     rkey: Option<String>,
     record: &T,
     label: &'static str,
-) -> Result<RecordRef, ErrorResponse>
+) -> Result<(RecordRef, Value), ErrorResponse>
 where
     T: Serialize,
 {
     let value = serde_json::to_value(record)
         .map_err(|e| internal_error(format!("serialize {label}: {e}")))?;
-    create_record_fn(
+    let record_ref = create_record_fn(
         pds_endpoint,
         access_jwt,
         repo,
         collection.to_string(),
         rkey,
-        value,
+        value.clone(),
     )
     .await
-    .map_err(|e| pds_error(format!("createRecord({label}) failed: {e}")))
+    .map_err(|e| pds_error(format!("createRecord({label}) failed: {e}")))?;
+
+    Ok((record_ref, value))
 }
 
 fn auth_error(err: ServiceAuthError) -> ErrorResponse {
@@ -836,7 +876,25 @@ pub async fn create(
     // build it inline rather than reusing the (DB-free) boxed helper above.
     let db_for_upsert = db.inner().clone();
 
+    // Same for the write-through into `record_data`: every bootstrap record is
+    // indexed as it lands, so the new community is readable as soon as this
+    // call returns instead of only after tap backfills the repo.
+    let db_for_cache = db.inner().clone();
+    let cache_upsert_fn =
+        move |did: String, nsid: String, rkey: String, data: Value| -> BoxFuture<'static, ()> {
+            let db = db_for_cache.clone();
+            Box::pin(async move {
+                crate::lib::community_write::cache_upsert(&db, &did, &nsid, &rkey, data).await
+            })
+        };
+
+    // Remembered for the tap-registration decision below: whichever branch runs,
+    // this is the PDS the community's repo now lives on.
+    let community_pds: String;
+
     let response = if let Some(byo) = byo {
+        community_pds = byo.pds.clone();
+
         // BYO: store the supplied credentials as source=byo. No account mint.
         let upsert = move |community_did: String,
                            pds_endpoint: String,
@@ -869,6 +927,7 @@ pub async fn create(
             &create_record_boxed,
             &upsert,
             &upload_blob_boxed,
+            &cache_upsert_fn,
         )
         .await?
     } else {
@@ -881,6 +940,7 @@ pub async fn create(
             password: std::env::var("PDS_ADMIN_PASS")
                 .map_err(|_| internal_error(String::from("PDS_ADMIN_PASS env var not set")))?,
         };
+        community_pds = pds_endpoint.clone();
 
         let upsert = move |community_did: String,
                            pds_endpoint: String,
@@ -915,20 +975,20 @@ pub async fn create(
             &create_record_boxed,
             &upsert,
             &upload_blob_boxed,
+            &cache_upsert_fn,
         )
         .await?
     };
 
-    // Register the freshly-minted community DID with Tap so the firehose
-    // starts delivering its records into `record_data`. Without this, the
-    // bootstrap records (community, category, channel, role, member) sit on
-    // the new PDS and never enter the local index — `listCommunities` would
-    // never return the new community, even for its owner.
+    // Register the freshly-minted community DID with Tap so the firehose keeps
+    // delivering its records into `record_data`. The bootstrap records above are
+    // already indexed (write-through), so this is about everything that happens
+    // afterwards and it is skipped for a PDS tap could never reach.
     //
     // Done out here (rather than in `create_with`) so the test seam surface
     // for `create_with` stays unchanged and the env-var reads inside
     // `register_dids` don't crash unit tests.
-    crate::lib::tap::register_dids(vec![response.did.clone()]).await;
+    crate::lib::tap::register_dids_for_endpoint(vec![response.did.clone()], &community_pds).await;
 
     Ok(response)
 }
@@ -943,6 +1003,10 @@ mod tests {
     type CapturedRecords = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
     /// Captured `(handle, did, password, invite)` from a fake credential store
     type CapturedCredentials = Arc<Mutex<Option<(String, String, String, String)>>>;
+    use std::collections::HashMap;
+
+    /// Captured `(did, nsid, rkey, data)` from a fake local-index writer
+    type CapturedCache = Arc<Mutex<Vec<(String, String, String, Value)>>>;
     /// Captured `(pds, identifier, password)` from a fake session opener
     type CapturedSession = Arc<Mutex<Option<(String, String, String)>>>;
     /// Captured `(bytes, mime)` from a fake blob uploader
@@ -1034,6 +1098,7 @@ mod tests {
             &create_record,
             &upsert,
             &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await
         .unwrap();
@@ -1140,6 +1205,7 @@ mod tests {
             &create_record,
             &upsert,
             &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await
         .unwrap();
@@ -1218,6 +1284,232 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn indexes_every_bootstrap_record_locally() {
+        let created_records: CapturedRecords = Arc::new(Mutex::new(vec![]));
+        let cached_records: CapturedCache = Arc::new(Mutex::new(vec![]));
+        let cr = created_records.clone();
+        let cache = cached_records.clone();
+
+        let create_record = move |_: String,
+                                  _: String,
+                                  _: String,
+                                  collection: String,
+                                  rkey: Option<String>,
+                                  record: Value|
+              -> BoxFuture<'static, Result<RecordRef, PdsError>> {
+            let cr = cr.clone();
+            Box::pin(async move {
+                cr.lock()
+                    .unwrap()
+                    .push((collection.clone(), rkey.clone(), record));
+                let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                Ok(RecordRef {
+                    uri: format!("at://did:plc:newcomm/{collection}/{assigned_rkey}"),
+                    cid: String::from("cid"),
+                })
+            })
+        };
+
+        create_with(
+            String::from("token"),
+            input(),
+            String::from("community.test"),
+            String::from("https://pds.example"),
+            admin(),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, handle: String, _, _| {
+                Box::pin(async move {
+                    Ok(CreatedAccount {
+                        did: String::from("did:plc:newcomm"),
+                        access_jwt: String::from("jwt-from-create"),
+                        handle,
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
+            &create_record,
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
+            &move |did: String,
+                   nsid: String,
+                   rkey: String,
+                   data: Value|
+                  -> BoxFuture<'static, ()> {
+                let cache = cache.clone();
+                Box::pin(async move {
+                    cache.lock().unwrap().push((did, nsid, rkey, data));
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        let cached = cached_records.lock().unwrap();
+        let written = created_records.lock().unwrap();
+
+        // Everything written to the PDS is indexed locally, so the community is
+        // readable without waiting for tap to backfill the new repo.
+        assert_eq!(cached.len(), written.len());
+        assert!(cached.iter().all(|(did, ..)| did == "did:plc:newcomm"));
+
+        let by_nsid: HashMap<&str, (&String, &Value)> = cached
+            .iter()
+            .map(|(_, nsid, rkey, value)| (nsid.as_str(), (rkey, value)))
+            .collect();
+
+        // The two singletons keep their pinned rkeys, and the member record
+        // carries the caller as subject, i.e. exactly the rows
+        // `listCommunities` needs to return the community to its owner.
+        let (community_rkey, community_value) = by_nsid.get("social.colibri.community").unwrap();
+        assert_eq!(community_rkey.as_str(), "self");
+        assert_eq!(community_value["name"], "Test");
+        assert_eq!(
+            by_nsid.get("social.colibri.actor.data").unwrap().0.as_str(),
+            "self"
+        );
+        let (_, member_value) = by_nsid.get("social.colibri.member").unwrap();
+        assert_eq!(member_value["subject"], "did:plc:caller");
+
+        // Indexed rkeys match the ones the PDS acknowledged, not just the ones
+        // requested, the auto-assigned case comes back off the returned uri.
+        for (collection, requested_rkey, _) in written.iter() {
+            let expected = requested_rkey
+                .clone()
+                .unwrap_or_else(|| String::from("auto-rkey"));
+            assert_eq!(by_nsid.get(collection.as_str()).unwrap().0, &expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn byo_indexes_records_under_the_session_did() {
+        let cached_records: CapturedCache = Arc::new(Mutex::new(vec![]));
+        let cache = cached_records.clone();
+
+        create_byo_with(
+            String::from("token"),
+            input(),
+            ByoCredentials {
+                pds: String::from("https://user.pds.example"),
+                identifier: String::from("alice.example"),
+                password: String::from("app-password"),
+            },
+            None,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, _| {
+                Box::pin(async {
+                    Ok(PdsSession {
+                        access_jwt: String::from("jwt"),
+                        did: String::from("did:plc:byocomm"),
+                        handle: Some(String::from("byo.example")),
+                    })
+                })
+            },
+            &|_, _, _, collection: String, rkey: Option<String>, _| {
+                Box::pin(async move {
+                    let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                    Ok(RecordRef {
+                        uri: format!("at://did:plc:byocomm/{collection}/{assigned_rkey}"),
+                        cid: String::from("cid"),
+                    })
+                })
+            },
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
+            &move |did: String,
+                   nsid: String,
+                   rkey: String,
+                   data: Value|
+                  -> BoxFuture<'static, ()> {
+                let cache = cache.clone();
+                Box::pin(async move {
+                    cache.lock().unwrap().push((did, nsid, rkey, data));
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        // The BYO repo is the community, so rows are indexed under the session
+        // DID rather than the caller's.
+        let cached = cached_records.lock().unwrap();
+        assert!(!cached.is_empty());
+        assert!(cached.iter().all(|(did, ..)| did == "did:plc:byocomm"));
+    }
+
+    #[tokio::test]
+    async fn does_not_index_records_the_pds_rejected() {
+        let cached_records: CapturedCache = Arc::new(Mutex::new(vec![]));
+        let cache = cached_records.clone();
+        let calls: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let call_count = calls.clone();
+
+        // First write succeeds, second is rejected.
+        let create_record = move |_: String,
+                                  _: String,
+                                  _: String,
+                                  collection: String,
+                                  rkey: Option<String>,
+                                  _: Value|
+              -> BoxFuture<'static, Result<RecordRef, PdsError>> {
+            let call_count = call_count.clone();
+            Box::pin(async move {
+                let mut n = call_count.lock().unwrap();
+                *n += 1;
+                if *n > 1 {
+                    return Err(PdsError::BadStatus {
+                        status: 400,
+                        body: String::from("nope"),
+                    });
+                }
+                let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                Ok(RecordRef {
+                    uri: format!("at://did:plc:newcomm/{collection}/{assigned_rkey}"),
+                    cid: String::from("cid"),
+                })
+            })
+        };
+
+        let result = create_with(
+            String::from("token"),
+            input(),
+            String::from("community.test"),
+            String::from("https://pds.example"),
+            admin(),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, handle: String, _, _| {
+                Box::pin(async move {
+                    Ok(CreatedAccount {
+                        did: String::from("did:plc:newcomm"),
+                        access_jwt: String::from("jwt-from-create"),
+                        handle,
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
+            &create_record,
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &|_, _, _, _| Box::pin(async { panic!("should not upload when no picture given") }),
+            &move |did: String,
+                   nsid: String,
+                   rkey: String,
+                   data: Value|
+                  -> BoxFuture<'static, ()> {
+                let cache = cache.clone();
+                Box::pin(async move {
+                    cache.lock().unwrap().push((did, nsid, rkey, data));
+                })
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        // Only the record the PDS actually accepted is in the index.
+        let cached = cached_records.lock().unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].1, "social.colibri.community");
+    }
+
+    #[tokio::test]
     async fn rejects_when_auth_fails() {
         let result = create_with(
             String::from("token"),
@@ -1231,6 +1523,7 @@ mod tests {
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await;
 
@@ -1259,6 +1552,7 @@ mod tests {
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _| Box::pin(async { panic!("should not call") }),
             &|_, _, _, _| Box::pin(async { panic!("should not call") }),
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await;
 
@@ -1348,6 +1642,7 @@ mod tests {
             &create_record,
             &|_, _, _, _| Box::pin(async { Ok(()) }),
             &upload_blob,
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await
         .unwrap();
@@ -1408,6 +1703,7 @@ mod tests {
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not write records") }),
             &|_, _, _, _| Box::pin(async { Ok(()) }),
             &|_, _, _, _| Box::pin(async { panic!("should not upload without mime") }),
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await;
 
@@ -1446,6 +1742,7 @@ mod tests {
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not write records") }),
             &|_, _, _, _| Box::pin(async { Ok(()) }),
             &|_, _, _, _| Box::pin(async { panic!("should not upload with bad mime") }),
+            &|_, _, _, _| Box::pin(async {}),
         )
         .await;
 

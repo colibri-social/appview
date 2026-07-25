@@ -245,6 +245,25 @@ async fn rocket() -> _ {
         });
     }
 
+    // Backfill visibility. The AppView doesn't backfill,
+    // so the reporter infers progress from tap's `repos` table plus the
+    // `live` flag on the record stream, and logs when backfilling starts, while it
+    // runs, and when it concludes
+    {
+        let report_secs = lib::backfill_status::report_interval_secs();
+        if report_secs == 0 {
+            log::info!("Backfill reporting disabled via BACKFILL_REPORT_SECS=0.");
+        } else {
+            log::info!(
+                "Backfill reporting every {report_secs}s (silent while every repo is caught up)."
+            );
+            let reporter_db = db.clone();
+            tokio::spawn(async move {
+                lib::backfill_status::run_backfill_reporter(reporter_db).await;
+            });
+        }
+    }
+
     // Outbound Humming manager: propagates local off-protocol changes to remote
     // community hubs and pulls remote presence via supervised `subscribeHums`
     // connections. On by default — skipped only when `HUMMING_ENABLED=false`.

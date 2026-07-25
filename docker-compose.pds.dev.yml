@@ -1,0 +1,138 @@
+# Local PDS (+ its own PLC directory) for development.
+#
+# Overlay on top of the dev dependencies:
+#
+#   docker compose -f docker-compose.dev.yml -f docker-compose.pds.dev.yml up -d
+#
+# Then point the AppView at it with `PDS_LOC=http://localhost:3000` in `.env`.
+# For a production PDS, use `docker-compose.pds.yml` instead. This file is
+# deliberately configured in ways you must not deploy (see `PDS_DEV_MODE`).
+#
+# Communities created against this stack exist only on your machine: their DIDs
+# live in the local PLC below, and the endpoint the PDS publishes for them
+# (`http://localhost:3000`) is not reachable from any other container, so Tap
+# cannot backfill them. The AppView indexes its own writes instead, which is
+# what makes this usable. See https://colibri.social/docs/development/pds
+
+services:
+  pds:
+    image: ghcr.io/bluesky-social/pds:0.4
+    restart: unless-stopped
+    environment:
+      # `localhost` is the one hostname the PDS turns into an http:// public URL
+      # (anything else forces https://), and that URL is what it publishes as
+      # the service endpoint of every community it creates.
+      PDS_HOSTNAME: ${PDS_HOSTNAME:-localhost}
+      PDS_PORT: 3000
+      PDS_SERVICE_HANDLE_DOMAINS: .${APPVIEW_HANDLE_DOMAIN:-test}
+
+      PDS_ADMIN_PASSWORD: ${PDS_ADMIN_PASS:-admin}
+      PDS_JWT_SECRET: ${PDS_JWT_SECRET:-dev-jwt-secret}
+      PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${PDS_PLC_ROTATION_KEY:?generate one, see .env.example}
+
+      PDS_DATA_DIRECTORY: /pds
+      PDS_BLOBSTORE_DISK_LOCATION: /pds/blocks
+      PDS_BLOB_UPLOAD_LIMIT: ${PDS_BLOB_UPLOAD_LIMIT:-52428800}
+
+      # Register community DIDs with the PLC directory next door rather than the
+      # public one, so throwaway test communities don't become permanent entries
+      # in plc.directory pointing at your laptop.
+      PDS_DID_PLC_URL: ${PDS_DID_PLC_URL:-http://plc:2582}
+
+      # Nothing public should be told about a PDS nothing public can reach.
+      PDS_CRAWLERS: ""
+
+      PDS_INVITE_REQUIRED: ${PDS_INVITE_REQUIRED:-true}
+
+      # REQUIRED here, and never in production. Two separate things depend on it:
+      # the PDS refuses to boot when its public URL isn't https (which
+      # `PDS_HOSTNAME=localhost` guarantees), and it would otherwise refuse to
+      # call a PLC directory on a private address like `plc:2582`.
+      PDS_DEV_MODE: "true"
+
+      LOG_ENABLED: ${PDS_LOG_ENABLED:-true}
+    ports:
+      # Loopback only: the AppView runs on the host under `cargo run`.
+      - "127.0.0.1:${PDS_HOST_PORT:-3000}:3000"
+    volumes:
+      - pds:/pds
+    depends_on:
+      plc:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000/xrpc/_health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - internal
+
+  # A private PLC directory, so DIDs minted locally stay local.
+  #
+  # Built from source because did-method-plc publishes no usable image: its own
+  # GHCR package isn't public, and the only public tags are 2023-era leftovers
+  # from when the repo lived under bluesky-social (amd64 only). The image's
+  # default CMD is an AWS entrypoint that wants `DB_CREDS_JSON`, so we run
+  # `dist/bin.js` instead
+  plc:
+    build:
+      context: https://github.com/did-method-plc/did-method-plc.git#2ed82a5ccf1b424aa5e2f6c5b461dc0ee133278b
+      dockerfile: packages/server/Dockerfile
+    command:
+      ["node", "--enable-source-maps", "/app/packages/server/dist/bin.js"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://plc:plc@plc-db:5432/plc
+      PORT: 2582
+      LOG_ENABLED: "true"
+    ports:
+      # Handy for inspecting DID documents: curl http://127.0.0.1:2582/<did>
+      - "127.0.0.1:${PLC_HOST_PORT:-2582}:2582"
+    depends_on:
+      plc-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:2582/_health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - internal
+
+  # The PLC server speaks Postgres only, and its entrypoint passes no schema to
+  # the driver, so it gets a database to itself rather than a corner of the
+  # AppView's.
+  plc-db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: plc
+      POSTGRES_PASSWORD: plc
+      POSTGRES_DB: plc
+    volumes:
+      - plc-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plc -d plc"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    networks:
+      - internal
+
+volumes:
+  pds:
+    driver: local
+  plc-db:
+    driver: local
+
+networks:
+  internal:
+    driver: bridge

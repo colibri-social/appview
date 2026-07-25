@@ -171,7 +171,7 @@ pub struct ColibriCommunity {
     pub category_order: Vec<String>,
 
     /// Whether users can chat without an acknowledgement record.
-    /// Default: true
+    #[serde(default)]
     pub requires_approval_to_join: bool,
 
     /// Optional image for the community.
@@ -518,5 +518,32 @@ mod tests {
         assert!(!effective.sync_bluesky);
         assert!(!effective.has_colibri_profile);
         assert!(effective.theme.is_none());
+    }
+
+    #[test]
+    fn community_without_requires_approval_parses_as_open() {
+        let community: ColibriCommunity = serde_json::from_value(serde_json::json!({
+            "$type": "social.colibri.community",
+            "name": "Legacy",
+            "description": "written before requiresApprovalToJoin existed",
+            "categoryOrder": [],
+        }))
+        .expect("pre-field community records must still parse");
+
+        assert!(!community.requires_approval_to_join);
+    }
+
+    #[test]
+    fn community_with_requires_approval_keeps_its_value() {
+        let community: ColibriCommunity = serde_json::from_value(serde_json::json!({
+            "$type": "social.colibri.community",
+            "name": "Closed",
+            "description": "",
+            "categoryOrder": [],
+            "requiresApprovalToJoin": true,
+        }))
+        .unwrap();
+
+        assert!(community.requires_approval_to_join);
     }
 }

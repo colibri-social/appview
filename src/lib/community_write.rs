@@ -62,11 +62,7 @@ pub async fn community_session(
     let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
         .await
         .map_err(creds_err_to_db)?
-        .ok_or_else(|| {
-            DbErr::Custom(format!(
-                "no credentials registered for community {community_did}"
-            ))
-        })?;
+        .ok_or_else(|| community_credentials::missing_credentials_err(community_did))?;
 
     let session =
         pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)

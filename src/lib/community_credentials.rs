@@ -5,6 +5,9 @@
 //! uses these credentials to write on-protocol records (moderation events,
 //! member admissions, etc.) onto the community's PDS.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sea_orm::{
@@ -49,6 +52,39 @@ pub enum CredentialsError {
     BadNonceEncoding(String),
     #[error("password is not valid UTF-8 after decryption")]
     InvalidUtf8,
+}
+
+const MISSING_CREDENTIALS_MARKER: &str = "no credentials registered for community ";
+
+/// The error every write path returns when this AppView holds no credentials
+/// for `community_did`.
+pub fn missing_credentials_err(community_did: &str) -> DbErr {
+    DbErr::Custom(format!("{MISSING_CREDENTIALS_MARKER}{community_did}"))
+}
+
+/// Community DIDs already warned about
+static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Reports whether `err` is the missing-credentials case, logging a single
+/// warning the first time it's seen for a given community
+pub fn warn_missing_credentials_once(err: &DbErr) -> bool {
+    let message = err.to_string();
+    let Some(idx) = message.find(MISSING_CREDENTIALS_MARKER) else {
+        return false;
+    };
+    let community_did = message[idx + MISSING_CREDENTIALS_MARKER.len()..]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+
+    if WARNED.lock().unwrap().insert(community_did.clone()) {
+        log::warn!(
+            "this AppView holds no credentials for community {community_did}; skipping \
+             community-side writes for it"
+        );
+    }
+    true
 }
 
 /// Encrypts `password` and upserts the credential row keyed by `community_did`.
@@ -119,6 +155,17 @@ pub async fn load_credentials(
         return Ok(None);
     };
     Ok(Some(decrypt_row(row, master_key)?))
+}
+
+/// The stored PDS endpoint for `community_did` plus the `source` it was
+/// registered under, or `None` when this AppView holds no credentials for it.
+pub async fn stored_pds_endpoint(
+    db: &DatabaseConnection,
+    community_did: &str,
+) -> Result<Option<(String, String)>, DbErr> {
+    Ok(fetch_row(db, community_did)
+        .await?
+        .map(|row| (row.pds_endpoint, row.source)))
 }
 
 async fn fetch_row(
@@ -199,6 +246,22 @@ mod tests {
             decrypt_row(row, &wrong),
             Err(CredentialsError::Crypto(CryptoError::DecryptFailed))
         ));
+    }
+
+    #[test]
+    fn missing_credentials_err_is_recognised_and_warned_once() {
+        let err = missing_credentials_err("did:plc:notours");
+
+        // First sighting warns, later ones are silent
+        assert!(warn_missing_credentials_once(&err));
+        assert!(warn_missing_credentials_once(&err));
+        assert!(WARNED.lock().unwrap().contains("did:plc:notours"));
+    }
+
+    #[test]
+    fn unrelated_errors_are_not_swallowed() {
+        let err = DbErr::Custom(String::from("pds write failed: 500"));
+        assert!(!warn_missing_credentials_once(&err));
     }
 
     #[test]

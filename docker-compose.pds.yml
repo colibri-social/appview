@@ -1,0 +1,162 @@
+# This is `docker-compose.yml` plus a `pds` service. If you already run a PDS elsewhere,
+# use the plain `docker-compose.yml` and point `PDS_LOC` at it.
+#
+# NOTE: the `app`, `postgres` and `tap` services below are duplicated from
+# `docker-compose.yml`. Changes to any of them must be made in both files.
+#
+# Two things this file cannot arrange for you:
+#
+#   1. TLS
+#   2. DNS for community handles
+#
+# For local development use `docker-compose.pds.dev.yml` instead.
+
+services:
+  app:
+    image: ghcr.io/colibri-social/appview:latest
+    pull_policy: always
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ROCKET_ADDRESS: 0.0.0.0
+      ROCKET_PORT: 8000
+    ports:
+      - "${SFU_RTC_MIN_PORT:-40000}-${SFU_RTC_MAX_PORT:-40100}:${SFU_RTC_MIN_PORT:-40000}-${SFU_RTC_MAX_PORT:-40100}/udp"
+      - "${SFU_RTC_MIN_PORT:-40000}-${SFU_RTC_MAX_PORT:-40100}:${SFU_RTC_MIN_PORT:-40000}-${SFU_RTC_MAX_PORT:-40100}/tcp"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tap:
+        condition: service_started
+    networks:
+      - internal
+      - dokploy-network
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-colibri}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-colibri}
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-colibri} -d ${POSTGRES_DB:-colibri}",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    networks:
+      - internal
+
+  tap:
+    image: ghcr.io/bluesky-social/indigo/tap:latest
+    restart: unless-stopped
+    environment:
+      TAP_ADMIN_PASSWORD: ${TAP_ADMIN_PASSWORD}
+      TAP_DATABASE_URL: ${DATABASE_URL}
+      TAP_SIGNAL_COLLECTION: social.colibri.actor.data
+      TAP_COLLECTION_FILTERS: social.colibri.*,app.bsky.actor.profile
+      TAP_RELAY_URL: https://relay1.us-east.bsky.network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    volumes:
+      - tap:/data
+
+  pds:
+    image: ghcr.io/bluesky-social/pds:0.4
+    restart: unless-stopped
+    environment:
+      # Identity. `PDS_HOSTNAME` ends up in every community DID document, so it
+      # must be the public hostname, not an internal one.
+      PDS_HOSTNAME: ${PDS_HOSTNAME:?set PDS_HOSTNAME to this PDS's public hostname}
+      PDS_PORT: 3000
+      # Handles the PDS is willing to issue. Kept in sync with the AppView's
+      # `APPVIEW_HANDLE_DOMAIN` so community handle creation can't fail on a
+      # domain this PDS doesn't serve.
+      PDS_SERVICE_HANDLE_DOMAINS: .${APPVIEW_HANDLE_DOMAIN:?set APPVIEW_HANDLE_DOMAIN}
+
+      # Secrets. `PDS_ADMIN_PASS` is the same variable the AppView reads: it
+      # authenticates as PDS admin to create community accounts.
+      PDS_ADMIN_PASSWORD: ${PDS_ADMIN_PASS:?set PDS_ADMIN_PASS}
+      # Generate with: openssl rand --hex 16
+      PDS_JWT_SECRET: ${PDS_JWT_SECRET:?set PDS_JWT_SECRET}
+      # Generate with:
+      #   openssl ecparam --name secp256k1 --genkey --noout --outform DER \
+      #     | tail -c +8 | head -c 32 | xxd -p -c 32
+      PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${PDS_PLC_ROTATION_KEY:?set PDS_PLC_ROTATION_KEY}
+
+      # Storage. Everything (SQLite databases, actor stores, blobs) lives in the
+      # `pds` volume.
+      PDS_DATA_DIRECTORY: /pds
+      PDS_BLOBSTORE_DISK_LOCATION: /pds/blocks
+      PDS_BLOB_UPLOAD_LIMIT: ${PDS_BLOB_UPLOAD_LIMIT:-52428800}
+
+      # Identity resolution. Community DIDs are `did:plc:*`, registered with the
+      # PLC directory below.
+      PDS_DID_PLC_URL: ${PDS_DID_PLC_URL:-https://plc.directory}
+
+      # Relays to notify about new repos, so the firehose (and therefore Tap)
+      # picks up community repositories. Keep in sync with `TAP_RELAY_URL` above.
+      PDS_CRAWLERS: ${PDS_CRAWLERS:-https://relay1.us-east.bsky.network}
+
+      # Account creation stays invite-gated; the AppView mints a single-use
+      # invite code with its admin credentials for every community it creates.
+      PDS_INVITE_REQUIRED: ${PDS_INVITE_REQUIRED:-true}
+
+      # Community accounts are created with `noreply.` addresses and never
+      # receive mail, so SMTP is optional. Set it if you also host human
+      # accounts on this PDS.
+      PDS_EMAIL_SMTP_URL: ${PDS_EMAIL_SMTP_URL:-}
+      PDS_EMAIL_FROM_ADDRESS: ${PDS_EMAIL_FROM_ADDRESS:-}
+
+      # Not needed for communities, which only ever talk to a Colibri AppView.
+      # Uncomment if you also host human accounts here and want `app.bsky.*`
+      # requests proxied to the Bluesky AppView by default.
+      # PDS_BSKY_APP_VIEW_URL: https://api.bsky.app
+      # PDS_BSKY_APP_VIEW_DID: did:web:api.bsky.app
+
+      LOG_ENABLED: ${PDS_LOG_ENABLED:-true}
+    ports:
+      # Loopback by default, for a reverse proxy on this host. Set
+      # PDS_BIND_ADDR=0.0.0.0 if your proxy is elsewhere, or let it route to
+      # `pds:3000` over `dokploy-network`.
+      - "${PDS_BIND_ADDR:-127.0.0.1}:${PDS_HOST_PORT:-3000}:3000"
+    volumes:
+      - pds:/pds
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000/xrpc/_health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - internal
+      - dokploy-network
+
+volumes:
+  postgres:
+    driver: local
+  tap:
+  pds:
+    driver: local
+
+networks:
+  internal:
+    driver: bridge
+  dokploy-network:
+    external: true

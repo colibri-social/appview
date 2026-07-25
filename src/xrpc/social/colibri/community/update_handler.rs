@@ -95,10 +95,7 @@ async fn update_community_with(
                 .await
                 .map_err(community_write::creds_err_to_db)?
                 .ok_or_else(|| {
-                    sea_orm::DbErr::Custom(format!(
-                        "no credentials for {}",
-                        ctx.community.authority
-                    ))
+                    community_credentials::missing_credentials_err(&ctx.community.authority)
                 })?;
 
                 let session = pds_client::create_session(

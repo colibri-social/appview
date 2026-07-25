@@ -8,13 +8,13 @@
 //! `social.colibri.member` record on the community side. Without the
 //! fallback, joiners would race the firehose backfill.
 
-use sea_orm::{ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use serde_json::Value;
 
 use crate::lib::colibri::ColibriCommunity;
 use crate::lib::pds_client::{self, PdsError};
+use crate::lib::repo_endpoint::{self, EndpointError, RepoEndpoint};
 use crate::models::record_data;
-use crate::xrpc::com::atproto::identity::resolve_did;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 
@@ -30,6 +30,16 @@ pub enum CommunityRecordError {
     Pds(#[from] PdsError),
     #[error("failed to parse community record: {0}")]
     Parse(String),
+}
+
+impl From<EndpointError> for CommunityRecordError {
+    fn from(err: EndpointError) -> Self {
+        match err {
+            EndpointError::Db(e) => Self::Db(e),
+            EndpointError::ResolveDid { did, message } => Self::ResolveDid { did, message },
+            EndpointError::NoPdsService { did } => Self::NoPdsService { did },
+        }
+    }
 }
 
 /// Looks up the `social.colibri.community` record at `(community_did, rkey)`.
@@ -61,46 +71,44 @@ pub async fn fetch_community_record(
         return Ok(Some(parsed));
     }
 
-    let did_doc =
-        resolve_did(community_did)
-            .await
-            .map_err(|e| CommunityRecordError::ResolveDid {
-                did: community_did.to_string(),
-                message: e.body.into_inner().message,
-            })?;
-    let pds_endpoint = did_doc
-        .service
-        .iter()
-        .find(|s| s.service_type == "AtprotoPersonalDataServer")
-        .map(|s| s.service_endpoint.clone())
-        .ok_or_else(|| CommunityRecordError::NoPdsService {
-            did: community_did.to_string(),
-        })?;
+    let endpoint = repo_endpoint::resolve(db, community_did).await?;
 
-    let value: Value =
-        match pds_client::get_record(&pds_endpoint, community_did, COMMUNITY_NSID, community_rkey)
+    let fetched = match &endpoint {
+        RepoEndpoint::Trusted(_) => {
+            pds_client::get_record_trusted(
+                endpoint.as_str(),
+                community_did,
+                COMMUNITY_NSID,
+                community_rkey,
+            )
             .await?
-        {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+        }
+        RepoEndpoint::Untrusted(_) => {
+            pds_client::get_record(
+                endpoint.as_str(),
+                community_did,
+                COMMUNITY_NSID,
+                community_rkey,
+            )
+            .await?
+        }
+    };
+    let value: Value = match fetched {
+        Some(v) => v,
+        None => return Ok(None),
+    };
 
     let parsed = serde_json::from_value::<ColibriCommunity>(value.clone())
         .map_err(|e| CommunityRecordError::Parse(e.to_string()))?;
 
-    let active = record_data::ActiveModel {
-        did: ActiveValue::Set(community_did.to_string()),
-        nsid: ActiveValue::Set(COMMUNITY_NSID.to_string()),
-        rkey: ActiveValue::Set(community_rkey.to_string()),
-        data: ActiveValue::Set(value),
-        ..Default::default()
-    };
-    if let Err(e) = record_data::Entity::insert(active).exec(db).await {
-        log::warn!(
-            "optimistic cache insert failed for community {community_did}/{community_rkey}: {e} \
-             (firehose will reconcile)"
-        );
-    }
+    crate::lib::community_write::cache_upsert(
+        db,
+        community_did,
+        COMMUNITY_NSID,
+        community_rkey,
+        value,
+    )
+    .await;
 
     Ok(Some(parsed))
 }

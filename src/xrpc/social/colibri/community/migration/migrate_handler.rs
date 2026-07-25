@@ -143,7 +143,7 @@ type CreateRecordFn = dyn Fn(
 type UploadBlobFn = dyn Fn(String, String, Vec<u8>, String) -> BoxFuture<'static, Result<Value, PdsError>>
     + Send
     + Sync;
-type RegisterDidsFn = dyn Fn(Vec<String>) -> BoxFuture<'static, ()> + Send + Sync;
+type RegisterDidsFn = dyn Fn(Vec<String>, String) -> BoxFuture<'static, ()> + Send + Sync;
 type CacheUpsertFn = dyn Fn(String, String, String, Value) -> BoxFuture<'static, ()> + Send + Sync;
 
 // ---- Pure structure planner (unit-tested) -------------------------------
@@ -552,7 +552,7 @@ async fn migrate_with(
     )
     .await;
 
-    register_dids_fn(vec![target.did.clone()]).await;
+    register_dids_fn(vec![target.did.clone()], target.pds_endpoint.clone()).await;
 
     log::info!(
         "[migrate {mig_id}] complete: did={} categories={} channels={} members_imported={}",
@@ -802,8 +802,8 @@ fn verify_auth_boxed(
     Box::pin(async move { service_auth::verify_service_auth(&auth, &lxm).await })
 }
 
-fn register_dids_boxed(dids: Vec<String>) -> BoxFuture<'static, ()> {
-    Box::pin(async move { crate::lib::tap::register_dids(dids).await })
+fn register_dids_boxed(dids: Vec<String>, pds_endpoint: String) -> BoxFuture<'static, ()> {
+    Box::pin(async move { crate::lib::tap::register_dids_for_endpoint(dids, &pds_endpoint).await })
 }
 
 /// Builds the managed-vs-BYO provisioning closure, mirroring `community.create`.
@@ -1172,7 +1172,7 @@ mod tests {
             &|_| Box::pin(async { panic!("should not fetch members") }),
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not write") }),
             &|_, _, _, _| Box::pin(async { panic!("should not upload") }),
-            &|_| Box::pin(async {}),
+            &|_, _| Box::pin(async {}),
             &|_, _, _, _| Box::pin(async { panic!("should not cache") }),
         )
         .await;
@@ -1194,7 +1194,7 @@ mod tests {
             &|_| Box::pin(async { panic!("should not fetch members") }),
             &|_, _, _, _, _, _| Box::pin(async { panic!("should not write") }),
             &|_, _, _, _| Box::pin(async { panic!("should not upload") }),
-            &|_| Box::pin(async {}),
+            &|_, _| Box::pin(async {}),
             &|_, _, _, _| Box::pin(async { panic!("should not cache") }),
         )
         .await;
@@ -1239,7 +1239,7 @@ mod tests {
             },
             create_record.as_ref(),
             &|_, _, _, _| Box::pin(async { panic!("no picture in this test") }),
-            &move |dids| {
+            &move |dids, _pds| {
                 let reg = reg.clone();
                 Box::pin(async move {
                     reg.lock().unwrap().extend(dids);

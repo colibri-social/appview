@@ -118,12 +118,7 @@ pub async fn write_moderation_record(
         community_credentials::load_credentials(db, crypto::master_key(), &community.authority)
             .await
             .map_err(credentials_error_to_db_err)?
-            .ok_or_else(|| {
-                DbErr::Custom(format!(
-                    "no credentials registered for community {}",
-                    community.authority
-                ))
-            })?;
+            .ok_or_else(|| community_credentials::missing_credentials_err(&community.authority))?;
 
     let session =
         pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
@@ -346,11 +341,7 @@ pub async fn revoke_community_member(
     let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
         .await
         .map_err(credentials_error_to_db_err)?
-        .ok_or_else(|| {
-            DbErr::Custom(format!(
-                "no credentials registered for community {community_did}"
-            ))
-        })?;
+        .ok_or_else(|| community_credentials::missing_credentials_err(community_did))?;
 
     let session =
         pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
@@ -410,11 +401,7 @@ pub async fn write_member_record(
     let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
         .await
         .map_err(credentials_error_to_db_err)?
-        .ok_or_else(|| {
-            DbErr::Custom(format!(
-                "no credentials registered for community {community_did}"
-            ))
-        })?;
+        .ok_or_else(|| community_credentials::missing_credentials_err(community_did))?;
 
     let session =
         pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)

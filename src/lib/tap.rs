@@ -6,6 +6,7 @@ use crate::lib::colibri::{
     ColibriModerationSubject,
 };
 use crate::lib::community_authz;
+use crate::lib::community_credentials::warn_missing_credentials_once;
 use crate::lib::community_record::fetch_community_record;
 use crate::lib::community_write;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
@@ -16,6 +17,7 @@ use crate::lib::hum_client::OutboundHum;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
+use crate::lib::repo_endpoint;
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
 use base64::Engine;
@@ -42,7 +44,6 @@ pub type TapStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TapMessageRecord {
-    #[allow(dead_code)]
     pub live: bool,
     pub did: String,
     #[allow(dead_code)]
@@ -116,6 +117,22 @@ pub async fn register_dids(dids: Vec<String>) {
     } else {
         log::info!("Now tracking DIDs: {}", &did_struct.dids.join(", "));
     }
+}
+
+/// [`register_dids`] for a repo whose PDS we know, skipping registration when
+/// that PDS is unreachable from Tap's container
+pub async fn register_dids_for_endpoint(dids: Vec<String>, pds_endpoint: &str) {
+    if repo_endpoint::is_unreachable_from_containers(pds_endpoint).await {
+        log::warn!(
+            "not registering {dids} with tap: its PDS {pds_endpoint} is unreachable from other \
+             containers, so tap could only retry forever. Writes made through this AppView are \
+             indexed locally; expose the PDS publicly and re-register to backfill the rest.",
+            dids = dids.join(", ")
+        );
+        return;
+    }
+
+    register_dids(dids).await;
 }
 
 /// Tells Tap to stop tracking the given DIDs, deleting their tracked-repo
@@ -519,6 +536,12 @@ pub async fn run_connection(
             }
         }
 
+        // Feed the backfill reporter: tap flags historical (backfill) records
+        // `live: false` and firehose records `live: true`. Counted here, after the
+        // dedup gate so a redelivery isn't double-counted, and before `record`
+        // moves into the `WorkItem` below.
+        crate::lib::backfill_status::note_record(record.live);
+
         let shard = shard_for(&record.did, &record.collection, &record.rkey, worker_count);
 
         log::debug!("Processing Tap event ID {} on shard {}", tap_msg.id, shard);
@@ -885,6 +908,7 @@ async fn process_event(
     if record.collection == MEMBERSHIP_NSID
         && record.action == "delete"
         && let Err(e) = revoke_member_for_leave(db, &record).await
+        && !warn_missing_credentials_once(&e)
     {
         log::error!(
             "member revoke on leave failed for {}/{}: {}",
@@ -903,6 +927,7 @@ async fn process_event(
     if record.collection == MEMBERSHIP_NSID
         && record.action != "delete"
         && let Err(e) = process_membership_create(db, &record).await
+        && !warn_missing_credentials_once(&e)
     {
         log::error!(
             "membership-create processing failed for {}/{}: {}",
@@ -1098,7 +1123,9 @@ async fn process_membership_create(
             created_by: community_did.clone(),
             created_at: current_iso8601_utc(),
         };
-        if let Err(e) = moderation::write_moderation_record(db, &community_uri, &audit).await {
+        if let Err(e) = moderation::write_moderation_record(db, &community_uri, &audit).await
+            && !warn_missing_credentials_once(&e)
+        {
             log::error!(
                 "blockedJoin audit write failed for {} in {}: {e}",
                 record.did,
@@ -1142,11 +1169,13 @@ async fn process_membership_create(
             );
         }
         Err(e) => {
-            log::error!(
-                "auto-admit write_member_record failed for {} in {}: {e}",
-                record.did,
-                community_did
-            );
+            if !warn_missing_credentials_once(&e) {
+                log::error!(
+                    "auto-admit write_member_record failed for {} in {}: {e}",
+                    record.did,
+                    community_did
+                );
+            }
         }
     }
 

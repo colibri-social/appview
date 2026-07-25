@@ -1,6 +1,7 @@
 pub mod at_uri;
 pub mod auth_bridge;
 pub mod author_cache;
+pub mod backfill_status;
 pub mod blob_cache;
 pub mod bsky;
 pub mod channel_authz;
@@ -40,6 +41,7 @@ pub mod push_subscriptions;
 pub mod range;
 pub mod reactions;
 pub mod refill;
+pub mod repo_endpoint;
 pub mod responses;
 pub mod sentry;
 pub mod service_auth;

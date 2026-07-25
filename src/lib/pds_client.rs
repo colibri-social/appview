@@ -139,16 +139,44 @@ pub async fn get_record(
     collection: &str,
     rkey: &str,
 ) -> Result<Option<Value>, PdsError> {
+    let resp =
+        embed_fetch::guarded_get(&get_record_url(pds_endpoint, repo, collection, rkey)).await?;
+    interpret_get_record(resp).await
+}
+
+/// Like [`get_record`], but issued with the shared unguarded client because the
+/// endpoint is one this AppView is *configured* with (a community's stored
+/// `pds_endpoint` on our own `PDS_LOC`) rather than one derived from a DID
+/// document. Such an endpoint may legitimately be loopback on a non-default
+/// port during development, which the SSRF guard rejects by design
+pub async fn get_record_trusted(
+    pds_endpoint: &str,
+    repo: &str,
+    collection: &str,
+    rkey: &str,
+) -> Result<Option<Value>, PdsError> {
+    let resp = HTTP
+        .clone()
+        .get(get_record_url(pds_endpoint, repo, collection, rkey))
+        .send()
+        .await?;
+    interpret_get_record(resp).await
+}
+
+fn get_record_url(pds_endpoint: &str, repo: &str, collection: &str, rkey: &str) -> String {
+    format!(
+        "{}/xrpc/com.atproto.repo.getRecord?repo={repo}&collection={collection}&rkey={rkey}",
+        pds_endpoint.trim_end_matches('/')
+    )
+}
+
+/// Shared response handling for both `getRecord` variants: a missing record is
+/// `Ok(None)`, everything else is an error or the record value.
+async fn interpret_get_record(resp: reqwest::Response) -> Result<Option<Value>, PdsError> {
     #[derive(Deserialize)]
     struct GetRecordResponse {
         value: Value,
     }
-
-    let url = format!(
-        "{}/xrpc/com.atproto.repo.getRecord?repo={repo}&collection={collection}&rkey={rkey}",
-        pds_endpoint.trim_end_matches('/')
-    );
-    let resp = embed_fetch::guarded_get(&url).await?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
@@ -416,6 +444,75 @@ async fn error_from_response(resp: reqwest::Response) -> PdsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::tokio;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn get_record_trusted_reaches_a_loopback_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.getRecord"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uri": "at://did:plc:comm/social.colibri.community/self",
+                "value": { "name": "Local" }
+            })))
+            .mount(&server)
+            .await;
+
+        let value = get_record_trusted(
+            &server.uri(),
+            "did:plc:comm",
+            "social.colibri.community",
+            "self",
+        )
+        .await
+        .unwrap()
+        .expect("record should be found");
+
+        assert_eq!(value["name"], "Local");
+    }
+
+    #[tokio::test]
+    async fn get_record_refuses_a_loopback_endpoint() {
+        let server = MockServer::start().await;
+        let err = get_record(
+            &server.uri(),
+            "did:plc:comm",
+            "social.colibri.community",
+            "self",
+        )
+        .await
+        .expect_err("the guarded path must reject a private address");
+
+        assert!(
+            matches!(err, PdsError::Fetch(_)),
+            "expected a guard rejection, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_record_trusted_treats_missing_records_as_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.repo.getRecord"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "RecordNotFound",
+                "message": "Could not locate record"
+            })))
+            .mount(&server)
+            .await;
+
+        let found = get_record_trusted(
+            &server.uri(),
+            "did:plc:comm",
+            "social.colibri.community",
+            "self",
+        )
+        .await
+        .unwrap();
+        assert!(found.is_none());
+    }
 
     #[test]
     fn generate_strong_password_is_48_alphanumeric_chars() {

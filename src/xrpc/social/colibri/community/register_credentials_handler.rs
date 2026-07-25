@@ -224,7 +224,7 @@ pub async fn register_credentials(
     // Done in the handler (not in `register_with`) so unit tests don't
     // trip on the env-var reads (`TAP_HOSTNAME`, `TAP_ADMIN_PASSWORD`)
     // inside `register_dids`.
-    crate::lib::tap::register_dids(vec![response.did.clone()]).await;
+    crate::lib::tap::register_dids_for_endpoint(vec![response.did.clone()], pds).await;
 
     // Mark this AppView as the community's off-protocol hub. Best-effort and
     // non-fatal: a BYO community whose record isn't provisioned yet keeps the
