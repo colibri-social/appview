@@ -204,9 +204,17 @@ mod tests {
             )])]])
             .into_connection();
 
-        upsert(&db, "did:plc:me", "fcm", "fcm-token-1", None, None, "android")
-            .await
-            .unwrap();
+        upsert(
+            &db,
+            "did:plc:me",
+            "fcm",
+            "fcm-token-1",
+            None,
+            None,
+            "android",
+        )
+        .await
+        .unwrap();
 
         let log = db.into_transaction_log();
         let first = format!("{:?}", log[0]);

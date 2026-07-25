@@ -1310,10 +1310,7 @@ mod tests {
     async fn unseen_count_only_counts_mentions_and_replies() {
         use std::collections::BTreeMap;
 
-        let rows = vec![BTreeMap::from([(
-            "num_items",
-            sea_orm::Value::from(0i64),
-        )])];
+        let rows = vec![BTreeMap::from([("num_items", sea_orm::Value::from(0i64))])];
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([rows])
             .into_connection();
@@ -1450,10 +1447,7 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![channel_record]])
             .append_query_results([vec![parent_record]])
-            .append_query_results([vec![
-                member("did:plc:author"),
-                member("did:plc:parent"),
-            ]])
+            .append_query_results([vec![member("did:plc:author"), member("did:plc:parent")]])
             .append_query_results([Vec::<user_states::Model>::new()])
             .append_query_results([vec![std::collections::BTreeMap::from([(
                 "id",
