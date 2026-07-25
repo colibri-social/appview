@@ -20,7 +20,7 @@ impl Variant {
             "small" => Some(Variant::Small),
             "base" => Some(Variant::Base),
             "large" => Some(Variant::Large),
-            _ => Some(Variant::Large),
+            _ => None,
         }
     }
 
