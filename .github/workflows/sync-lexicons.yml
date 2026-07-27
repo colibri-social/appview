@@ -1,0 +1,50 @@
+name: Sync lexicons
+
+# The lexicons are authored as TypeScript in the client repository and exported
+# to JSON there. This pulls the latest export into `lexicons/`, which is what
+# tests/lexicons.rs checks the routes against.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync lexicons
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Sync
+        run: ./scripts/sync-lexicons.sh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Open a pull request when anything changed
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: chore/sync-lexicons
+          commit-message: "chore: sync lexicons from the client repository"
+          title: "chore: sync lexicons"
+          body: |
+            Pulls the latest exported lexicons from the client repository.
+
+            `cargo test --test lexicons` on this PR is the real check: it reports
+            any route that now contradicts the lexicons, and lists the routes and
+            lexicon methods that exist on only one side. Absence is never a
+            failure, so a red build here means a genuine breaking change.
+          delete-branch: true

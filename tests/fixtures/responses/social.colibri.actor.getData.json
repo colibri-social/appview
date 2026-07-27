@@ -1,0 +1,23 @@
+{
+  "data": {
+    "avatar": {
+      "$type": "blob",
+      "mimeType": "image/png",
+      "ref": {
+        "$link": "bafkreiavatar000000000000000000000000000000000000000000000"
+      },
+      "size": 1024
+    },
+    "description": "A fixture actor.",
+    "displayName": "Smoke Tester",
+    "isBot": false,
+    "onlineState": "online",
+    "status": {
+      "emoji": "📌",
+      "text": "Pinning fixtures"
+    },
+    "syncBluesky": false
+  },
+  "did": "did:plc:fixtureauthor00000000000",
+  "handle": "author.test"
+}
