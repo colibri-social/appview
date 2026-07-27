@@ -1,0 +1,24 @@
+{
+  "channels": [
+    {
+      "category": "at://did:plc:fixturecommunity000000000/social.colibri.category/main",
+      "description": "The default channel.",
+      "name": "general",
+      "type": "social.colibri.channel.text",
+      "uri": "at://did:plc:fixturecommunity000000000/social.colibri.channel/general"
+    },
+    {
+      "allowedMembers": [
+        "did:plc:fixtureauthor00000000000"
+      ],
+      "allowedRoles": [
+        "moderator"
+      ],
+      "category": "at://did:plc:fixturecommunity000000000/social.colibri.category/main",
+      "name": "staff",
+      "ownerOnly": true,
+      "type": "social.colibri.channel.text",
+      "uri": "at://did:plc:fixturecommunity000000000/social.colibri.channel/staff"
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+{
+  "cursor": "3lkfixturecursor",
+  "messages": [
+    {
+      "attachments": [
+        {
+          "blob": {
+            "$type": "blob",
+            "mimeType": "image/webp",
+            "ref": {
+              "$link": "bafkreiattachment0000000000000000000000000000000000000000"
+            },
+            "size": 4096
+          },
+          "name": "screenshot.webp"
+        }
+      ],
+      "author": {
+        "data": {
+          "avatar": {
+            "$type": "blob",
+            "mimeType": "image/png",
+            "ref": {
+              "$link": "bafkreiavatar000000000000000000000000000000000000000000000"
+            },
+            "size": 1024
+          },
+          "description": "A fixture actor.",
+          "displayName": "Smoke Tester",
+          "isBot": false,
+          "onlineState": "online",
+          "status": {
+            "emoji": "📌",
+            "text": "Pinning fixtures"
+          },
+          "syncBluesky": false
+        },
+        "did": "did:plc:fixtureauthor00000000000",
+        "handle": "author.test"
+      },
+      "channel": "at://did:plc:fixturecommunity000000000/social.colibri.channel/general",
+      "community": "at://did:plc:fixturecommunity000000000/social.colibri.community/self",
+      "createdAt": "2026-01-01T00:01:00.000Z",
+      "edited": true,
+      "facets": [
+        {
+          "features": [
+            {
+              "$type": "social.colibri.richtext.facet#bold"
+            }
+          ],
+          "index": {
+            "byteEnd": 5,
+            "byteStart": 0
+          }
+        }
+      ],
+      "parent": {
+        "attachments": [],
+        "author": {
+          "data": {
+            "avatar": {
+              "$type": "blob",
+              "mimeType": "image/png",
+              "ref": {
+                "$link": "bafkreiavatar000000000000000000000000000000000000000000000"
+              },
+              "size": 1024
+            },
+            "description": "A fixture actor.",
+            "displayName": "Smoke Tester",
+            "isBot": false,
+            "onlineState": "online",
+            "status": {
+              "emoji": "📌",
+              "text": "Pinning fixtures"
+            },
+            "syncBluesky": false
+          },
+          "did": "did:plc:fixtureauthor00000000000",
+          "handle": "author.test"
+        },
+        "channel": "at://did:plc:fixturecommunity000000000/social.colibri.channel/general",
+        "community": "at://did:plc:fixturecommunity000000000/social.colibri.community/self",
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "edited": false,
+        "facets": [],
+        "reactions": [],
+        "text": "The message being replied to",
+        "uri": "at://did:plc:fixtureauthor00000000000/social.colibri.message/3lkfixture0000"
+      },
+      "reactions": [
+        {
+          "count": 2,
+          "emoji": "🎉",
+          "reactorDIDs": [
+            "did:plc:fixturereactor0000000000",
+            "did:plc:fixtureauthor00000000000"
+          ]
+        }
+      ],
+      "text": "Hello from a fixture",
+      "uri": "at://did:plc:fixtureauthor00000000000/social.colibri.message/3lkfixture0001"
+    }
+  ]
+}

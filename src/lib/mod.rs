@@ -44,6 +44,8 @@ pub mod range;
 pub mod reactions;
 pub mod refill;
 pub mod repo_endpoint;
+#[cfg(test)]
+pub mod response_snapshots;
 pub mod responses;
 pub mod sentry;
 pub mod service_auth;

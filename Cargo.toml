@@ -50,6 +50,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 
 [dev-dependencies]
 wiremock = "0.6"
+toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

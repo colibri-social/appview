@@ -1,0 +1,9 @@
+#   [[exception]]
+#   nsid = "social.colibri.channel.listMessages"
+#   param = "someNewRequiredParam"
+#   reason = "Shipped ahead of the lexicon for the 0.2 migration; client PR #123."
+#   expires = "2026-09-01"
+#
+# Entries suppress a single lexicon-check failure for one nsid/param pair. The
+# `expires` date is checked on every run: once it passes, the build fails until
+# the entry is resolved or the date is deliberately extended.
