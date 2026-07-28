@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/colibri-social/appview/compare/v0.1.14...v0.2.0) - 2026-07-28
+
+### Added
+
+- [**breaking**] community banners ([#71](https://github.com/colibri-social/appview/pull/71))
+- lexicon tests ([#72](https://github.com/colibri-social/appview/pull/72))
+
+### Fixed
+
+- set indexed_at for community and mod writes
+- channel dragging/updating
+- better PDS unreachable errors
+
 ## [0.1.14](https://github.com/colibri-social/appview/compare/v0.1.13...v0.1.14) - 2026-07-25
 
 ### Added
