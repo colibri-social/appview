@@ -15,6 +15,8 @@ pub struct CommunityEventData {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<Value>,
     #[serde(rename = "categoryOrder", skip_serializing_if = "Option::is_none")]
     pub category_order: Option<Vec<String>>,
     #[serde(

@@ -45,6 +45,8 @@ pub struct InvitationResolvedView {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<Value>,
     #[serde(rename = "memberCount")]
     pub member_count: u64,
     #[serde(rename = "onlineCount")]
@@ -58,6 +60,7 @@ pub struct InvitationResolvedView {
 pub struct InvitationCommunity {
     pub name: String,
     pub picture: Option<Value>,
+    pub banner: Option<Value>,
     pub requires_approval_to_join: bool,
     pub member_count: u64,
     pub online_count: u64,
@@ -254,6 +257,7 @@ pub async fn fetch_invitation_community(
     Ok(Some(InvitationCommunity {
         name: stored.name,
         picture: stored.picture,
+        banner: stored.banner,
         requires_approval_to_join: stored.requires_approval_to_join,
         member_count,
         online_count,
@@ -288,6 +292,7 @@ async fn get_invitation_with(
         active: row.active,
         name: community.name,
         picture: community.picture,
+        banner: community.banner,
         member_count: community.member_count,
         online_count: community.online_count,
         requires_approval_to_join: community.requires_approval_to_join,
@@ -716,6 +721,7 @@ mod tests {
         InvitationCommunity {
             name: String::from("Test Community"),
             picture: Some(serde_json::json!({ "ref": "pic" })),
+            banner: Some(serde_json::json!({ "ref": "pic" })),
             requires_approval_to_join: true,
             member_count: 42,
             online_count: 7,

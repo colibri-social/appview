@@ -28,6 +28,8 @@ pub struct Community {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub banner: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(rename = "categoryOrder", skip_serializing_if = "Option::is_none")]
     pub category_order: Option<Vec<String>>,
@@ -455,6 +457,7 @@ mod tests {
         Community {
             name: String::from(name),
             picture: None,
+            banner: None,
             description: None,
             category_order: None,
             requires_approval_to_join: false,

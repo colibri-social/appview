@@ -24,9 +24,11 @@
 use std::collections::{HashMap, HashSet};
 
 use futures::future::BoxFuture;
-use rocket::data::{Data, ToByteUnit};
+use rocket::data::ToByteUnit;
+use rocket::form::Form;
+use rocket::fs::TempFile;
 use rocket::serde::json::Json;
-use rocket::{State, post};
+use rocket::{FromForm, State, post};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::Serialize;
@@ -45,6 +47,7 @@ use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
+use crate::xrpc::util::unpack_image_file;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const CATEGORY_NSID: &str = "social.colibri.category";
@@ -79,8 +82,8 @@ pub struct MigrateInput {
     pub name: Option<String>,
     pub description: Option<String>,
     pub requires_approval_to_join: Option<bool>,
-    pub picture: Option<Vec<u8>>,
-    pub mime_type: Option<String>,
+    pub picture_blob: Option<Vec<u8>>,
+    pub picture_mime: Option<String>,
 }
 
 // ---- Intermediate types -------------------------------------------------
@@ -260,6 +263,7 @@ pub fn plan_structure(
             .requires_approval_to_join
             .unwrap_or(old.community.requires_approval_to_join),
         picture: None,
+        banner: None,
         migrated_to: None,
         migrated_from: Some(source_uri.to_string()),
         appview: Some(crate::lib::service_auth::appview_did()),
@@ -575,7 +579,7 @@ async fn upload_picture(
     upload_blob_fn: &UploadBlobFn,
     mig_id: &str,
 ) -> Result<Option<Value>, ErrorResponse> {
-    match (input.picture.as_deref(), input.mime_type.as_deref()) {
+    match (input.picture_blob.as_deref(), input.picture_mime.as_deref()) {
         (Some(bytes), Some(mime)) => {
             if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime) {
                 return Err(invalid_request(format!(
@@ -902,9 +906,14 @@ fn build_provision_fn(
     }
 }
 
+#[derive(FromForm, Debug)]
+pub struct CommunityXrpcBody<'r> {
+    picture: Option<TempFile<'r>>,
+}
+
 #[post(
-    "/xrpc/social.colibri.community.migrate?<kind>&<source>&<name>&<description>&<requiresApprovalToJoin>&<auth>&<mimeType>&<pds>&<identifier>&<password>",
-    data = "<picture>"
+    "/xrpc/social.colibri.community.migrate?<kind>&<source>&<name>&<description>&<requiresApprovalToJoin>&<auth>&<pds>&<identifier>&<password>",
+    data = "<body>"
 )]
 /// Migrates a legacy community into a fresh community (see module docs). The
 /// optional replacement picture is sent as the raw request body, exactly like
@@ -918,25 +927,17 @@ pub async fn migrate(
     description: Option<&str>,
     requiresApprovalToJoin: Option<bool>,
     auth: &str,
-    mimeType: Option<&str>,
     pds: Option<&str>,
     identifier: Option<&str>,
     password: Option<&str>,
-    picture: Data<'_>,
+    body: Form<CommunityXrpcBody<'_>>,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<MigrateResponse>, ErrorResponse> {
-    let capped = picture
-        .open(MAX_PICTURE_MEBIBYTES.mebibytes())
-        .into_bytes()
-        .await
-        .map_err(|e| invalid_request(format!("Failed to read picture body: {e}")))?;
-    if !capped.is_complete() {
-        return Err(invalid_request(format!(
-            "picture exceeds the maximum allowed size of {MAX_PICTURE_MEBIBYTES} MiB."
-        )));
-    }
-    let bytes = capped.into_inner();
-    let picture = if bytes.is_empty() { None } else { Some(bytes) };
+    let (picture_blob, picture_mime) =
+        match unpack_image_file(&body.picture, MAX_PICTURE_MEBIBYTES.mebibytes()).await? {
+            None => (None, None),
+            Some((blob, mime)) => (Some(blob), Some(mime)),
+        };
 
     let input = MigrateInput {
         kind: kind.to_string(),
@@ -944,8 +945,8 @@ pub async fn migrate(
         name: name.map(str::to_string),
         description: description.map(str::to_string),
         requires_approval_to_join: requiresApprovalToJoin,
-        picture,
-        mime_type: mimeType.map(str::to_string),
+        picture_blob,
+        picture_mime,
     };
 
     let byo = match (pds, identifier, password) {
@@ -1010,6 +1011,7 @@ mod tests {
             category_order: vec![String::from("cat-old")],
             requires_approval_to_join: true,
             picture: None,
+            banner: None,
             migrated_to: None,
             migrated_from: None,
             appview: None,
@@ -1053,8 +1055,8 @@ mod tests {
             name: None,
             description: None,
             requires_approval_to_join: None,
-            picture: None,
-            mime_type: None,
+            picture_blob: None,
+            picture_mime: None,
         }
     }
 

@@ -8,6 +8,7 @@ use crate::lib::notifications::IndexedNotification;
 use crate::lib::sentry::init_sentry;
 use crate::lib::tap::{self, CommsBridge, run_connection};
 use crate::migrations::{Migrator, MigratorTrait};
+use rocket::data::{Limits, ToByteUnit};
 use rocket::fairing::AdHoc;
 use rocket::http::Method;
 use rocket::tokio::sync::broadcast;
@@ -309,94 +310,103 @@ async fn rocket() -> _ {
         });
     }
 
+    let limits = Limits::new()
+        .limit("data-form", 21usize.mebibytes())
+        .limit("file", 10usize.mebibytes());
+
+    let figment = rocket::Config::figment().merge(("limits", limits));
+    let mut rocket = rocket::custom(figment);
+
     #[cfg_attr(windows, allow(unused_mut))]
-    let mut rocket = rocket::build()
-        .mount(
-            "/",
-            routes![
-                landing_ascii,
-                well_known::did_json,
-                xrpc::com::atproto::identity::resolve_did,
-                xrpc::com::atproto::identity::resolve_handle,
-                xrpc::com::atproto::identity::resolve_identity,
-                xrpc::com::atproto::sync::get_blob,
-                xrpc::com::atproto::sync::get_record,
-                xrpc::com::atproto::sync::list_records,
-                xrpc::social::colibri::actor::get_data,
-                xrpc::social::colibri::actor::get_notification_preference,
-                xrpc::social::colibri::actor::list_communities,
-                xrpc::social::colibri::actor::list_mutes,
-                xrpc::social::colibri::actor::set_state,
-                xrpc::social::colibri::channel::create_channel,
-                xrpc::social::colibri::channel::delete_channel,
-                xrpc::social::colibri::channel::get_channel_view,
-                xrpc::social::colibri::channel::get_read_cursor,
-                xrpc::social::colibri::channel::list_messages,
-                xrpc::social::colibri::channel::list_reactions,
-                xrpc::social::colibri::channel::list_unread_status,
-                xrpc::social::colibri::channel::update_channel,
-                xrpc::social::colibri::embed::get_metadata,
-                xrpc::social::colibri::embed::get_image,
-                xrpc::social::colibri::embed::search_gifs,
-                xrpc::social::colibri::embed::trending_gifs,
-                xrpc::social::colibri::embed::gif_categories,
-                xrpc::social::colibri::community::approve_membership,
-                xrpc::social::colibri::community::ban_user,
-                xrpc::social::colibri::community::block_message,
-                xrpc::social::colibri::community::create,
-                xrpc::social::colibri::community::migrate,
-                xrpc::social::colibri::community::create_category,
-                xrpc::social::colibri::community::create_invitation,
-                xrpc::social::colibri::community::delete_category,
-                xrpc::social::colibri::community::delete_community,
-                xrpc::social::colibri::community::delete_invitation,
-                xrpc::social::colibri::community::dismiss_application,
-                xrpc::social::colibri::community::get_data,
-                xrpc::social::colibri::community::get_invitation,
-                xrpc::social::colibri::community::kick,
-                xrpc::social::colibri::community::kick_user,
-                xrpc::social::colibri::community::leave,
-                xrpc::social::colibri::community::list_applications,
-                xrpc::social::colibri::community::list_banned_users,
-                xrpc::social::colibri::community::list_categories,
-                xrpc::social::colibri::community::list_channels,
-                xrpc::social::colibri::community::list_invitations,
-                xrpc::social::colibri::community::list_members,
-                xrpc::social::colibri::community::list_roles,
-                xrpc::social::colibri::community::create_role,
-                xrpc::social::colibri::community::delete_role,
-                xrpc::social::colibri::community::register_credentials,
-                xrpc::social::colibri::community::reorder_categories,
-                xrpc::social::colibri::community::reorder_channels,
-                xrpc::social::colibri::community::set_member_roles,
-                xrpc::social::colibri::community::unban_user,
-                xrpc::social::colibri::community::undismiss_application,
-                xrpc::social::colibri::community::update_category,
-                xrpc::social::colibri::community::update_community,
-                xrpc::social::colibri::community::update_role,
-                xrpc::social::colibri::notification::get_unread_count,
-                xrpc::social::colibri::notification::get_unseen,
-                xrpc::social::colibri::notification::list_notifications,
-                xrpc::social::colibri::notification::register_push,
-                xrpc::social::colibri::notification::unregister_push,
-                xrpc::social::colibri::notification::update_seen,
-                xrpc::social::colibri::notification::update_seen_for_message,
-                xrpc::social::colibri::sync::subscribe_events,
-                xrpc::social::colibri::sync::send_hum,
-                xrpc::social::colibri::sync::subscribe_hums,
-                xrpc::social::colibri::voice::moderate_voice,
-                xrpc::social::colibri::server::describe_server,
-            ],
-        )
-        .mount("/", rocket_cors::catch_all_options_routes())
-        .attach(crate::lib::auth_bridge::ServiceAuthHeaderBridge)
-        .attach(safe_cors.clone())
-        .attach(init_seaorm(db))
-        .manage(tap_bridge)
-        .manage(c2c_broadcast_channel)
-        .manage(crate::lib::embed_cache::EmbedCache::from_env())
-        .manage(crate::lib::blob_cache::BlobCache::from_env())
-        .manage(safe_cors);
+    {
+        rocket = rocket
+            .mount(
+                "/",
+                routes![
+                    landing_ascii,
+                    well_known::did_json,
+                    xrpc::com::atproto::identity::resolve_did,
+                    xrpc::com::atproto::identity::resolve_handle,
+                    xrpc::com::atproto::identity::resolve_identity,
+                    xrpc::com::atproto::sync::get_blob,
+                    xrpc::com::atproto::sync::get_record,
+                    xrpc::com::atproto::sync::list_records,
+                    xrpc::social::colibri::actor::get_data,
+                    xrpc::social::colibri::actor::get_notification_preference,
+                    xrpc::social::colibri::actor::list_communities,
+                    xrpc::social::colibri::actor::list_mutes,
+                    xrpc::social::colibri::actor::set_state,
+                    xrpc::social::colibri::channel::create_channel,
+                    xrpc::social::colibri::channel::delete_channel,
+                    xrpc::social::colibri::channel::get_channel_view,
+                    xrpc::social::colibri::channel::get_read_cursor,
+                    xrpc::social::colibri::channel::list_messages,
+                    xrpc::social::colibri::channel::list_reactions,
+                    xrpc::social::colibri::channel::list_unread_status,
+                    xrpc::social::colibri::channel::update_channel,
+                    xrpc::social::colibri::embed::get_metadata,
+                    xrpc::social::colibri::embed::get_image,
+                    xrpc::social::colibri::embed::search_gifs,
+                    xrpc::social::colibri::embed::trending_gifs,
+                    xrpc::social::colibri::embed::gif_categories,
+                    xrpc::social::colibri::community::approve_membership,
+                    xrpc::social::colibri::community::ban_user,
+                    xrpc::social::colibri::community::block_message,
+                    xrpc::social::colibri::community::create,
+                    xrpc::social::colibri::community::migrate,
+                    xrpc::social::colibri::community::create_category,
+                    xrpc::social::colibri::community::create_invitation,
+                    xrpc::social::colibri::community::delete_category,
+                    xrpc::social::colibri::community::delete_community,
+                    xrpc::social::colibri::community::delete_invitation,
+                    xrpc::social::colibri::community::dismiss_application,
+                    xrpc::social::colibri::community::get_data,
+                    xrpc::social::colibri::community::get_invitation,
+                    xrpc::social::colibri::community::kick,
+                    xrpc::social::colibri::community::kick_user,
+                    xrpc::social::colibri::community::leave,
+                    xrpc::social::colibri::community::list_applications,
+                    xrpc::social::colibri::community::list_banned_users,
+                    xrpc::social::colibri::community::list_categories,
+                    xrpc::social::colibri::community::list_channels,
+                    xrpc::social::colibri::community::list_invitations,
+                    xrpc::social::colibri::community::list_members,
+                    xrpc::social::colibri::community::list_roles,
+                    xrpc::social::colibri::community::create_role,
+                    xrpc::social::colibri::community::delete_role,
+                    xrpc::social::colibri::community::register_credentials,
+                    xrpc::social::colibri::community::reorder_categories,
+                    xrpc::social::colibri::community::reorder_channels,
+                    xrpc::social::colibri::community::set_member_roles,
+                    xrpc::social::colibri::community::unban_user,
+                    xrpc::social::colibri::community::undismiss_application,
+                    xrpc::social::colibri::community::update_category,
+                    xrpc::social::colibri::community::update_community,
+                    xrpc::social::colibri::community::update_role,
+                    xrpc::social::colibri::notification::get_unread_count,
+                    xrpc::social::colibri::notification::get_unseen,
+                    xrpc::social::colibri::notification::list_notifications,
+                    xrpc::social::colibri::notification::register_push,
+                    xrpc::social::colibri::notification::unregister_push,
+                    xrpc::social::colibri::notification::update_seen,
+                    xrpc::social::colibri::notification::update_seen_for_message,
+                    xrpc::social::colibri::sync::subscribe_events,
+                    xrpc::social::colibri::sync::send_hum,
+                    xrpc::social::colibri::sync::subscribe_hums,
+                    xrpc::social::colibri::voice::moderate_voice,
+                    xrpc::social::colibri::server::describe_server,
+                ],
+            )
+            .mount("/", rocket_cors::catch_all_options_routes())
+            .attach(crate::lib::auth_bridge::ServiceAuthHeaderBridge)
+            .attach(safe_cors.clone())
+            .attach(init_seaorm(db))
+            .manage(tap_bridge)
+            .manage(c2c_broadcast_channel)
+            .manage(crate::lib::embed_cache::EmbedCache::from_env())
+            .manage(crate::lib::blob_cache::BlobCache::from_env())
+            .manage(safe_cors);
+    }
 
     #[cfg(not(windows))]
     {
