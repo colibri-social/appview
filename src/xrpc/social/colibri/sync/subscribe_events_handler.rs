@@ -101,6 +101,14 @@ async fn parse_client_event(
                 leave_vc_and_broadcast(&did, to_tap_broadcast, hum_outbox, db).await;
             }
 
+            join_vc(
+                did.clone(),
+                vc_msg_data.channel.clone(),
+                vc_msg_data.community.clone(),
+                db,
+            )
+            .await;
+
             hum_client::enqueue(
                 hum_outbox,
                 OutboundHum::Voice {
@@ -120,8 +128,6 @@ async fn parse_client_event(
                 );
             }
 
-            join_vc(did, vc_msg_data.channel, vc_msg_data.community, db).await;
-
             None
         }
         "voice_leave" => {
@@ -130,6 +136,8 @@ async fn parse_client_event(
         }
         "voice_state" => {
             let state_data: VoiceStateData = serde_json::from_value(user_message.data?).ok()?;
+
+            set_vc_state(did.clone(), state_data.muted, state_data.deafened, db).await;
 
             hum_client::enqueue(
                 hum_outbox,
@@ -154,8 +162,6 @@ async fn parse_client_event(
                 );
             }
 
-            set_vc_state(did, state_data.muted, state_data.deafened, db).await;
-
             None
         }
         _ => None,
@@ -171,6 +177,8 @@ async fn leave_vc_and_broadcast(
     if let Ok(states) = get_did_states(did.to_string(), db).await
         && let Some(channel) = states.vc
     {
+        leave_vc(did.to_string(), db).await;
+
         hum_client::enqueue(
             hum_outbox,
             OutboundHum::Voice {
@@ -185,8 +193,6 @@ async fn leave_vc_and_broadcast(
         {
             broadcast_voice_presence(to_tap_broadcast, &uri.authority, &channel, did, "leave");
         }
-
-        leave_vc(did.to_string(), db).await;
     }
 }
 

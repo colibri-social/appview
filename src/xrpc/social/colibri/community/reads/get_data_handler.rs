@@ -8,11 +8,12 @@ use serde_json::Value;
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriCommunity, community_hub_did};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::record_data;
 
 use super::list_categories_handler::{Category, fetch_category_records};
 use super::list_channels_handler::{Channel, fetch_channel_records};
-use super::list_members_handler::{Member, MemberAggregate, build_member, fetch_member_aggregate};
+use super::list_members_handler::{Member, MemberAggregate, build_members, fetch_member_aggregate};
 use super::list_roles_handler::{Role, build_roles, fetch_role_records};
 
 #[derive(Serialize, Debug)]
@@ -52,6 +53,7 @@ pub struct RawCommunityData {
 pub async fn fetch_raw_community_data(
     db: &DatabaseConnection,
     community_uri: &str,
+    moderation: &ModerationLookup,
 ) -> Result<RawCommunityData, DbErr> {
     let community = AtUri::parse(community_uri)
         .ok_or_else(|| DbErr::Custom(format!("invalid community AT-URI: {community_uri}")))?;
@@ -67,7 +69,7 @@ pub async fn fetch_raw_community_data(
         fetch_category_records(db, &community.authority, &community.rkey).await?;
     let channel_records = fetch_channel_records(db, &community.authority, &community.rkey).await?;
     let role_records = fetch_role_records(db, &community.authority).await?;
-    let member_aggregate = fetch_member_aggregate(db, community_uri).await?;
+    let member_aggregate = fetch_member_aggregate(db, community_uri, moderation).await?;
 
     Ok(RawCommunityData {
         community_record,
@@ -101,12 +103,16 @@ struct StoredChannel {
     allowed_members: Vec<String>,
 }
 
-type FetchDataFn =
-    fn(DatabaseConnection, String) -> BoxFuture<'static, Result<RawCommunityData, DbErr>>;
+type FetchDataFn = fn(
+    DatabaseConnection,
+    String,
+    ModerationLookup,
+) -> BoxFuture<'static, Result<RawCommunityData, DbErr>>;
 
 async fn get_data_with(
     community_uri: String,
     db: DatabaseConnection,
+    moderation: ModerationLookup,
     fetch_data_fn: FetchDataFn,
 ) -> Result<Json<CommunityDataResponse>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
@@ -116,7 +122,7 @@ async fn get_data_with(
         }),
     })?;
 
-    let raw = fetch_data_fn(db.clone(), community_uri).await?;
+    let raw = fetch_data_fn(db.clone(), community_uri, moderation).await?;
 
     let community_record = raw.community_record.ok_or_else(|| ErrorResponse {
         body: Json(ErrorBody {
@@ -214,47 +220,8 @@ async fn get_data_with(
     crate::lib::owner_role_heal::spawn_heal(&db, &community.authority, &raw.role_records);
     let roles = build_roles(raw.role_records, &community.authority);
 
-    let MemberAggregate {
-        member_dids,
-        mut profiles,
-        mut colibri_profiles,
-        mut actor_data,
-        mut states,
-        mut vc,
-        mut vc_muted,
-        mut vc_deafened,
-        mut handles,
-        mut member_roles,
-    } = raw.member_aggregate;
-
-    let members = member_dids
-        .into_iter()
-        .map(|did| {
-            let handle = handles.remove(&did);
-            let profile = profiles.remove(&did);
-            let colibri_profile = colibri_profiles.remove(&did);
-            let data = actor_data.remove(&did);
-            let state = states.remove(&did);
-            let member_vc = vc.remove(&did);
-            let member_vc_muted = vc_muted.remove(&did);
-            let member_vc_deafened = vc_deafened.remove(&did);
-            let role_rkeys = member_roles.remove(&did).unwrap_or_default();
-            let mut member = build_member(
-                did,
-                handle,
-                profile,
-                colibri_profile,
-                data,
-                state,
-                &community.authority,
-                role_rkeys,
-            );
-            member.vc = member_vc;
-            member.vc_muted = member_vc_muted;
-            member.vc_deafened = member_vc_deafened;
-            member
-        })
-        .collect();
+    let mut member_aggregate = raw.member_aggregate;
+    let members = build_members(&mut member_aggregate, &community.authority);
 
     Ok(Json(CommunityDataResponse {
         community: community_info,
@@ -269,8 +236,9 @@ async fn get_data_with(
 fn fetch_data_boxed(
     db: DatabaseConnection,
     community_uri: String,
+    moderation: ModerationLookup,
 ) -> BoxFuture<'static, Result<RawCommunityData, DbErr>> {
-    Box::pin(async move { fetch_raw_community_data(&db, &community_uri).await })
+    Box::pin(async move { fetch_raw_community_data(&db, &community_uri, &moderation).await })
 }
 
 #[get("/xrpc/social.colibri.community.getData?<community>")]
@@ -279,8 +247,15 @@ fn fetch_data_boxed(
 pub async fn get_data(
     community: &str,
     db: &State<DatabaseConnection>,
+    moderation: &State<ModerationLookup>,
 ) -> Result<Json<CommunityDataResponse>, ErrorResponse> {
-    get_data_with(community.to_string(), db.inner().clone(), fetch_data_boxed).await
+    get_data_with(
+        community.to_string(),
+        db.inner().clone(),
+        moderation.inner().clone(),
+        fetch_data_boxed,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -358,6 +333,8 @@ mod tests {
                 vc: HashMap::new(),
                 vc_muted: HashMap::new(),
                 vc_deafened: HashMap::new(),
+                vc_server_muted: HashMap::new(),
+                vc_server_deafened: HashMap::new(),
                 handles: HashMap::from([(
                     String::from("did:plc:alice"),
                     String::from("alice.test"),
@@ -373,7 +350,8 @@ mod tests {
         let result = get_data_with(
             String::from("at://did:plc:owner/social.colibri.community/self"),
             db,
-            |_, _| Box::pin(async { Ok(raw_data_with_community(Some(community_model()))) }),
+            ModerationLookup::default(),
+            |_, _, _| Box::pin(async { Ok(raw_data_with_community(Some(community_model()))) }),
         )
         .await
         .unwrap();
@@ -404,7 +382,8 @@ mod tests {
         let result = get_data_with(
             String::from("at://did:plc:owner/social.colibri.community/self"),
             db,
-            |_, _| {
+            ModerationLookup::default(),
+            |_, _, _| {
                 Box::pin(async {
                     let mut model = community_model();
                     model.data["appview"] = serde_json::json!("did:web:hub.example.com");
@@ -424,7 +403,8 @@ mod tests {
         let result = get_data_with(
             String::from("at://did:plc:owner/social.colibri.community/self"),
             db,
-            |_, _| Box::pin(async { Ok(raw_data_with_community(None)) }),
+            ModerationLookup::default(),
+            |_, _, _| Box::pin(async { Ok(raw_data_with_community(None)) }),
         )
         .await;
 
@@ -435,9 +415,12 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = mock_db();
-        let result = get_data_with(String::from("not-a-uri"), db, |_, _| {
-            Box::pin(async { panic!("should not fetch when uri is invalid") })
-        })
+        let result = get_data_with(
+            String::from("not-a-uri"),
+            db,
+            ModerationLookup::default(),
+            |_, _, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
+        )
         .await;
 
         assert!(result.is_err());

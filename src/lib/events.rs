@@ -59,6 +59,16 @@ pub struct MemberEventMember {
     pub joined_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vc: Option<String>,
+    #[serde(rename = "vcMuted", default, skip_serializing_if = "Option::is_none")]
+    pub vc_muted: Option<bool>,
+    #[serde(
+        rename = "vcDeafened",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub vc_deafened: Option<bool>,
     pub data: MemberEventMemberData,
 }
 

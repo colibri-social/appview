@@ -408,10 +408,27 @@ async fn rocket() -> _ {
             .manage(safe_cors);
     }
 
+    #[cfg(windows)]
+    {
+        rocket = rocket.manage(crate::lib::voice_moderation::ModerationLookup::default());
+    }
+
     #[cfg(not(windows))]
     {
+        let sfu = voice_sfu.clone();
         rocket = rocket
             .mount("/", routes![xrpc::social::colibri::voice::signal])
+            .manage(crate::lib::voice_moderation::ModerationLookup::new(
+                std::sync::Arc::new(move |channel: String, did: String| {
+                    let sfu = sfu.clone();
+                    Box::pin(async move {
+                        match sfu.get_channel(&channel).await {
+                            Some(room) => room.snapshot_moderation(&did),
+                            None => (false, false),
+                        }
+                    })
+                }),
+            ))
             .manage(voice_sfu);
     }
 

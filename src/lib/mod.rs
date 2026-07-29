@@ -58,3 +58,4 @@ pub mod validate_state;
 pub mod vapid_config;
 pub mod voice_control;
 pub mod voice_events;
+pub mod voice_moderation;

@@ -10,6 +10,7 @@ use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::{record_data, repos, user_states};
 use crate::xrpc::social::colibri::actor::get_data_handler::{
     ActorData, ActorStatus, actor_data_from_effective,
@@ -27,6 +28,10 @@ pub struct Member {
     pub vc_muted: Option<bool>,
     #[serde(rename = "vcDeafened", skip_serializing_if = "Option::is_none")]
     pub vc_deafened: Option<bool>,
+    #[serde(rename = "vcServerMuted", skip_serializing_if = "Option::is_none")]
+    pub vc_server_muted: Option<bool>,
+    #[serde(rename = "vcServerDeafened", skip_serializing_if = "Option::is_none")]
+    pub vc_server_deafened: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -46,6 +51,8 @@ pub struct MemberAggregate {
     pub vc: HashMap<String, String>,
     pub vc_muted: HashMap<String, bool>,
     pub vc_deafened: HashMap<String, bool>,
+    pub vc_server_muted: HashMap<String, bool>,
+    pub vc_server_deafened: HashMap<String, bool>,
     pub handles: HashMap<String, String>,
     /// Role rkeys assigned to each member, keyed by member DID. These are
     /// raw record keys — callers must expand them to full AT-URIs.
@@ -55,6 +62,7 @@ pub struct MemberAggregate {
 pub async fn fetch_member_aggregate(
     db: &DatabaseConnection,
     community_uri: &str,
+    moderation: &ModerationLookup,
 ) -> Result<MemberAggregate, DbErr> {
     // Variant A: members are `social.colibri.member` records sitting on the
     // community's own repo, with `data->>'subject'` carrying the user DID.
@@ -103,6 +111,8 @@ pub async fn fetch_member_aggregate(
             vc: HashMap::new(),
             vc_muted: HashMap::new(),
             vc_deafened: HashMap::new(),
+            vc_server_muted: HashMap::new(),
+            vc_server_deafened: HashMap::new(),
             handles: HashMap::new(),
             member_roles: HashMap::new(),
         });
@@ -147,11 +157,18 @@ pub async fn fetch_member_aggregate(
     let mut vc: HashMap<String, String> = HashMap::new();
     let mut vc_muted: HashMap<String, bool> = HashMap::new();
     let mut vc_deafened: HashMap<String, bool> = HashMap::new();
+    let mut vc_server_muted: HashMap<String, bool> = HashMap::new();
+    let mut vc_server_deafened: HashMap<String, bool> = HashMap::new();
     for row in state_rows {
-        if let Some(channel) = row.vc {
+        if let Some(channel) = row.vc
+            && row.vc_community.as_deref() == Some(community_uri)
+        {
+            let (server_muted, server_deafened) = moderation.get(&channel, &row.did).await;
             vc.insert(row.did.clone(), channel);
             vc_muted.insert(row.did.clone(), row.vc_muted.unwrap_or(false));
             vc_deafened.insert(row.did.clone(), row.vc_deafened.unwrap_or(false));
+            vc_server_muted.insert(row.did.clone(), server_muted);
+            vc_server_deafened.insert(row.did.clone(), server_deafened);
         }
         states.insert(row.did, row.state);
     }
@@ -174,6 +191,8 @@ pub async fn fetch_member_aggregate(
         vc,
         vc_muted,
         vc_deafened,
+        vc_server_muted,
+        vc_server_deafened,
         handles,
         member_roles,
     })
@@ -224,15 +243,56 @@ pub fn build_member(
         vc: None,
         vc_muted: None,
         vc_deafened: None,
+        vc_server_muted: None,
+        vc_server_deafened: None,
     }
 }
 
-type FetchAggregateFn =
-    fn(DatabaseConnection, String) -> BoxFuture<'static, Result<MemberAggregate, DbErr>>;
+type FetchAggregateFn = fn(
+    DatabaseConnection,
+    String,
+    ModerationLookup,
+) -> BoxFuture<'static, Result<MemberAggregate, DbErr>>;
+
+pub fn take_voice_state(aggregate: &mut MemberAggregate, member: &mut Member) {
+    let did = &member.did;
+    member.vc = aggregate.vc.remove(did);
+    member.vc_muted = aggregate.vc_muted.remove(did);
+    member.vc_deafened = aggregate.vc_deafened.remove(did);
+    member.vc_server_muted = aggregate.vc_server_muted.remove(did);
+    member.vc_server_deafened = aggregate.vc_server_deafened.remove(did);
+}
+
+pub fn build_members(aggregate: &mut MemberAggregate, community_authority: &str) -> Vec<Member> {
+    std::mem::take(&mut aggregate.member_dids)
+        .into_iter()
+        .map(|did| {
+            let handle = aggregate.handles.remove(&did);
+            let profile = aggregate.profiles.remove(&did);
+            let colibri_profile = aggregate.colibri_profiles.remove(&did);
+            let data = aggregate.actor_data.remove(&did);
+            let state = aggregate.states.remove(&did);
+            let role_rkeys = aggregate.member_roles.remove(&did).unwrap_or_default();
+            let mut member = build_member(
+                did,
+                handle,
+                profile,
+                colibri_profile,
+                data,
+                state,
+                community_authority,
+                role_rkeys,
+            );
+            take_voice_state(aggregate, &mut member);
+            member
+        })
+        .collect()
+}
 
 async fn list_members_with(
     community_uri: String,
     db: DatabaseConnection,
+    moderation: ModerationLookup,
     fetch_aggregate_fn: FetchAggregateFn,
 ) -> Result<Json<MemberList>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
@@ -242,49 +302,8 @@ async fn list_members_with(
         }),
     })?;
 
-    let aggregate = fetch_aggregate_fn(db, community_uri).await?;
-
-    let MemberAggregate {
-        member_dids,
-        mut profiles,
-        mut colibri_profiles,
-        mut actor_data,
-        mut states,
-        mut vc,
-        mut vc_muted,
-        mut vc_deafened,
-        mut handles,
-        mut member_roles,
-    } = aggregate;
-
-    let members = member_dids
-        .into_iter()
-        .map(|did| {
-            let handle = handles.remove(&did);
-            let profile = profiles.remove(&did);
-            let colibri_profile = colibri_profiles.remove(&did);
-            let data = actor_data.remove(&did);
-            let state = states.remove(&did);
-            let member_vc = vc.remove(&did);
-            let member_vc_muted = vc_muted.remove(&did);
-            let member_vc_deafened = vc_deafened.remove(&did);
-            let role_rkeys = member_roles.remove(&did).unwrap_or_default();
-            let mut member = build_member(
-                did,
-                handle,
-                profile,
-                colibri_profile,
-                data,
-                state,
-                &community.authority,
-                role_rkeys,
-            );
-            member.vc = member_vc;
-            member.vc_muted = member_vc_muted;
-            member.vc_deafened = member_vc_deafened;
-            member
-        })
-        .collect();
+    let mut aggregate = fetch_aggregate_fn(db, community_uri, moderation).await?;
+    let members = build_members(&mut aggregate, &community.authority);
 
     Ok(Json(MemberList { members }))
 }
@@ -292,8 +311,9 @@ async fn list_members_with(
 fn fetch_aggregate_boxed(
     db: DatabaseConnection,
     community_uri: String,
+    moderation: ModerationLookup,
 ) -> BoxFuture<'static, Result<MemberAggregate, DbErr>> {
-    Box::pin(async move { fetch_member_aggregate(&db, &community_uri).await })
+    Box::pin(async move { fetch_member_aggregate(&db, &community_uri, &moderation).await })
 }
 
 #[get("/xrpc/social.colibri.community.listMembers?<community>")]
@@ -302,10 +322,12 @@ fn fetch_aggregate_boxed(
 pub async fn list_members(
     community: &str,
     db: &State<DatabaseConnection>,
+    moderation: &State<ModerationLookup>,
 ) -> Result<Json<MemberList>, ErrorResponse> {
     list_members_with(
         community.to_string(),
         db.inner().clone(),
+        moderation.inner().clone(),
         fetch_aggregate_boxed,
     )
     .await
@@ -316,6 +338,7 @@ mod tests {
     use super::*;
     use crate::lib::test_fixtures::mock_db;
     use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn profile_for(name: &str) -> ActorProfile {
         ActorProfile {
@@ -341,6 +364,118 @@ mod tests {
         }
     }
 
+    const HOME: &str = "at://did:plc:owner/social.colibri.community/c1";
+    const HOME_VC: &str = "at://did:plc:owner/social.colibri.channel/vc";
+    const ELSEWHERE: &str = "at://did:plc:other/social.colibri.community/c1";
+    const ELSEWHERE_VC: &str = "at://did:plc:other/social.colibri.channel/vc";
+
+    fn member_record(id: i64, subject: &str) -> record_data::Model {
+        record_data::Model {
+            id,
+            did: String::from("did:plc:owner"),
+            nsid: String::from("social.colibri.member"),
+            rkey: format!("m{id}"),
+            data: serde_json::json!({ "subject": subject, "roles": [] }),
+            indexed_at: String::from(""),
+        }
+    }
+
+    fn vc_state(did: &str, vc: &str, community: &str) -> user_states::Model {
+        user_states::Model {
+            did: String::from(did),
+            state: String::from("online"),
+            channel: None,
+            vc: Some(String::from(vc)),
+            vc_community: Some(String::from(community)),
+            vc_muted: Some(true),
+            vc_deafened: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn omits_voice_state_from_another_community() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                member_record(1, "did:plc:alice"),
+                member_record(2, "did:plc:bob"),
+            ]])
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([vec![
+                vc_state("did:plc:alice", HOME_VC, HOME),
+                vc_state("did:plc:bob", ELSEWHERE_VC, ELSEWHERE),
+            ]])
+            .append_query_results([Vec::<repos::Model>::new()])
+            .into_connection();
+
+        let aggregate = fetch_member_aggregate(&db, HOME, &ModerationLookup::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            aggregate.vc.get("did:plc:alice").map(String::as_str),
+            Some(HOME_VC)
+        );
+        assert_eq!(aggregate.vc.get("did:plc:bob"), None);
+        assert_eq!(aggregate.vc_muted.get("did:plc:alice"), Some(&true));
+        assert_eq!(aggregate.vc_muted.get("did:plc:bob"), None);
+        assert_eq!(aggregate.member_dids.len(), 2);
+        assert_eq!(aggregate.states.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn surfaces_server_mute_from_the_moderation_lookup() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![member_record(1, "did:plc:alice")]])
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([vec![vc_state("did:plc:alice", HOME_VC, HOME)]])
+            .append_query_results([Vec::<repos::Model>::new()])
+            .into_connection();
+
+        let moderation =
+            ModerationLookup::new(std::sync::Arc::new(|channel: String, did: String| {
+                Box::pin(async move { (channel == HOME_VC && did == "did:plc:alice", true) })
+            }));
+
+        let aggregate = fetch_member_aggregate(&db, HOME, &moderation)
+            .await
+            .unwrap();
+
+        assert_eq!(aggregate.vc_server_muted.get("did:plc:alice"), Some(&true));
+        assert_eq!(
+            aggregate.vc_server_deafened.get("did:plc:alice"),
+            Some(&true)
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_report_server_mute_for_members_outside_voice() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![member_record(1, "did:plc:alice")]])
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([vec![user_states::Model {
+                did: String::from("did:plc:alice"),
+                state: String::from("online"),
+                channel: None,
+                vc: None,
+                vc_community: None,
+                vc_muted: None,
+                vc_deafened: None,
+            }]])
+            .append_query_results([Vec::<repos::Model>::new()])
+            .into_connection();
+
+        let moderation = ModerationLookup::new(std::sync::Arc::new(|_, _| {
+            Box::pin(async { panic!("should not be consulted for a member outside voice") })
+        }));
+
+        let aggregate = fetch_member_aggregate(&db, HOME, &moderation)
+            .await
+            .unwrap();
+
+        assert!(aggregate.vc.is_empty());
+        assert!(aggregate.vc_server_muted.is_empty());
+    }
+
     /// A non-synced Colibri profile: owns its mirrored fields and theme.
     fn unsynced_colibri_profile(display_name: &str) -> ColibriActorProfile {
         ColibriActorProfile {
@@ -362,7 +497,8 @@ mod tests {
         let result = list_members_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _| {
+            ModerationLookup::default(),
+            |_, _, _| {
                 Box::pin(async {
                     Ok(MemberAggregate {
                         member_dids: vec![
@@ -385,6 +521,8 @@ mod tests {
                         vc: HashMap::new(),
                         vc_muted: HashMap::new(),
                         vc_deafened: HashMap::new(),
+                        vc_server_muted: HashMap::new(),
+                        vc_server_deafened: HashMap::new(),
                         handles: HashMap::from([
                             (String::from("did:plc:alice"), String::from("alice.test")),
                             (String::from("did:plc:bob"), String::from("bob.test")),
@@ -425,7 +563,8 @@ mod tests {
         let result = list_members_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             db,
-            |_, _| {
+            ModerationLookup::default(),
+            |_, _, _| {
                 Box::pin(async {
                     Ok(MemberAggregate {
                         member_dids: vec![String::from("did:plc:alice")],
@@ -436,6 +575,8 @@ mod tests {
                         vc: HashMap::new(),
                         vc_muted: HashMap::new(),
                         vc_deafened: HashMap::new(),
+                        vc_server_muted: HashMap::new(),
+                        vc_server_deafened: HashMap::new(),
                         handles: HashMap::new(),
                         member_roles: HashMap::from([(
                             String::from("did:plc:alice"),
@@ -555,9 +696,12 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_community_uri() {
         let db = mock_db();
-        let result = list_members_with(String::from("not-a-uri"), db, |_, _| {
-            Box::pin(async { panic!("should not fetch when uri is invalid") })
-        })
+        let result = list_members_with(
+            String::from("not-a-uri"),
+            db,
+            ModerationLookup::default(),
+            |_, _, _| Box::pin(async { panic!("should not fetch when uri is invalid") }),
+        )
         .await;
 
         assert!(result.is_err());

@@ -19,7 +19,7 @@ use crate::lib::events::{
     UserEventProfile, UserEventStatus,
 };
 use crate::lib::get_atproto_record::get_atproto_record;
-use crate::lib::get_state::get_state;
+use crate::lib::get_state::{get_did_states, get_state};
 use crate::lib::moderation;
 use crate::lib::pds_client;
 use crate::lib::tap::TapMessageRecord;
@@ -364,7 +364,29 @@ async fn build_member_event_member(
         roles,
         joined_at: member.joined_at.clone(),
         nickname: member.nickname.clone(),
+        vc: None,
+        vc_muted: None,
+        vc_deafened: None,
         data,
+    }
+}
+
+async fn voice_state_in_community(
+    subject_did: &str,
+    community_uri: &str,
+    db: &DatabaseConnection,
+) -> (Option<String>, Option<bool>, Option<bool>) {
+    let Ok(states) = get_did_states(subject_did.to_string(), db).await else {
+        return (None, None, None);
+    };
+
+    match states.vc {
+        Some(channel) if states.vc_community.as_deref() == Some(community_uri) => (
+            Some(channel),
+            Some(states.vc_muted.unwrap_or(false)),
+            Some(states.vc_deafened.unwrap_or(false)),
+        ),
+        _ => (None, None, None),
     }
 }
 
@@ -560,7 +582,7 @@ async fn map_tap_event_with(
             if event_record.action == "create" {
                 let record_data = parse_payload::<ColibriMember>(event_record)?;
                 let subject = record_data.subject.clone();
-                let member = build_member_event_member(
+                let mut member = build_member_event_member(
                     &subject,
                     &record_data,
                     &event_record.did,
@@ -571,6 +593,13 @@ async fn map_tap_event_with(
                     author_cache,
                 )
                 .await;
+
+                let (vc, vc_muted, vc_deafened) =
+                    voice_state_in_community(&subject, &community_uri, &db).await;
+                member.vc = vc;
+                member.vc_muted = vc_muted;
+                member.vc_deafened = vc_deafened;
+
                 let join_event = ColibriServerEvent {
                     event_type: String::from("member_event"),
                     data: Some(ColibriServerEventData::Member(MemberEventData {

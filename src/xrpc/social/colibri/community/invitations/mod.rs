@@ -23,6 +23,7 @@ use crate::lib::handler::{
 use crate::lib::permissions::Permission;
 use crate::lib::responses::{ErrorBody, ErrorResponse};
 use crate::lib::time::current_iso8601_utc;
+use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::community_invitations::{
     self, ActiveModel as InvitationModel, Entity as Invitations, Model as Invitation,
 };
@@ -246,7 +247,7 @@ pub async fn fetch_invitation_community(
     let stored = serde_json::from_value::<ColibriCommunity>(record.data)
         .map_err(|e| DbErr::Custom(format!("failed to parse community record: {e}")))?;
 
-    let aggregate = fetch_member_aggregate(db, community_uri).await?;
+    let aggregate = fetch_member_aggregate(db, community_uri, &ModerationLookup::default()).await?;
     let member_count = aggregate.member_dids.len() as u64;
     let online_count = aggregate
         .states
