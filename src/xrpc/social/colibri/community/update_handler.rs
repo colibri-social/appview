@@ -8,14 +8,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::lib::colibri::ColibriCommunity;
-use crate::lib::community_credentials;
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::crypto;
 use crate::lib::handler::{
     CallerContext, LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed,
     with_community_authz,
 };
-use crate::lib::pds_client;
 use crate::lib::permissions::Permission;
 use crate::lib::responses::ErrorResponse;
 use crate::xrpc::util::unpack_image_file;
@@ -196,22 +193,7 @@ async fn upload_image_to_pds(
         )));
     }
 
-    let creds =
-        community_credentials::load_credentials(db, crypto::master_key(), &ctx.community.authority)
-            .await
-            .map_err(community_write::creds_err_to_db)?
-            .ok_or_else(|| {
-                community_credentials::missing_credentials_err(&ctx.community.authority)
-            })?;
-
-    let session =
-        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
-            .await
-            .map_err(community_write::pds_err_to_db)?;
-
-    let blob = pds_client::upload_blob(&creds.pds_endpoint, &session.access_jwt, bytes, mime_type)
-        .await
-        .map_err(community_write::pds_err_to_db)?;
+    let blob = community_write::upload_blob(db, &ctx.community.authority, bytes, mime_type).await?;
 
     Ok(blob)
 }

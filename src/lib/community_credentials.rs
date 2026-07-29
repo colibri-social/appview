@@ -14,6 +14,7 @@ use sea_orm::{
     ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, sea_query,
 };
 
+use crate::lib::community_session_cache;
 use crate::lib::crypto::{self, CryptoError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::community_credentials::{
@@ -26,18 +27,24 @@ pub const SOURCE_APPVIEW_MANAGED: &str = "appview_managed";
 pub const SOURCE_BYO: &str = "byo";
 
 /// A decrypted credential bundle ready for use against a PDS.
-///
-/// `community_did` and `source` are populated for completeness — callers that
-/// only need the PDS-talk fields (`pds_endpoint`, `identifier`, `password`)
-/// ignore them, but they're useful for audit logging and admin tooling.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct CommunityCredentials {
     pub community_did: String,
     pub pds_endpoint: String,
     pub identifier: String,
     pub password: String,
     pub source: String,
+}
+
+impl CommunityCredentials {
+    /// The identifier to present to `com.atproto.server.createSession`
+    pub fn login_identifier(&self) -> &str {
+        if self.source == SOURCE_APPVIEW_MANAGED {
+            &self.community_did
+        } else {
+            &self.identifier
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +59,25 @@ pub enum CredentialsError {
     BadNonceEncoding(String),
     #[error("password is not valid UTF-8 after decryption")]
     InvalidUtf8,
+}
+
+impl CredentialsError {
+    /// Whether the stored password can never be read back — a crypto failure, bad
+    /// base64, or non-UTF-8 plaintext. The row exists; its secret is lost, so the
+    /// only way forward is to replace the password outright.
+    ///
+    /// Excludes `Db` on purpose: a transient database error must never be
+    /// mistaken for unreadable ciphertext, or a blip would trigger a password
+    /// rotation.
+    pub fn is_undecryptable(&self) -> bool {
+        matches!(
+            self,
+            CredentialsError::Crypto(_)
+                | CredentialsError::BadCiphertextEncoding(_)
+                | CredentialsError::BadNonceEncoding(_)
+                | CredentialsError::InvalidUtf8
+        )
+    }
 }
 
 const MISSING_CREDENTIALS_MARKER: &str = "no credentials registered for community ";
@@ -133,7 +159,45 @@ pub async fn upsert_credentials(
         .exec(db)
         .await?;
 
+    community_session_cache::invalidate(community_did);
     Ok(())
+}
+
+/// Re-encrypts and stores just the password for an existing row, leaving
+/// `pds_endpoint`, `identifier` and `source` untouched. Returns the number of
+/// rows updated; `0` means no row exists, which callers must read as "this
+/// community went away" rather than re-creating it.
+///
+/// Deliberately not [`upsert_credentials`]: that replaces every column and
+/// inserts when absent, so using it here would let a bug in the recovery path
+/// flip a row's `source` or resurrect a community mid-deletion.
+pub async fn update_password(
+    db: &DatabaseConnection,
+    master_key: &[u8],
+    community_did: &str,
+    password: &str,
+) -> Result<u64, CredentialsError> {
+    let (ciphertext, nonce) = crypto::encrypt(password.as_bytes(), master_key)?;
+
+    let res = Credentials::update_many()
+        .col_expr(
+            community_credentials::Column::PasswordCiphertextB64,
+            sea_query::Expr::value(BASE64.encode(&ciphertext)),
+        )
+        .col_expr(
+            community_credentials::Column::PasswordNonceB64,
+            sea_query::Expr::value(BASE64.encode(&nonce)),
+        )
+        .col_expr(
+            community_credentials::Column::CreatedAt,
+            sea_query::Expr::value(current_iso8601_utc()),
+        )
+        .filter(community_credentials::Column::CommunityDid.eq(community_did))
+        .exec(db)
+        .await?;
+
+    community_session_cache::invalidate(community_did);
+    Ok(res.rows_affected)
 }
 
 /// Removes the stored credential row for `community_did`. Returns the number
@@ -147,6 +211,8 @@ pub async fn delete_credentials(
         .filter(community_credentials::Column::CommunityDid.eq(community_did))
         .exec(db)
         .await?;
+
+    community_session_cache::invalidate(community_did);
     Ok(res.rows_affected)
 }
 
@@ -210,6 +276,8 @@ fn decrypt_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
 
     fn test_key() -> Vec<u8> {
         let mut k = vec![0u8; 32];
@@ -268,6 +336,66 @@ mod tests {
     fn unrelated_errors_are_not_swallowed() {
         let err = DbErr::Custom(String::from("pds write failed: 500"));
         assert!(!warn_missing_credentials_once(&err));
+    }
+
+    /// A managed community logs in by DID, so a handle that changed or failed
+    /// re-verification can never masquerade as a broken password.
+    #[test]
+    fn managed_rows_log_in_by_did_and_byo_rows_by_identifier() {
+        let key = test_key();
+
+        let managed = decrypt_row(make_row("pw", &key, SOURCE_APPVIEW_MANAGED), &key).unwrap();
+        assert_eq!(managed.login_identifier(), "did:plc:test");
+
+        let byo = decrypt_row(make_row("pw", &key, SOURCE_BYO), &key).unwrap();
+        assert_eq!(byo.login_identifier(), "test.community");
+    }
+
+    /// Rotation must not be able to change a row's provenance. This is what makes
+    /// `update_password` worth having instead of reusing `upsert_credentials`,
+    /// whose `ON CONFLICT` replaces every column.
+    #[tokio::test]
+    async fn update_password_touches_only_the_secret_columns() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        let rows = update_password(&db, &test_key(), "did:plc:test", "rotated")
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        let stmt = format!("{:?}", db.into_transaction_log()[0]);
+        assert!(stmt.contains("UPDATE"), "{stmt}");
+        assert!(stmt.contains("password_ciphertext_b64"), "{stmt}");
+        assert!(stmt.contains("password_nonce_b64"), "{stmt}");
+        assert!(!stmt.contains("\"source\""), "source must survive: {stmt}");
+        assert!(
+            !stmt.contains("pds_endpoint"),
+            "endpoint must survive: {stmt}"
+        );
+        assert!(
+            !stmt.contains("\"identifier\""),
+            "identifier must survive: {stmt}"
+        );
+    }
+
+    /// A database blip must not be mistaken for lost ciphertext, or it would
+    /// trigger a password rotation.
+    #[test]
+    fn only_crypto_failures_count_as_undecryptable() {
+        assert!(CredentialsError::Crypto(CryptoError::DecryptFailed).is_undecryptable());
+        assert!(CredentialsError::BadCiphertextEncoding(String::from("x")).is_undecryptable());
+        assert!(CredentialsError::BadNonceEncoding(String::from("x")).is_undecryptable());
+        assert!(CredentialsError::InvalidUtf8.is_undecryptable());
+
+        assert!(
+            !CredentialsError::Db(DbErr::Custom(String::from("connection reset")))
+                .is_undecryptable()
+        );
     }
 
     #[test]

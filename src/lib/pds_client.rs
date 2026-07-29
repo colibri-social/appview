@@ -46,6 +46,16 @@ impl PdsFailure {
     }
 }
 
+/// Error codes a PDS uses to say the identifier/password pair itself is no good.
+/// The bluesky PDS only ever raises `AuthenticationRequired` for this (its
+/// `InvalidPasswordError` extends `AuthRequiredError` without a custom name), the
+/// other two are for third-party implementations.
+const INVALID_CREDENTIAL_CODES: [&str; 3] =
+    ["AuthenticationRequired", "InvalidLogin", "InvalidPassword"];
+
+/// Error codes meaning the access JWT we presented is no longer usable.
+const STALE_TOKEN_CODES: [&str; 2] = ["ExpiredToken", "InvalidToken"];
+
 impl PdsError {
     pub fn classify(&self) -> PdsFailure {
         match self {
@@ -68,16 +78,42 @@ impl PdsError {
             PdsError::BadStatus { .. } | PdsError::MissingField(_) => PdsFailure::Rejected,
         }
     }
+
+    /// Whether the PDS is telling us the stored identifier/password pair no
+    /// longer works, so re-sending what we have will keep failing.
+    pub fn is_invalid_credentials(&self) -> bool {
+        match self {
+            PdsError::BadStatus { status, body } if *status == 401 => xrpc_error_code(body)
+                .is_some_and(|code| INVALID_CREDENTIAL_CODES.contains(&code.as_str())),
+            _ => false,
+        }
+    }
+
+    /// Whether the access JWT we presented is expired or unverifiable.
+    /// Recoverable by logging in again
+    pub fn is_stale_token(&self) -> bool {
+        match self {
+            PdsError::BadStatus { status, body } if *status == 400 => {
+                xrpc_error_code(body).is_some_and(|code| STALE_TOKEN_CODES.contains(&code.as_str()))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The `error` code out of an AT Protocol XRPC error envelope
+/// (`{"error": "...", "message": "..."}`), or `None` when `body` isn't one.
+pub fn xrpc_error_code(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
 }
 
 /// Whether `body` is an AT Protocol XRPC error envelope (`{"error": "..."}`).
 /// Anything else coming back from an endpoint we expect to be a PDS means it
 /// isn't one.
 pub fn looks_like_xrpc_error(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned))
-        .is_some()
+    xrpc_error_code(body).is_some()
 }
 
 /// Opaque-from-our-perspective session bundle returned by `createSession`.
@@ -471,6 +507,80 @@ pub async fn admin_delete_account(
     Err(error_from_response(resp).await)
 }
 
+/// Calls `com.atproto.admin.updateAccountPassword`, replacing the account
+/// password for `did`. This is how the AppView recovers write access to a
+/// community it provisioned when the stored password is gone or no longer works:
+/// it holds PDS admin over those accounts, so it can always mint itself a new
+/// one.
+pub async fn admin_update_account_password(
+    pds_endpoint: &str,
+    admin_password: &str,
+    did: &str,
+    new_password: &str,
+) -> Result<(), PdsError> {
+    #[derive(Serialize)]
+    struct UpdatePasswordBody<'a> {
+        did: &'a str,
+        password: &'a str,
+    }
+
+    let url = format!(
+        "{}/xrpc/com.atproto.admin.updateAccountPassword",
+        pds_endpoint.trim_end_matches('/')
+    );
+    let body = UpdatePasswordBody {
+        did,
+        password: new_password,
+    };
+
+    let resp = HTTP
+        .clone()
+        .post(url)
+        .basic_auth("admin", Some(admin_password))
+        .json(&body)
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    Err(error_from_response(resp).await)
+}
+
+/// Calls `com.atproto.admin.getAccountInfo`. `Ok(None)` means this PDS doesn't
+/// host `did`
+pub async fn admin_get_account_info(
+    pds_endpoint: &str,
+    admin_password: &str,
+    did: &str,
+) -> Result<Option<Value>, PdsError> {
+    let url = format!(
+        "{}/xrpc/com.atproto.admin.getAccountInfo?did={did}",
+        pds_endpoint.trim_end_matches('/')
+    );
+
+    let resp = HTTP
+        .clone()
+        .get(url)
+        .basic_auth("admin", Some(admin_password))
+        .send()
+        .await?;
+
+    if resp.status().is_success() {
+        return resp.json::<Value>().await.map(Some).map_err(PdsError::Http);
+    }
+
+    let err = error_from_response(resp).await;
+    if let PdsError::BadStatus { status, body } = &err
+        && (*status == 404
+            || xrpc_error_code(body)
+                .is_some_and(|code| code == "NotFound" || code == "AccountNotFound"))
+    {
+        return Ok(None);
+    }
+    Err(err)
+}
+
 /// Generates a long random password suitable for AppView-minted accounts.
 /// The AppView stores it encrypted; humans never need to type it.
 pub fn generate_strong_password() -> String {
@@ -500,8 +610,16 @@ async fn error_from_response(resp: reqwest::Response) -> PdsError {
 mod tests {
     use super::*;
     use rocket::tokio;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{basic_auth, body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// An XRPC error envelope at `status`, the shape every PDS rejection takes.
+    fn xrpc_status(status: u16, code: &str) -> PdsError {
+        PdsError::BadStatus {
+            status,
+            body: format!(r#"{{"error":"{code}","message":"whatever"}}"#),
+        }
+    }
 
     #[test]
     fn an_html_404_means_the_endpoint_is_not_a_pds() {
@@ -545,6 +663,141 @@ mod tests {
         let err = PdsError::Fetch(FetchError::Upstream(String::from("connection refused")));
         assert_eq!(err.classify(), PdsFailure::Unreachable);
         assert!(err.classify().is_unavailable());
+    }
+
+    #[test]
+    fn a_wrong_password_is_the_recoverable_credential_failure() {
+        // Byte-for-byte what the bluesky PDS answers `createSession` with.
+        let err = PdsError::BadStatus {
+            status: 401,
+            body: String::from(
+                r#"{"error":"AuthenticationRequired","message":"Invalid identifier or password"}"#,
+            ),
+        };
+        assert!(err.is_invalid_credentials());
+        assert!(!err.is_stale_token());
+    }
+
+    #[test]
+    fn third_party_credential_codes_are_allowlisted_too() {
+        assert!(xrpc_status(401, "InvalidLogin").is_invalid_credentials());
+        assert!(xrpc_status(401, "InvalidPassword").is_invalid_credentials());
+    }
+
+    /// These are the ones that would wrongly reach the PDS admin API if this
+    /// matched on status alone: `AccountTakedown` and `AuthFactorTokenRequired`
+    /// are *also* 401s, and no fresh password fixes any of them.
+    #[test]
+    fn other_auth_failures_never_look_like_bad_credentials() {
+        for err in [
+            xrpc_status(401, "AccountTakedown"),
+            xrpc_status(401, "AuthFactorTokenRequired"),
+            xrpc_status(429, "RateLimitExceeded"),
+            xrpc_status(400, "InvalidRequest"),
+            xrpc_status(500, "InternalServerError"),
+            PdsError::BadStatus {
+                status: 401,
+                body: String::from("<html>nope</html>"),
+            },
+        ] {
+            assert!(
+                !err.is_invalid_credentials(),
+                "{err:?} must not read as bad credentials"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expired_token_is_a_stale_token_at_status_400() {
+        // Both are `InvalidRequestError` upstream, so they arrive as 400 rather
+        // than the 401 an auth failure would suggest.
+        assert!(xrpc_status(400, "ExpiredToken").is_stale_token());
+        assert!(xrpc_status(400, "InvalidToken").is_stale_token());
+        assert!(!xrpc_status(401, "AuthenticationRequired").is_stale_token());
+    }
+
+    /// The invariant that keeps a token blip from ever rotating a password.
+    #[test]
+    fn stale_tokens_and_bad_credentials_are_disjoint() {
+        for err in [
+            xrpc_status(401, "AuthenticationRequired"),
+            xrpc_status(400, "ExpiredToken"),
+            xrpc_status(400, "InvalidToken"),
+            xrpc_status(401, "AccountTakedown"),
+            xrpc_status(429, "RateLimitExceeded"),
+        ] {
+            assert!(
+                !(err.is_invalid_credentials() && err.is_stale_token()),
+                "{err:?} satisfied both predicates"
+            );
+        }
+    }
+
+    #[test]
+    fn xrpc_error_code_reads_the_envelope() {
+        assert_eq!(
+            xrpc_error_code(r#"{"error":"ExpiredToken","message":"Token has expired"}"#).as_deref(),
+            Some("ExpiredToken")
+        );
+        assert!(xrpc_error_code("<!doctype html><title>Not found</title>").is_none());
+        // The wrapper's existing behaviour is unchanged.
+        assert!(looks_like_xrpc_error(r#"{"error":"InvalidRequest"}"#));
+        assert!(!looks_like_xrpc_error("<html>502 Bad Gateway</html>"));
+    }
+
+    #[tokio::test]
+    async fn admin_update_account_password_authenticates_as_admin() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.admin.updateAccountPassword"))
+            .and(basic_auth("admin", "hunter2"))
+            .and(body_json(serde_json::json!({
+                "did": "did:plc:comm",
+                "password": "fresh-password",
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        admin_update_account_password(&server.uri(), "hunter2", "did:plc:comm", "fresh-password")
+            .await
+            .expect("the admin call should succeed");
+    }
+
+    #[tokio::test]
+    async fn admin_update_account_password_surfaces_a_rejected_admin_password() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.admin.updateAccountPassword"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({ "error": "AuthenticationRequired" })),
+            )
+            .mount(&server)
+            .await;
+
+        let err = admin_update_account_password(&server.uri(), "wrong", "did:plc:comm", "p")
+            .await
+            .expect_err("a bad admin password must not look like success");
+        assert!(matches!(err, PdsError::BadStatus { status: 401, .. }));
+    }
+
+    #[tokio::test]
+    async fn admin_get_account_info_reports_an_unhosted_did_as_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/xrpc/com.atproto.admin.getAccountInfo"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "NotFound",
+                "message": "Account not found",
+            })))
+            .mount(&server)
+            .await;
+
+        let info = admin_get_account_info(&server.uri(), "hunter2", "did:plc:nope")
+            .await
+            .unwrap();
+        assert!(info.is_none());
     }
 
     #[tokio::test]

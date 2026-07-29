@@ -55,19 +55,41 @@ pub async fn resolve(db: &DatabaseConnection, did: &str) -> Result<RepoEndpoint,
             message: e.body.into_inner().message,
         })?;
 
-    doc.pds_endpoint()
-        .map(|endpoint| RepoEndpoint::Untrusted(endpoint.to_string()))
+    let endpoint = doc
+        .pds_endpoint()
         .ok_or_else(|| EndpointError::NoPdsService {
             did: did.to_string(),
-        })
+        })?;
+
+    // An endpoint that *is* our configured `PDS_LOC` is trusted because we
+    // configured it, not because a credentials row vouches for it. Without this,
+    // a community whose row was lost becomes unreadable whenever the PDS is on
+    // loopback or a private network.
+    Ok(match matches_own_pds(endpoint) {
+        Some(configured) => RepoEndpoint::Trusted(configured),
+        None => RepoEndpoint::Untrusted(endpoint.to_string()),
+    })
+}
+
+/// The **configured** `PDS_LOC` when `endpoint` names it, else `None`.
+pub fn matches_own_pds(endpoint: &str) -> Option<String> {
+    let configured = std::env::var("PDS_LOC").ok()?;
+    (normalize_endpoint(&configured) == normalize_endpoint(endpoint)).then_some(configured)
+}
+
+/// As [`matches_own_pds`], additionally requiring that the credentials row was
+/// one we minted ourselves rather than one a caller brought along.
+pub fn own_pds_endpoint(endpoint: &str, source: &str) -> Option<String> {
+    if source != SOURCE_APPVIEW_MANAGED {
+        return None;
+    }
+    matches_own_pds(endpoint)
 }
 
 /// Whether a stored credentials row describes an account on the PDS this
 /// AppView administers, rather than one a caller brought along.
 fn is_own_pds(endpoint: &str, source: &str) -> bool {
-    source == SOURCE_APPVIEW_MANAGED
-        && std::env::var("PDS_LOC")
-            .is_ok_and(|configured| normalize_endpoint(&configured) == normalize_endpoint(endpoint))
+    own_pds_endpoint(endpoint, source).is_some()
 }
 
 fn normalize_endpoint(endpoint: &str) -> String {
@@ -108,40 +130,12 @@ pub async fn is_unreachable_from_containers(endpoint: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard};
-
     use super::*;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
+    use crate::lib::test_fixtures::PdsEnvGuard;
     use crate::models::community_credentials as community_credentials_model;
-
-    /// `PDS_LOC` is process-global, but cargo runs tests in parallel threads, so
-    /// without this every test that touches it can have the var pulled out from
-    /// under it by another one mid-assertion.
-    static PDS_LOC_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Holds [`PDS_LOC_LOCK`] and sets `PDS_LOC` for the duration of a test,
-    /// clearing it again on drop, including when the test panics, which a
-    /// trailing `remove_var` would skip.
-    struct PdsLocGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-    impl PdsLocGuard {
-        fn set(value: &str) -> Self {
-            let guard = PDS_LOC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            // SAFETY: `PDS_LOC_LOCK` is held, so no other test reads or writes
-            // the variable until this guard is dropped.
-            unsafe { std::env::set_var("PDS_LOC", value) };
-            PdsLocGuard(guard)
-        }
-    }
-
-    impl Drop for PdsLocGuard {
-        fn drop(&mut self) {
-            // SAFETY: the lock is still held until this guard finishes dropping.
-            unsafe { std::env::remove_var("PDS_LOC") };
-        }
-    }
 
     #[test]
     fn as_str_trims_trailing_slash() {
@@ -157,7 +151,7 @@ mod tests {
 
     #[test]
     fn only_managed_rows_on_the_configured_pds_are_trusted() {
-        let _pds_loc = PdsLocGuard::set("http://localhost:3000");
+        let _pds_env = PdsEnvGuard::without_admin_password("http://localhost:3000");
 
         assert!(is_own_pds("http://localhost:3000", SOURCE_APPVIEW_MANAGED));
         // Trailing slash / casing differences are the same endpoint.
@@ -166,6 +160,42 @@ mod tests {
         assert!(!is_own_pds("http://localhost:3000", "byo"));
         // A managed row for some other host (e.g. after PDS_LOC changed).
         assert!(!is_own_pds("http://other.example", SOURCE_APPVIEW_MANAGED));
+    }
+
+    /// The value handed back is always *our* configured endpoint, never the
+    /// caller's spelling of it
+    #[test]
+    fn own_pds_endpoint_returns_the_configured_value() {
+        let _pds_env = PdsEnvGuard::without_admin_password("http://localhost:3000");
+
+        assert_eq!(
+            own_pds_endpoint("http://LOCALHOST:3000/", SOURCE_APPVIEW_MANAGED).as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(own_pds_endpoint("http://localhost:3000", "byo"), None);
+        assert_eq!(
+            own_pds_endpoint("http://other.example", SOURCE_APPVIEW_MANAGED),
+            None
+        );
+    }
+
+    /// Source-independent, because the orphan-adoption path has no row to read a
+    /// `source` from.
+    #[test]
+    fn matches_own_pds_ignores_provenance() {
+        let _pds_env = PdsEnvGuard::without_admin_password("http://localhost:3000");
+
+        assert_eq!(
+            matches_own_pds("http://localhost:3000/").as_deref(),
+            Some("http://localhost:3000")
+        );
+        assert_eq!(matches_own_pds("https://pds.example"), None);
+    }
+
+    #[test]
+    fn matches_own_pds_is_none_without_configuration() {
+        let _pds_env = PdsEnvGuard::unset();
+        assert_eq!(matches_own_pds("http://localhost:3000"), None);
     }
 
     fn credentials_row(pds_endpoint: &str, source: &str) -> community_credentials_model::Model {
@@ -190,7 +220,7 @@ mod tests {
     /// with no network access, which is the property local development needs.
     #[tokio::test]
     async fn resolve_prefers_a_managed_row_on_our_own_pds() {
-        let _pds_loc = PdsLocGuard::set("http://localhost:3000");
+        let _pds_env = PdsEnvGuard::without_admin_password("http://localhost:3000");
 
         let db = db_with_row(credentials_row(
             "http://localhost:3000",
@@ -208,7 +238,7 @@ mod tests {
     /// though we hold credentials for it.
     #[tokio::test]
     async fn resolve_keeps_byo_rows_untrusted() {
-        let _pds_loc = PdsLocGuard::set("http://localhost:3000");
+        let _pds_env = PdsEnvGuard::without_admin_password("http://localhost:3000");
 
         let db = db_with_row(credentials_row("http://localhost:3000", "byo"));
         let endpoint = resolve(&db, "did:plc:comm").await.unwrap();

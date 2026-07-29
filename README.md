@@ -42,7 +42,6 @@ The service listens on `http://127.0.0.1:8000`. Hit `/` for the landing banner. 
 Every community is its own AT Protocol repository: `social.colibri.community.create` mints a fresh account on a PDS at `PDS_LOC` (authenticating with `PDS_ADMIN_PASS`), writes the community's bootstrap records to it, and stores the resulting credentials encrypted. Community deletion and migration go through the same PDS. Without one, the AppView boots and serves reads, but no community can be created.
 
 `PDS_LOC` can point at any PDS whose admin password you hold. If you don't already run one, two compose files run the official Bluesky PDS configured for this purpose.
-
 **Production**: `docker-compose.pds.yml` is `docker-compose.yml` plus a `pds` service, so run it _instead of_ the plain file:
 
 ```sh
@@ -66,6 +65,19 @@ Then set `PDS_LOC=http://localhost:3000` (and, conveniently, `APPVIEW_HANDLE_DOM
 - Community DIDs resolve only inside your stack. Anything needing public resolution (federating with another AppView, a client on another machine) still wants a public PDS or a tunnel.
 
 If you're not working on community creation at all, any placeholder `PDS_LOC` will do. It's only read when a community is created, deleted, or migrated.
+
+### Credential recovery
+
+Whenever a community-side write finds its credentials unusable (rejected by the PDS, missing from the database, or no longer decryptable) the AppView is able to recover from said failure by issuing a new password as long as the account is hosted on the PDS the AppView is managing.
+
+Recovery is attempted at most once per 30 seconds per community, and backs off for 10 minutes if resetting the password doesn't restore access, which almost always means the account has been deleted from the PDS. That case is logged loudly and surfaces as `CommunityCredentialsUnrecoverable`.
+
+Set `APPVIEW_ADMIN_PASS` to force recovery on demand rather than waiting for a write to trigger it:
+
+```sh
+curl -u admin:$APPVIEW_ADMIN_PASS -X POST \
+  'http://localhost:8000/admin/recover-credentials?did=did:plc:...'
+```
 
 ## Web Push (VAPID)
 

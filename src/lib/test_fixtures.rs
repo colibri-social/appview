@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+use std::sync::{Mutex, MutexGuard};
+
 use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
 
 use crate::lib::colibri::{ColibriMember, ColibriRole, ColibriRoleChannelOverride};
@@ -18,6 +20,65 @@ use crate::lib::permissions::Permission;
 
 pub const COMMUNITY_OWNER_DID: &str = "did:plc:owner";
 pub const COMMUNITY_URI: &str = "at://did:plc:owner/social.colibri.community/c1";
+
+// ---- PDS environment -----------------------------------------------------
+
+/// `PDS_LOC` and `PDS_ADMIN_PASS` are process-global, but cargo runs tests on
+/// parallel threads. One lock for every test in every module that touches them —
+/// a per-module lock would still let two modules fight over the same variables.
+static PDS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Holds [`PDS_ENV_LOCK`] and sets the PDS environment for the duration of a
+/// test, clearing it again on drop — including when the test panics, which a
+/// trailing `remove_var` would skip.
+pub struct PdsEnvGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+impl PdsEnvGuard {
+    /// Points `PDS_LOC` at `pds_loc` and leaves `PDS_ADMIN_PASS` unset, so
+    /// credential recovery is ineligible for want of an admin password.
+    pub fn without_admin_password(pds_loc: &str) -> Self {
+        let guard = PDS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: `PDS_ENV_LOCK` is held, so no other test reads or writes these
+        // variables until this guard is dropped.
+        unsafe {
+            std::env::set_var("PDS_LOC", pds_loc);
+            std::env::remove_var("PDS_ADMIN_PASS");
+        }
+        Self(guard)
+    }
+
+    /// Points `PDS_LOC` at `pds_loc` and supplies an admin password, the
+    /// configuration in which credential recovery is possible.
+    pub fn with_admin_password(pds_loc: &str, admin_password: &str) -> Self {
+        let guard = Self::without_admin_password(pds_loc);
+        // SAFETY: as above — the guard returned by `without_admin_password` holds
+        // the lock.
+        unsafe { std::env::set_var("PDS_ADMIN_PASS", admin_password) };
+        guard
+    }
+
+    /// Clears both variables, for tests asserting behaviour with no PDS
+    /// configured at all.
+    pub fn unset() -> Self {
+        let guard = PDS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock is held for the guard's lifetime.
+        unsafe {
+            std::env::remove_var("PDS_LOC");
+            std::env::remove_var("PDS_ADMIN_PASS");
+        }
+        Self(guard)
+    }
+}
+
+impl Drop for PdsEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: the lock is still held until this guard finishes dropping.
+        unsafe {
+            std::env::remove_var("PDS_LOC");
+            std::env::remove_var("PDS_ADMIN_PASS");
+        }
+    }
+}
 
 // ---- Mock database -------------------------------------------------------
 
