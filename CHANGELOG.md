@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/colibri-social/appview/compare/v0.2.1...v0.2.2) - 2026-07-29
+
+### Added
+
+- pds session cache & credential recovery ([#75](https://github.com/colibri-social/appview/pull/75))
+
+### Fixed
+
+- proper admission gating
+- Voice channel inaccuracies
+
 ## [0.2.1](https://github.com/colibri-social/appview/compare/v0.2.0...v0.2.1) - 2026-07-29
 
 ### Fixed
