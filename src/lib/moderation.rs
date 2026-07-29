@@ -325,11 +325,10 @@ pub async fn find_member_rkey(
 /// recorded. Returns `Ok(true)` if a record was actually deleted,
 /// `Ok(false)` if no member record was found (already gone or never existed).
 ///
-/// The local `record_data` row is not modified here — the firehose ingester
-/// will reconcile via the upstream member-delete event. (For now, the tap
-/// ingester also short-circuits delete-action processing for `member` and
-/// `membership` NSIDs to actually drop the row, partially working around the
-/// generic-delete bug in `ack_tap_msg`.)
+/// The local `record_data` row is dropped write-through, right after the PDS
+/// delete. Waiting for the firehose to reconcile it left a stale row behind
+/// whenever the community-repo delete event was missed or late, and a stale row
+/// makes [`write_member_record`] skip every later re-admission as a no-op.
 pub async fn revoke_community_member(
     db: &DatabaseConnection,
     community_did: &str,
@@ -359,7 +358,24 @@ pub async fn revoke_community_member(
     .await
     .map_err(pds_error_to_db_err)?;
 
+    drop_cached_member_row(db, community_did, &member_rkey).await;
+
     Ok(true)
+}
+
+/// Removes a `social.colibri.member` row from the local `record_data` cache.
+/// Best effort: a failure is logged and left for the firehose, since the
+/// authoritative delete on the community's PDS has already happened.
+async fn drop_cached_member_row(db: &DatabaseConnection, community_did: &str, member_rkey: &str) {
+    if let Err(e) = record_data::Entity::delete_many()
+        .filter(record_data::Column::Did.eq(community_did))
+        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
+        .filter(record_data::Column::Rkey.eq(member_rkey))
+        .exec(db)
+        .await
+    {
+        log::warn!("local member-row delete failed for {community_did}/{member_rkey}: {e}");
+    }
 }
 
 /// Writes a `social.colibri.member` record on the community's PDS, admitting
@@ -367,7 +383,10 @@ pub async fn revoke_community_member(
 ///
 /// Idempotent: if a member record already exists for `subject_did`, this
 /// returns `Ok(None)` without writing. Callers that need to know whether a
-/// new record was actually minted should branch on the return value.
+/// new record was actually minted should branch on the return value. A cached
+/// row is confirmed against the community's PDS before it counts as existing,
+/// so a stale row can never silently block an admission; a row the PDS no
+/// longer has is dropped and the write proceeds.
 ///
 /// The write goes through stored community credentials (see
 /// [`community_credentials`]); on success the new row is optimistically
@@ -382,12 +401,7 @@ pub async fn write_member_record(
     role_rkeys: Vec<String>,
     from_membership: Option<String>,
 ) -> Result<Option<record_data::Model>, DbErr> {
-    if find_member_rkey(db, community_did, subject_did)
-        .await?
-        .is_some()
-    {
-        return Ok(None);
-    }
+    let cached_rkey = find_member_rkey(db, community_did, subject_did).await?;
 
     let record = ColibriMember {
         record_type: Some(MEMBER_NSID.to_string()),
@@ -399,10 +413,38 @@ pub async fn write_member_record(
     };
     let data = serde_json::to_value(&record).map_err(|e| DbErr::Custom(e.to_string()))?;
 
-    let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
-        .await
-        .map_err(credentials_error_to_db_err)?
-        .ok_or_else(|| community_credentials::missing_credentials_err(community_did))?;
+    let creds =
+        match community_credentials::load_credentials(db, crypto::master_key(), community_did)
+            .await
+            .map_err(credentials_error_to_db_err)?
+        {
+            Some(creds) => creds,
+            // Without credentials there is nothing to write and nothing to verify
+            // against, so an existing row stays the best answer available.
+            None if cached_rkey.is_some() => return Ok(None),
+            None => {
+                return Err(community_credentials::missing_credentials_err(
+                    community_did,
+                ));
+            }
+        };
+
+    if let Some(rkey) = cached_rkey {
+        let existing =
+            pds_client::get_record_trusted(&creds.pds_endpoint, community_did, MEMBER_NSID, &rkey)
+                .await
+                .map_err(pds_error_to_db_err)?;
+
+        if existing.is_some() {
+            return Ok(None);
+        }
+
+        log::info!(
+            "member row {community_did}/{rkey} for {subject_did} is stale (gone from the PDS); \
+             dropping it and re-admitting"
+        );
+        drop_cached_member_row(db, community_did, &rkey).await;
+    }
 
     let session =
         pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
@@ -496,6 +538,40 @@ pub fn latest_action_for_did(records: &[ColibriModeration], did: &str) -> Option
 mod tests {
     use super::*;
     use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+
+    #[tokio::test]
+    async fn dropping_a_member_row_deletes_it_locally() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 1,
+            }])
+            .into_connection();
+
+        drop_cached_member_row(&db, "did:plc:community", "m1").await;
+
+        let stmt = format!("{:?}", db.into_transaction_log()[0]);
+        assert!(stmt.contains("DELETE"));
+        assert!(stmt.contains("record_data"));
+        assert!(stmt.contains("did:plc:community"));
+        assert!(stmt.contains("social.colibri.member"));
+        assert!(stmt.contains("m1"));
+    }
+
+    #[tokio::test]
+    async fn revoking_an_unadmitted_subject_is_a_noop() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .into_connection();
+
+        let revoked = revoke_community_member(&db, "did:plc:community", "did:plc:alice")
+            .await
+            .unwrap();
+
+        assert!(!revoked);
+        assert_eq!(db.into_transaction_log().len(), 1);
+    }
 
     fn record(action: &str, did: &str) -> ColibriModeration {
         ColibriModeration {

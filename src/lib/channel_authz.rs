@@ -3,9 +3,10 @@
 //! This is a different concern from [`crate::lib::permissions`] /
 //! [`crate::lib::community_authz`], which gate *admin* actions and are
 //! default-deny (a role must explicitly grant a permission). Posting in a
-//! channel is default-*allow*: ordinary members with no roles at all can
-//! post unless a channel narrows that down via `owner_only` or an explicit
-//! roles/members allow-list.
+//! channel is default-allow *for admitted members*: a member with no roles at
+//! all can post unless a channel narrows that down via `owner_only` or an
+//! explicit roles/members allow-list. Admission itself is
+//! [`crate::lib::participation`]'s concern.
 
 use crate::lib::colibri::ColibriChannel;
 use crate::lib::community_authz::ActorAuthz;
@@ -16,9 +17,11 @@ use crate::lib::community_authz::ActorAuthz;
 /// Evaluation order:
 ///   1. An admin (the owner, or a protected-role holder) may always post,
 ///      bypassing `owner_only` and the allow-lists entirely.
-///   2. `owner_only` channels reject everyone else, regardless of allow-lists.
-///   3. Empty `allowed_roles`/`allowed_members` means no restriction.
-///   4. Otherwise the actor must be in `allowed_members` or hold a role
+///   2. An actor with no member record was never admitted, so they may not
+///      post anywhere in the community.
+///   3. `owner_only` channels reject everyone else, regardless of allow-lists.
+///   4. Empty `allowed_roles`/`allowed_members` means no restriction.
+///   5. Otherwise the actor must be in `allowed_members` or hold a role
 ///      listed in `allowed_roles`.
 pub fn can_post(channel: &ColibriChannel, authz: &ActorAuthz, actor_did: &str) -> bool {
     // The human owner acts under their own DID (never the community account's),
@@ -26,6 +29,9 @@ pub fn can_post(channel: &ColibriChannel, authz: &ActorAuthz, actor_did: &str) -
     // protected Owner role they actually hold.
     if authz.is_admin() {
         return true;
+    }
+    if authz.member.is_none() {
+        return false;
     }
     if channel.owner_only == Some(true) {
         return false;
@@ -115,17 +121,42 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_channel_allows_everyone() {
+    fn unrestricted_channel_allows_any_member() {
         let chan = channel();
-        assert!(can_post(&chan, &empty_authz(), "did:plc:alice"));
+        assert!(can_post(
+            &chan,
+            &member_authz("did:plc:alice", vec![]),
+            "did:plc:alice"
+        ));
+    }
+
+    #[test]
+    fn unrestricted_channel_still_denies_non_members() {
+        let chan = channel();
+        assert!(!can_post(&chan, &empty_authz(), "did:plc:alice"));
     }
 
     #[test]
     fn allowed_member_can_post_without_a_role() {
         let mut chan = channel();
         chan.allowed_members.push(String::from("did:plc:alice"));
-        assert!(can_post(&chan, &empty_authz(), "did:plc:alice"));
-        assert!(!can_post(&chan, &empty_authz(), "did:plc:bob"));
+        assert!(can_post(
+            &chan,
+            &member_authz("did:plc:alice", vec![]),
+            "did:plc:alice"
+        ));
+        assert!(!can_post(
+            &chan,
+            &member_authz("did:plc:bob", vec![]),
+            "did:plc:bob"
+        ));
+    }
+
+    #[test]
+    fn channel_allow_list_does_not_admit_a_non_member() {
+        let mut chan = channel();
+        chan.allowed_members.push(String::from("did:plc:alice"));
+        assert!(!can_post(&chan, &empty_authz(), "did:plc:alice"));
     }
 
     #[test]

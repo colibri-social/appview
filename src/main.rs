@@ -251,6 +251,22 @@ async fn rocket() -> _ {
         });
     }
 
+    // Admission reconciliation: auto-admit gets one shot per tap event, so a
+    // failure there half-joins a user permanently. This sweep re-checks join
+    // intents against admissions at startup and on an interval.
+    {
+        let reconcile_secs = lib::membership_reconcile::reconcile_interval_secs();
+        if reconcile_secs == 0 {
+            log::info!("Membership reconciliation disabled via MEMBERSHIP_RECONCILE_SECS=0.");
+        } else {
+            log::info!("Reconciling unadmitted memberships every {reconcile_secs}s.");
+            let reconcile_db = db.clone();
+            tokio::spawn(async move {
+                lib::membership_reconcile::run_reconciler(reconcile_db).await;
+            });
+        }
+    }
+
     // Backfill visibility. The AppView doesn't backfill,
     // so the reporter infers progress from tap's `repos` table plus the
     // `live` flag on the record stream, and logs when backfilling starts, while it

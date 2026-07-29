@@ -3,10 +3,10 @@ use crate::lib::author_cache::AuthorCache;
 use crate::lib::channel_authz;
 use crate::lib::colibri::{
     ColibriChannel, ColibriMember, ColibriMembership, ColibriMessage, ColibriModeration,
-    ColibriModerationSubject,
+    ColibriModerationSubject, ColibriReaction,
 };
 use crate::lib::community_authz;
-use crate::lib::community_credentials::warn_missing_credentials_once;
+use crate::lib::community_credentials::{self, warn_missing_credentials_once};
 use crate::lib::community_record::fetch_community_record;
 use crate::lib::community_write;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
@@ -17,6 +17,7 @@ use crate::lib::hum_client::OutboundHum;
 use crate::lib::map_tap_event::map_tap_event;
 use crate::lib::moderation::{self, ACTION_BLOCKED_JOIN, MODERATION_NSID};
 use crate::lib::notifications::{IndexedNotification, index_message_notifications};
+use crate::lib::participation::{self, Participation};
 use crate::lib::repo_endpoint;
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data::{self, ActiveModel as RecordDataModel, Entity as RecordData};
@@ -37,6 +38,16 @@ use tokio_tungstenite::{
 
 const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 const MEMBER_NSID: &str = "social.colibri.member";
+
+/// How far a `social.colibri.membership` create got through the auto-admit
+/// path. `Settled` covers both success and every terminal refusal (banned,
+/// closed, legacy, malformed, no stored credentials); `Retry` covers failures
+/// that a later attempt could still resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MembershipOutcome {
+    Settled,
+    Retry,
+}
 
 use crate::xrpc::social::colibri::sync::subscribe_events_handler::DidStruct;
 
@@ -732,6 +743,34 @@ fn channel_rkey(channel: &str) -> String {
         .unwrap_or_else(|| channel.to_string())
 }
 
+/// Community DID a message or reaction record belongs to, or `None` when the
+/// record isn't community-scoped, its payload doesn't parse, or the target
+/// channel/message isn't indexed yet (an inconclusive lookup, which the caller
+/// treats as "don't gate").
+async fn participation_community(
+    db: &DatabaseConnection,
+    resolver: &CommunityResolver,
+    record: &TapMessageRecord,
+) -> Option<String> {
+    let payload = record.record.as_ref()?;
+
+    match record.collection.as_str() {
+        "social.colibri.message" => {
+            let message = serde_json::from_value::<ColibriMessage>(payload.clone()).ok()?;
+            resolver
+                .community_for_channel(db, &channel_rkey(&message.channel))
+                .await
+        }
+        "social.colibri.reaction" => {
+            let reaction = serde_json::from_value::<ColibriReaction>(payload.clone()).ok()?;
+            resolver
+                .community_for_message(db, &AtUri::rkey_or_value(&reaction.parent))
+                .await
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_event(
     record: TapMessageRecord,
@@ -755,6 +794,39 @@ async fn process_event(
         || record.collection == "social.colibri.actor.data"
     {
         author_cache.invalidate(&record.did);
+    }
+
+    // Admission gate: messages and reactions from an actor with no
+    // community-side `social.colibri.member` record are never indexed,
+    // notified or broadcast. See `lib::participation` for the outcomes.
+    if (record.collection == "social.colibri.message"
+        || record.collection == "social.colibri.reaction")
+        && record.action != "delete"
+        && let Some(community_did) = participation_community(db, resolver, &record).await
+    {
+        match participation::may_participate(db, resolver, &community_did, &record.did).await {
+            Participation::Allow => {}
+            Participation::Defer => {
+                log::info!(
+                    "deferring {} {}/{} in {}: join intent is fresh but no member record yet",
+                    record.collection,
+                    record.did,
+                    record.rkey,
+                    community_did
+                );
+                return false;
+            }
+            Participation::Reject => {
+                log::info!(
+                    "rejecting {} {}/{} in {}: author holds no member record",
+                    record.collection,
+                    record.did,
+                    record.rkey,
+                    community_did
+                );
+                return ack_tap_msg(db, to_tap, text, false).await;
+            }
+        }
     }
 
     // Channel post restrictions: reject (don't index, don't notify, don't
@@ -924,17 +996,31 @@ async fn process_event(
     // users get a `blockedJoin` moderation entry for the audit trail and no
     // member record. Legacy communities (rkey != "self" on the community record)
     // are not auto-joinable — we have no community-side credentials for them.
-    if record.collection == MEMBERSHIP_NSID
-        && record.action != "delete"
-        && let Err(e) = process_membership_create(db, &record).await
-        && !warn_missing_credentials_once(&e)
-    {
-        log::error!(
-            "membership-create processing failed for {}/{}: {}",
-            record.did,
-            record.rkey,
-            e
-        );
+    if record.collection == MEMBERSHIP_NSID && record.action != "delete" {
+        let retry = match process_membership_create(db, &record).await {
+            Ok(MembershipOutcome::Settled) => false,
+            Ok(MembershipOutcome::Retry) => true,
+            Err(e) if warn_missing_credentials_once(&e) => false,
+            Err(e) => {
+                log::error!(
+                    "membership-create processing failed for {}/{}: {}",
+                    record.did,
+                    record.rkey,
+                    e
+                );
+                true
+            }
+        };
+
+        if retry {
+            log::warn!(
+                "auto-admit for {}/{} did not settle; leaving the event unacked so tap redelivers \
+                 it",
+                record.did,
+                record.rkey
+            );
+            return false;
+        }
     }
 
     // Cascade backfill registration: community membership itself never
@@ -1032,10 +1118,13 @@ async fn process_event(
 /// auto-writes a `social.colibri.member` record on the community's PDS for
 /// open communities. Closed communities are a no-op — moderators advance them
 /// via the `approveMembership` endpoint.
+///
+/// [`MembershipOutcome::Retry`] means the admission neither succeeded nor
+/// reached a terminal state, so the caller must leave the tap event unacked.
 async fn process_membership_create(
     db: &DatabaseConnection,
     record: &TapMessageRecord,
-) -> Result<(), DbErr> {
+) -> Result<MembershipOutcome, DbErr> {
     let payload = match record.record.as_ref() {
         Some(v) => v,
         None => {
@@ -1044,7 +1133,7 @@ async fn process_membership_create(
                 record.did,
                 record.rkey
             );
-            return Ok(());
+            return Ok(MembershipOutcome::Settled);
         }
     };
     let membership = match serde_json::from_value::<ColibriMembership>(payload.clone()) {
@@ -1055,7 +1144,7 @@ async fn process_membership_create(
                 record.did,
                 record.rkey
             );
-            return Ok(());
+            return Ok(MembershipOutcome::Settled);
         }
     };
 
@@ -1066,7 +1155,7 @@ async fn process_membership_create(
             record.rkey,
             membership.community
         );
-        return Ok(());
+        return Ok(MembershipOutcome::Settled);
     };
     let community_did = community_uri.authority.clone();
     let community_rkey = community_uri.rkey.clone();
@@ -1082,7 +1171,7 @@ async fn process_membership_create(
             community_did,
             community_rkey
         );
-        return Ok(());
+        return Ok(MembershipOutcome::Settled);
     }
 
     let community = match fetch_community_record(db, &community_did, &community_rkey).await {
@@ -1094,7 +1183,7 @@ async fn process_membership_create(
                 community_did,
                 community_rkey
             );
-            return Ok(());
+            return Ok(MembershipOutcome::Settled);
         }
         Err(e) => {
             log::error!(
@@ -1102,7 +1191,7 @@ async fn process_membership_create(
                 record.did,
                 record.rkey
             );
-            return Ok(());
+            return Ok(MembershipOutcome::Retry);
         }
     };
 
@@ -1132,16 +1221,16 @@ async fn process_membership_create(
                 community_did
             );
         }
-        return Ok(());
+        return Ok(MembershipOutcome::Settled);
     }
 
     if community.requires_approval_to_join {
-        log::debug!(
+        log::info!(
             "membership from {} is pending approval for closed community {}",
             record.did,
             community_did
         );
-        return Ok(());
+        return Ok(MembershipOutcome::Settled);
     }
 
     let membership_uri = format!("at://{}/{}/{}", record.did, record.collection, record.rkey);
@@ -1160,26 +1249,34 @@ async fn process_membership_create(
                 record.did,
                 community_did
             );
+            Ok(MembershipOutcome::Settled)
         }
         Ok(None) => {
-            log::debug!(
-                "membership-create from {} for {} hit existing member record (idempotent skip)",
+            log::info!(
+                "membership-create from {} for {} hit an existing member record (idempotent skip)",
                 record.did,
                 community_did
             );
+            Ok(MembershipOutcome::Settled)
+        }
+        Err(e) if community_credentials::is_missing_credentials(&e) => {
+            warn_missing_credentials_once(&e);
+            log::info!(
+                "cannot auto-admit {} to {}: no stored credentials for the community repo",
+                record.did,
+                community_did
+            );
+            Ok(MembershipOutcome::Settled)
         }
         Err(e) => {
-            if !warn_missing_credentials_once(&e) {
-                log::error!(
-                    "auto-admit write_member_record failed for {} in {}: {e}",
-                    record.did,
-                    community_did
-                );
-            }
+            log::error!(
+                "auto-admit write_member_record failed for {} in {}: {e}",
+                record.did,
+                community_did
+            );
+            Ok(MembershipOutcome::Retry)
         }
     }
-
-    Ok(())
 }
 
 /// Looks up the cached `social.colibri.membership` row for the deleted record,
@@ -1256,6 +1353,153 @@ mod tests {
         let ack_json: serde_json::Value = serde_json::from_str(&ack).unwrap();
         assert_eq!(ack_json["type"], "ack");
         assert_eq!(ack_json["id"], 1);
+    }
+
+    const GATE_COMMUNITY: &str = "did:plc:community";
+    const GATE_AUTHOR: &str = "did:plc:alice";
+
+    fn gated_message_record() -> (TapMessageRecord, String) {
+        let payload = serde_json::json!({
+            "$type": "social.colibri.message",
+            "channel": format!("at://{GATE_COMMUNITY}/social.colibri.channel/chan-a"),
+            "text": "hello",
+            "createdAt": "2026-07-29T12:40:00.000Z",
+        });
+        let record = TapMessageRecord {
+            live: true,
+            did: String::from(GATE_AUTHOR),
+            rev: String::from("rev-1"),
+            collection: String::from("social.colibri.message"),
+            rkey: String::from("msg-1"),
+            action: String::from("create"),
+            record: Some(payload.clone()),
+            cid: None,
+        };
+        let text = serde_json::json!({
+            "id": 1,
+            "type": "record",
+            "record": {
+                "live": true,
+                "did": GATE_AUTHOR,
+                "rev": "rev-1",
+                "collection": "social.colibri.message",
+                "rkey": "msg-1",
+                "action": "create",
+                "record": payload,
+            },
+        })
+        .to_string();
+        (record, text)
+    }
+
+    fn intent_row(indexed_at: &str) -> record_data::Model {
+        record_data::Model {
+            id: 1,
+            did: String::from(GATE_AUTHOR),
+            nsid: String::from(MEMBERSHIP_NSID),
+            rkey: String::from("m1"),
+            data: serde_json::json!({
+                "$type": MEMBERSHIP_NSID,
+                "community": format!("at://{GATE_COMMUNITY}/social.colibri.community/self"),
+                "createdAt": "2026-07-29T12:37:32.074Z",
+            }),
+            indexed_at: String::from(indexed_at),
+        }
+    }
+
+    /// What one gated `process_event` run did: whether it acked, the queued ack
+    /// (if any), whether it broadcast anything, and how many statements it ran.
+    /// The statement count pins the gate down: both the reject and defer paths
+    /// stop after the member and join-intent lookups, so anything higher means
+    /// the message got through and reached the indexing pipeline.
+    struct GateRun {
+        acked: bool,
+        ack: Option<String>,
+        broadcast_sent: bool,
+        statements: usize,
+    }
+
+    /// Drives `process_event` for the gated message above against a mock DB whose
+    /// canned results are (member lookup, join-intent lookup).
+    async fn run_gate(intent: Vec<record_data::Model>) -> GateRun {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([intent])
+            .into_connection();
+
+        let resolver = CommunityResolver::new();
+        resolver.seed_channel("chan-a", GATE_COMMUNITY);
+        resolver.seed_native_community(GATE_COMMUNITY, true);
+
+        let author_cache = AuthorCache::new();
+        let (mut to_tap, mut acks) = mpsc::channel::<String>(4);
+        let (tx_inbound, mut broadcasts) = broadcast::channel::<SharedScopedEvent>(4);
+        let (notifications_tx, _n) = broadcast::channel::<IndexedNotification>(4);
+        let (seen_tx, _s) = broadcast::channel::<SeenEvent>(4);
+        let (mute_tx, _m) = broadcast::channel::<MuteEvent>(4);
+
+        let (record, text) = gated_message_record();
+        let acked = process_event(
+            record,
+            text,
+            &db,
+            &resolver,
+            &author_cache,
+            &mut to_tap,
+            &tx_inbound,
+            &notifications_tx,
+            &seen_tx,
+            &mute_tx,
+        )
+        .await;
+
+        GateRun {
+            acked,
+            ack: acks.try_recv().ok(),
+            broadcast_sent: broadcasts.try_recv().is_ok(),
+            statements: db.into_transaction_log().len(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_message_from_actor_without_a_member_record() {
+        let run = run_gate(vec![]).await;
+
+        assert!(
+            run.acked,
+            "a rejected message must be acked so tap moves on"
+        );
+        assert!(
+            run.ack.is_some(),
+            "the reject path still acks the tap event"
+        );
+        assert!(
+            !run.broadcast_sent,
+            "a rejected message must not be broadcast"
+        );
+        assert_eq!(
+            run.statements, 2,
+            "the reject path stops after the member and join-intent lookups"
+        );
+    }
+
+    #[tokio::test]
+    async fn defers_message_while_a_fresh_join_intent_is_pending() {
+        let run = run_gate(vec![intent_row(&crate::lib::time::current_iso8601_utc())]).await;
+
+        assert!(
+            !run.acked,
+            "a deferred message must stay unacked for redelivery"
+        );
+        assert!(run.ack.is_none(), "the defer path must not ack");
+        assert!(
+            !run.broadcast_sent,
+            "a deferred message must not be broadcast"
+        );
+        assert_eq!(
+            run.statements, 2,
+            "the defer path stops after the member and join-intent lookups"
+        );
     }
 
     #[test]

@@ -19,10 +19,12 @@ use std::sync::{Arc, Mutex};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::Deserialize;
 
+use crate::lib::community_record::fetch_community_record;
 use crate::models::record_data;
 
 const MESSAGE_NSID: &str = "social.colibri.message";
 const CHANNEL_NSID: &str = "social.colibri.channel";
+const COMMUNITY_SELF_RKEY: &str = "self";
 
 /// Audience scope for a mapped server event. Computed once in the tap loop;
 /// each connection checks it against the connected user's community set.
@@ -65,6 +67,11 @@ pub struct CommunityResolver {
     channel_to_community: Mutex<HashMap<String, String>>,
     /// message rkey -> community DID.
     message_to_community: Mutex<HashMap<String, String>>,
+    /// community DID -> whether it hosts a native (`self`-rkey) community
+    /// record. Both outcomes are permanent for a given DID: a legacy community
+    /// never gains a `self` record on the repo it already lives on, and a
+    /// native one never loses it while the community exists.
+    native_community: Mutex<HashMap<String, bool>>,
 }
 
 impl CommunityResolver {
@@ -134,6 +141,43 @@ impl CommunityResolver {
         Some(community)
     }
 
+    /// Whether `community_did` hosts a native community, i.e. a
+    /// `social.colibri.community` record at rkey `self`. Legacy communities
+    /// live as one of many records on a user repo under a TID rkey and the
+    /// AppView holds no credentials for them, so they can never have
+    /// community-side `social.colibri.member` records.
+    ///
+    /// `None` means the lookup was inconclusive (network or database failure);
+    /// callers should treat that as "don't know" rather than "not native".
+    /// Only conclusive answers are cached.
+    pub async fn is_native_community(
+        &self,
+        db: &DatabaseConnection,
+        community_did: &str,
+    ) -> Option<bool> {
+        {
+            let cache = self.native_community.lock().unwrap();
+            if let Some(native) = cache.get(community_did) {
+                return Some(*native);
+            }
+        }
+
+        let native = match fetch_community_record(db, community_did, COMMUNITY_SELF_RKEY).await {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                log::warn!("native-community lookup failed for {community_did}: {e}");
+                return None;
+            }
+        };
+
+        self.native_community
+            .lock()
+            .unwrap()
+            .insert(community_did.to_string(), native);
+        Some(native)
+    }
+
     /// Test seam: pre-populate the channel cache so resolution never touches the
     /// database. `#[cfg(test)]`-only.
     #[cfg(test)]
@@ -152,6 +196,16 @@ impl CommunityResolver {
             .lock()
             .unwrap()
             .insert(message_rkey.to_string(), community_did.to_string());
+    }
+
+    /// Test seam: pre-populate the native-community cache so the check never
+    /// touches the database or a PDS. `#[cfg(test)]`-only.
+    #[cfg(test)]
+    pub fn seed_native_community(&self, community_did: &str, native: bool) {
+        self.native_community
+            .lock()
+            .unwrap()
+            .insert(community_did.to_string(), native);
     }
 }
 

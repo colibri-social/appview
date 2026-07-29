@@ -8,6 +8,17 @@ pub fn current_iso8601_utc() -> String {
     iso8601_from_epoch(now.as_secs(), now.subsec_millis())
 }
 
+/// Returns the ISO 8601 UTC timestamp `secs_ago` seconds before now, in the
+/// same fixed-width format as [`current_iso8601_utc`] so the two compare
+/// correctly as plain strings.
+pub fn iso8601_ago(secs_ago: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    iso8601_from_epoch(now.as_secs().saturating_sub(secs_ago), now.subsec_millis())
+}
+
 /// Formats a (seconds_since_epoch, millis) pair as ISO 8601 UTC.
 pub fn iso8601_from_epoch(secs: u64, millis: u32) -> String {
     let (year, month, day, hour, minute, second) = epoch_to_ymdhms(secs);
@@ -47,6 +58,15 @@ mod tests {
     #[test]
     fn formats_epoch_zero_as_unix_epoch_string() {
         assert_eq!(iso8601_from_epoch(0, 0), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn ago_is_before_now_and_same_shape() {
+        let now = current_iso8601_utc();
+        let ago = iso8601_ago(120);
+        assert_eq!(ago.len(), now.len());
+        assert!(ago < now);
+        assert!(iso8601_ago(0) >= ago);
     }
 
     #[test]

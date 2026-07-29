@@ -62,6 +62,12 @@ pub fn missing_credentials_err(community_did: &str) -> DbErr {
     DbErr::Custom(format!("{MISSING_CREDENTIALS_MARKER}{community_did}"))
 }
 
+/// Whether `err` is the missing-credentials case, without logging. Callers that
+/// need the one-shot warning should use [`warn_missing_credentials_once`].
+pub fn is_missing_credentials(err: &DbErr) -> bool {
+    err.to_string().contains(MISSING_CREDENTIALS_MARKER)
+}
+
 /// Community DIDs already warned about
 static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
