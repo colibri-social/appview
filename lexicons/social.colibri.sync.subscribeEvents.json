@@ -87,12 +87,18 @@
 				"picture": {
 					"type": "blob"
 				},
+				"banner": {
+					"type": "blob"
+				},
 				"categoryOrder": {
 					"type": "array",
 					"items": {
 						"type": "string",
 						"format": "at-uri"
 					}
+				},
+				"requiresApprovalToJoin": {
+					"type": "boolean"
 				}
 			}
 		},
