@@ -11,6 +11,12 @@
 //!   with the stored credentials and delete the community's records
 //!   individually, emptying the repo while leaving the account intact.
 //!
+//! A missing credentials row is not necessarily fatal. Admin teardown is
+//! authorised by `PDS_ADMIN_PASS` alone, so when no row survives we ask whether
+//! the community is nonetheless hosted on the PDS we administer and, if it is,
+//! delete the account anyway. Only a community we can neither authenticate to nor
+//! show to be ours is undeleteable.
+//!
 //! Regardless of source, the stored credentials and every locally cached
 //! `record_data` row for the community DID are removed so the community no
 //! longer surfaces through any read endpoint.
@@ -23,6 +29,7 @@ use serde::Serialize;
 
 use crate::lib::community_credentials::{self, CommunityCredentials, SOURCE_APPVIEW_MANAGED};
 use crate::lib::community_write::not_found_error;
+use crate::lib::credential_recovery;
 use crate::lib::crypto;
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
@@ -65,6 +72,20 @@ type DeleteCredsFn =
     dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>> + Send + Sync;
 type PurgeRecordsFn =
     dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<u64, DbErr>> + Send + Sync;
+/// Answers "is this community on the PDS we administer?" without a credentials
+/// row, yielding the configured `PDS_LOC` when it is.
+type HostedCheckFn = dyn Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Option<String>, DbErr>>
+    + Send
+    + Sync;
+
+/// How a community's repo gets emptied.
+enum Teardown {
+    /// An account on a PDS we administer
+    AdminAccount(String),
+    /// Somebody else's identity: log in and delete the community's records one at
+    /// a time, leaving the account itself intact.
+    ByoRecords(CommunityCredentials),
+}
 
 fn upstream_error(message: String) -> ErrorResponse {
     ErrorResponse {
@@ -90,6 +111,7 @@ async fn delete_community_with(
     delete_record_fn: &DeleteRecordFn,
     delete_creds_fn: &DeleteCredsFn,
     purge_records_fn: &PurgeRecordsFn,
+    hosted_check_fn: &HostedCheckFn,
 ) -> Result<Json<DeleteCommunityResponse>, ErrorResponse> {
     with_community_authz(
         auth,
@@ -102,20 +124,45 @@ async fn delete_community_with(
         |ctx, db| async move {
             let did = ctx.community.authority.clone();
 
-            let creds = load_creds_fn(db.clone(), did.clone())
-                .await?
-                .ok_or_else(|| not_found_error("No credentials registered for this community."))?;
+            // Tearing down one of our own accounts needs no community password at
+            // all, so a lost credentials row must not stop us deleting a community we
+            // own. Only a genuinely foreign community is undeleteable without one.
+            let teardown = match load_creds_fn(db.clone(), did.clone()).await? {
+                Some(creds) if creds.source == SOURCE_APPVIEW_MANAGED => {
+                    Teardown::AdminAccount(creds.pds_endpoint)
+                }
+                Some(creds) => Teardown::ByoRecords(creds),
+                None => match hosted_check_fn(db.clone(), did.clone()).await? {
+                    Some(pds_loc) => {
+                        log::warn!(
+                            "deleteCommunity: no credentials stored for {did}, but it is hosted on \
+                             the PDS this AppView administers; tearing the account down with admin \
+                             authority"
+                        );
+                        Teardown::AdminAccount(pds_loc)
+                    }
+                    None => {
+                        return Err(not_found_error(
+                            "No credentials registered for this community.",
+                        ));
+                    }
+                },
+            };
 
-            if creds.source == SOURCE_APPVIEW_MANAGED {
+            match teardown {
                 // Managed account: it lives on a PDS the AppView administers,
                 // so tear down the whole account (and its repo) in one shot.
-                delete_account_fn(creds.pds_endpoint.clone(), admin_password, did.clone())
-                    .await
-                    .map_err(|e| {
-                        log::error!("deleteCommunity: admin deleteAccount for {did} failed: {e}");
-                        upstream_error(format!("deleteAccount failed: {e}"))
-                    })?;
-            } else {
+                Teardown::AdminAccount(pds_endpoint) => {
+                    delete_account_fn(pds_endpoint, admin_password, did.clone())
+                        .await
+                        .map_err(|e| {
+                            log::error!(
+                                "deleteCommunity: admin deleteAccount for {did} failed: {e}"
+                            );
+                            upstream_error(format!("deleteAccount failed: {e}"))
+                        })?;
+                }
+                Teardown::ByoRecords(creds) => {
                 // BYO: the DID is the user's own identity on a PDS we don't
                 // administer, so the account must survive. Log in with the
                 // stored credentials and delete the community's records one by
@@ -158,6 +205,7 @@ async fn delete_community_with(
                     "deleteCommunity(byo): deleted {deleted}/{total} record(s) from {did}'s PDS; \
                      account left intact"
                 );
+                }
             }
 
             // Drop stored credentials and purge the local cache so no read
@@ -251,6 +299,13 @@ fn purge_records_boxed(
     })
 }
 
+fn hosted_check_boxed(
+    db: DatabaseConnection,
+    did: String,
+) -> BoxFuture<'static, Result<Option<String>, DbErr>> {
+    Box::pin(async move { credential_recovery::hosted_on_managed_pds(&db, &did).await })
+}
+
 #[post("/xrpc/social.colibri.community.delete?<community>&<auth>")]
 /// Deletes a community. Requires the `community.delete` permission.
 pub async fn delete_community(
@@ -279,6 +334,7 @@ pub async fn delete_community(
         &delete_record_boxed,
         &delete_creds_boxed,
         &purge_records_boxed,
+        &hosted_check_boxed,
     )
     .await?;
 
@@ -300,6 +356,15 @@ mod tests {
             password: String::from("pw"),
             source: source.to_string(),
         }
+    }
+
+    /// The default for tests that already supply a credentials row: the hosting
+    /// check should never be consulted, because it only exists for the case where
+    /// no row survives.
+    fn hosted_check_unused()
+    -> impl Fn(DatabaseConnection, String) -> BoxFuture<'static, Result<Option<String>, DbErr>>
+    {
+        |_, _| Box::pin(async { panic!("the hosting check is only for a missing credentials row") })
     }
 
     #[tokio::test]
@@ -356,6 +421,7 @@ mod tests {
             },
             &delete_creds,
             &purge,
+            &hosted_check_unused(),
         )
         .await
         .unwrap();
@@ -443,6 +509,7 @@ mod tests {
             &delete_record,
             &delete_creds,
             &purge,
+            &hosted_check_unused(),
         )
         .await
         .unwrap();
@@ -524,6 +591,7 @@ mod tests {
             &delete_record,
             &delete_creds,
             &|_, _| Box::pin(async { Ok(0) }),
+            &hosted_check_unused(),
         )
         .await
         .unwrap();
@@ -549,6 +617,7 @@ mod tests {
             &|_, _, _, _, _| Box::pin(async { panic!("should not delete records") }),
             &|_, _| Box::pin(async { panic!("should not delete creds") }),
             &|_, _| Box::pin(async { panic!("should not purge") }),
+            &|_, _| Box::pin(async { panic!("should not check hosting without permission") }),
         )
         .await;
 
@@ -556,8 +625,10 @@ mod tests {
         assert_eq!(result.err().unwrap().body.into_inner().error, "Forbidden");
     }
 
+    /// With no credentials *and* no way to show the community is ours, there is
+    /// nothing we can do.
     #[tokio::test]
-    async fn returns_not_found_when_no_credentials_stored() {
+    async fn returns_not_found_when_no_credentials_stored_and_not_hosted_by_us() {
         let db = mock_db();
         let result = delete_community_with(
             String::from("at://did:plc:owner/social.colibri.community/c1"),
@@ -573,10 +644,59 @@ mod tests {
             &|_, _, _, _, _| Box::pin(async { panic!("should not delete records") }),
             &|_, _| Box::pin(async { panic!("should not delete creds") }),
             &|_, _| Box::pin(async { panic!("should not purge") }),
+            &|_, _| Box::pin(async { Ok(None) }),
         )
         .await;
 
         assert!(result.is_err());
         assert_eq!(result.err().unwrap().body.into_inner().error, "NotFound");
+    }
+
+    /// But a community on the PDS we administer stays deletable with no row at
+    /// all: `admin.deleteAccount` needs the admin password, not the community's.
+    #[tokio::test]
+    async fn tears_down_a_managed_account_with_no_credentials_row() {
+        let db = mock_db();
+        let deleted_account: Arc<Mutex<Option<(String, String, String)>>> =
+            Arc::new(Mutex::new(None));
+        let da = deleted_account.clone();
+
+        let delete_account = move |endpoint: String,
+                                   pass: String,
+                                   did: String|
+              -> BoxFuture<'static, Result<(), PdsError>> {
+            let da = da.clone();
+            Box::pin(async move {
+                *da.lock().unwrap() = Some((endpoint, pass, did));
+                Ok(())
+            })
+        };
+
+        let result = delete_community_with(
+            String::from("at://did:plc:owner/social.colibri.community/c1"),
+            String::from("token"),
+            String::from("admin-pass"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
+            &|_, _| Box::pin(async { Ok(None) }),
+            &delete_account,
+            &|_, _, _| Box::pin(async { panic!("admin teardown must not open a PDS session") }),
+            &|_, _| Box::pin(async { panic!("admin teardown must not enumerate records") }),
+            &|_, _, _, _, _| Box::pin(async { panic!("admin teardown deletes the whole account") }),
+            &|_, _| Box::pin(async { Ok(1) }),
+            &|_, _| Box::pin(async { Ok(3) }),
+            // The community is hosted on our own PDS.
+            &|_, _| Box::pin(async { Ok(Some(String::from("http://localhost:3000"))) }),
+        )
+        .await
+        .expect("a community we own must stay deletable");
+
+        assert_eq!(result.did, "did:plc:owner");
+        let (endpoint, pass, did) = deleted_account.lock().unwrap().clone().expect("torn down");
+        // Addressed at the configured PDS_LOC the hosting check returned.
+        assert_eq!(endpoint, "http://localhost:3000");
+        assert_eq!(pass, "admin-pass");
+        assert_eq!(did, "did:plc:owner");
     }
 }

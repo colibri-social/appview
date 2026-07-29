@@ -16,6 +16,7 @@ use rocket::{get, launch, routes, tokio};
 use rocket_cors::{AllowedOrigins, CorsOptions};
 use sea_orm::DatabaseConnection;
 
+mod admin;
 mod lib;
 mod migrations;
 #[allow(dead_code)]
@@ -94,6 +95,18 @@ async fn rocket() -> _ {
     let master_key = crypto::load_master_key_from_env()
         .expect("CREDENTIAL_ENCRYPTION_KEY must be a base64-encoded 32-byte key");
     crypto::install_master_key(master_key).expect("master key already installed");
+
+    // `PDS_ADMIN_PASS` is not required to boot, but without it the AppView cannot
+    // repair its own credentials for communities on its PDS, so a lost password
+    // becomes permanent. Say so once at boot rather than at the first failed write.
+    if std::env::var("PDS_ADMIN_PASS").is_ok_and(|pass| !pass.trim().is_empty()) {
+        log::info!("PDS admin credentials configured; community credential recovery is available.");
+    } else {
+        log::warn!(
+            "PDS_ADMIN_PASS is not set: communities cannot be created, deleted, or have their \
+             credentials repaired. A lost community password will be unrecoverable."
+        );
+    }
 
     // Web Push is optional. Surface at boot whether it's configured so a
     // missing keypair (→ no background push) is obvious in the logs rather
@@ -422,6 +435,22 @@ async fn rocket() -> _ {
             .manage(crate::lib::embed_cache::EmbedCache::from_env())
             .manage(crate::lib::blob_cache::BlobCache::from_env())
             .manage(safe_cors);
+    }
+
+    // Operator endpoints are mounted only when a secret is configured, so an
+    // unconfigured deployment exposes no such surface at all rather than one that
+    // rejects every request.
+    if admin::is_configured() {
+        log::info!(
+            "Operator endpoints mounted under /admin (authenticated with {}).",
+            admin::ADMIN_PASS_ENV
+        );
+        rocket = rocket.mount("/", routes![admin::recover_credentials]);
+    } else {
+        log::info!(
+            "{} is not set; operator endpoints are not mounted.",
+            admin::ADMIN_PASS_ENV
+        );
     }
 
     #[cfg(windows)]

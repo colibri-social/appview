@@ -12,6 +12,13 @@ pub const PDS_UNAVAILABLE: &str = "PdsUnavailable";
 /// Marks a [`DbErr::Custom`] as carrying a [`PDS_UNAVAILABLE`] failure.
 pub const PDS_UNAVAILABLE_MARKER: &str = "\u{1}pds-unavailable\u{1}";
 
+/// Error code returned when this AppView cannot write to a community's repo and
+/// could not repair its own access either
+pub const CREDENTIALS_UNRECOVERABLE: &str = "CommunityCredentialsUnrecoverable";
+
+/// Marks a [`DbErr::Custom`] as carrying a [`CREDENTIALS_UNRECOVERABLE`] failure.
+pub const CREDENTIALS_UNRECOVERABLE_MARKER: &str = "\u{1}credentials-unrecoverable\u{1}";
+
 #[derive(Serialize, Debug)]
 pub struct ErrorBody {
     pub message: String,
@@ -68,6 +75,15 @@ impl From<DbErr> for ErrorResponse {
         if let Some(index) = message.find(PDS_UNAVAILABLE_MARKER) {
             let detail = &message[index + PDS_UNAVAILABLE_MARKER.len()..];
             return pds_unavailable(detail);
+        }
+        if let Some(index) = message.find(CREDENTIALS_UNRECOVERABLE_MARKER) {
+            let detail = &message[index + CREDENTIALS_UNRECOVERABLE_MARKER.len()..];
+            return ErrorResponse {
+                body: Json(ErrorBody {
+                    error: CREDENTIALS_UNRECOVERABLE.into(),
+                    message: detail.to_string(),
+                }),
+            };
         }
 
         ErrorResponse {

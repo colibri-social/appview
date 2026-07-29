@@ -7,9 +7,9 @@ use sea_orm::{
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriMember, ColibriModeration, ColibriModerationSubject};
-use crate::lib::community_credentials::{self, CredentialsError};
-use crate::lib::crypto;
+use crate::lib::community_write;
 use crate::lib::pds_client::{self, PdsError};
+use crate::lib::repo_endpoint::{self, RepoEndpoint};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
 
@@ -114,27 +114,21 @@ pub async fn write_moderation_record(
 ) -> Result<record_data::Model, DbErr> {
     let data = serde_json::to_value(record).map_err(|e| DbErr::Custom(e.to_string()))?;
 
-    let creds =
-        community_credentials::load_credentials(db, crypto::master_key(), &community.authority)
+    let record_ref = community_write::with_session(db, &community.authority, |endpoint, jwt| {
+        let data = data.clone();
+        Box::pin(async move {
+            pds_client::create_record(
+                &endpoint,
+                &jwt,
+                &community.authority,
+                MODERATION_NSID,
+                None,
+                &data,
+            )
             .await
-            .map_err(credentials_error_to_db_err)?
-            .ok_or_else(|| community_credentials::missing_credentials_err(&community.authority))?;
-
-    let session =
-        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
-            .await
-            .map_err(pds_error_to_db_err)?;
-
-    let record_ref = pds_client::create_record(
-        &creds.pds_endpoint,
-        &session.access_jwt,
-        &community.authority,
-        MODERATION_NSID,
-        None,
-        &data,
-    )
-    .await
-    .map_err(pds_error_to_db_err)?;
+        })
+    })
+    .await?;
 
     let parsed = AtUri::parse(&record_ref.uri).ok_or_else(|| {
         DbErr::Custom(format!(
@@ -184,13 +178,6 @@ pub async fn write_moderation_record(
         data,
         indexed_at: current_iso8601_utc(),
     })
-}
-
-fn credentials_error_to_db_err(e: CredentialsError) -> DbErr {
-    match e {
-        CredentialsError::Db(inner) => inner,
-        other => DbErr::Custom(format!("credentials error: {other}")),
-    }
 }
 
 fn pds_error_to_db_err(e: PdsError) -> DbErr {
@@ -338,25 +325,14 @@ pub async fn revoke_community_member(
         return Ok(false);
     };
 
-    let creds = community_credentials::load_credentials(db, crypto::master_key(), community_did)
-        .await
-        .map_err(credentials_error_to_db_err)?
-        .ok_or_else(|| community_credentials::missing_credentials_err(community_did))?;
-
-    let session =
-        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
-            .await
-            .map_err(pds_error_to_db_err)?;
-
-    pds_client::delete_record(
-        &creds.pds_endpoint,
-        &session.access_jwt,
-        community_did,
-        MEMBER_NSID,
-        &member_rkey,
-    )
-    .await
-    .map_err(pds_error_to_db_err)?;
+    community_write::with_session(db, community_did, |endpoint, jwt| {
+        let member_rkey = member_rkey.clone();
+        Box::pin(async move {
+            pds_client::delete_record(&endpoint, &jwt, community_did, MEMBER_NSID, &member_rkey)
+                .await
+        })
+    })
+    .await?;
 
     drop_cached_member_row(db, community_did, &member_rkey).await;
 
@@ -413,27 +389,30 @@ pub async fn write_member_record(
     };
     let data = serde_json::to_value(&record).map_err(|e| DbErr::Custom(e.to_string()))?;
 
-    let creds =
-        match community_credentials::load_credentials(db, crypto::master_key(), community_did)
-            .await
-            .map_err(credentials_error_to_db_err)?
-        {
-            Some(creds) => creds,
-            // Without credentials there is nothing to write and nothing to verify
-            // against, so an existing row stays the best answer available.
-            None if cached_rkey.is_some() => return Ok(None),
-            None => {
-                return Err(community_credentials::missing_credentials_err(
-                    community_did,
-                ));
+    if let Some(rkey) = cached_rkey {
+        // Where to read from comes from `repo_endpoint`, not the credentials row.
+        let endpoint = match repo_endpoint::resolve(db, community_did).await {
+            Ok(endpoint) => endpoint,
+            // We cannot check, so the cached row stays the best answer available
+            Err(e) => {
+                log::warn!(
+                    "cannot verify member row {community_did}/{rkey} against the PDS ({e}); \
+                     treating it as current"
+                );
+                return Ok(None);
             }
         };
 
-    if let Some(rkey) = cached_rkey {
-        let existing =
-            pds_client::get_record_trusted(&creds.pds_endpoint, community_did, MEMBER_NSID, &rkey)
-                .await
-                .map_err(pds_error_to_db_err)?;
+        let existing = match &endpoint {
+            RepoEndpoint::Trusted(_) => {
+                pds_client::get_record_trusted(endpoint.as_str(), community_did, MEMBER_NSID, &rkey)
+                    .await
+            }
+            RepoEndpoint::Untrusted(_) => {
+                pds_client::get_record(endpoint.as_str(), community_did, MEMBER_NSID, &rkey).await
+            }
+        }
+        .map_err(pds_error_to_db_err)?;
 
         if existing.is_some() {
             return Ok(None);
@@ -446,21 +425,14 @@ pub async fn write_member_record(
         drop_cached_member_row(db, community_did, &rkey).await;
     }
 
-    let session =
-        pds_client::create_session(&creds.pds_endpoint, &creds.identifier, &creds.password)
-            .await
-            .map_err(pds_error_to_db_err)?;
-
-    let record_ref = pds_client::create_record(
-        &creds.pds_endpoint,
-        &session.access_jwt,
-        community_did,
-        MEMBER_NSID,
-        None,
-        &data,
-    )
-    .await
-    .map_err(pds_error_to_db_err)?;
+    let record_ref = community_write::with_session(db, community_did, |endpoint, jwt| {
+        let data = data.clone();
+        Box::pin(async move {
+            pds_client::create_record(&endpoint, &jwt, community_did, MEMBER_NSID, None, &data)
+                .await
+        })
+    })
+    .await?;
 
     let parsed = AtUri::parse(&record_ref.uri).ok_or_else(|| {
         DbErr::Custom(format!(
