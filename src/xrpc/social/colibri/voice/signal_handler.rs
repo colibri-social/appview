@@ -3,14 +3,22 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use mediasoup::prelude::*;
+use rocket::tokio::sync::broadcast::Sender;
 use rocket::tokio::sync::broadcast::error::RecvError;
+use rocket::tokio::sync::{Notify, mpsc};
 use rocket::{State, get, serde::json::Json, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriChannel;
+use crate::lib::event_scope::SharedScopedEvent;
+use crate::lib::get_state::get_did_states;
+use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::state::{join_vc, leave_vc};
+use crate::lib::tap::CommsBridge;
+use crate::lib::voice_events::broadcast_voice_presence;
 use crate::lib::{channel_authz, community_authz, community_write, service_auth};
 use crate::sfu::{ChannelSfu, RoomEvent, Sfu};
 use crate::xrpc::social::colibri::sync::subscribe_events_handler::{
@@ -315,11 +323,16 @@ async fn run_voice_loop(
     io: DuplexStream,
     did: String,
     channel_uri: String,
+    is_loopback: bool,
+    community_authority: Option<String>,
     sfu: Arc<Sfu>,
     channel: Arc<ChannelSfu>,
     producer_transport: WebRtcTransport,
     consumer_transport: WebRtcTransport,
     mut events_rx: rocket::tokio::sync::broadcast::Receiver<RoomEvent>,
+    db: DatabaseConnection,
+    to_tap_broadcast: Sender<SharedScopedEvent>,
+    hum_outbox: mpsc::Sender<OutboundHum>,
 ) {
     let (mut ws_sink, mut ws_source) = io.split();
 
@@ -365,7 +378,26 @@ async fn run_voice_loop(
         .await;
     }
 
-    let (session_id, evict) = sfu.register_session(&did).await;
+    let (session_id, evict): (Option<u64>, Arc<Notify>) = if is_loopback {
+        (None, Arc::new(Notify::new()))
+    } else {
+        let (id, evict) = sfu.register_session(&did).await;
+        (Some(id), evict)
+    };
+
+    if !is_loopback && let Some(community) = &community_authority {
+        let community_uri = format!("at://{community}/social.colibri.community/self");
+        join_vc(did.clone(), channel_uri.clone(), community_uri, &db).await;
+        hum_client::enqueue(
+            &hum_outbox,
+            OutboundHum::Voice {
+                did: did.clone(),
+                channel: channel_uri.clone(),
+                event: String::from("join"),
+            },
+        );
+        broadcast_voice_presence(&to_tap_broadcast, community, &channel_uri, &did, "join");
+    }
 
     loop {
         let connected = tokio::select! {
@@ -465,7 +497,26 @@ async fn run_voice_loop(
         }
     }
 
-    sfu.deregister_session(&did, session_id).await;
+    if let Some(id) = session_id {
+        sfu.deregister_session(&did, id).await;
+    }
+
+    if !is_loopback
+        && let Some(community) = &community_authority
+        && let Ok(states) = get_did_states(did.clone(), &db).await
+        && states.vc.as_deref() == Some(channel_uri.as_str())
+    {
+        leave_vc(did.clone(), &db).await;
+        hum_client::enqueue(
+            &hum_outbox,
+            OutboundHum::Voice {
+                did: did.clone(),
+                channel: channel_uri.clone(),
+                event: String::from("leave"),
+            },
+        );
+        broadcast_voice_presence(&to_tap_broadcast, community, &channel_uri, &did, "leave");
+    }
 
     for producer_id in &my_producer_ids {
         channel.remove_producer(producer_id);
@@ -488,6 +539,7 @@ pub async fn signal(
     ws: WebSocket,
     sfu: &State<Arc<Sfu>>,
     db: &State<DatabaseConnection>,
+    bridge: &State<CommsBridge>,
 ) -> Result<ChannelWithProtocol, ErrorResponse> {
     let used_subprotocol = subprotocol_auth.token().is_some();
     let token = subprotocol_auth
@@ -506,6 +558,11 @@ pub async fn signal(
         })?;
 
     authorize_channel_access(db.inner(), &channel, &did).await?;
+
+    let is_loopback = AtUri::parse(&channel)
+        .map(|uri| uri.collection == "social.colibri.voice.test")
+        .unwrap_or(false);
+    let community_authority = AtUri::parse(&channel).map(|uri| uri.authority);
 
     let channel_sfu = sfu
         .get_or_create_channel(&channel)
@@ -542,6 +599,9 @@ pub async fn signal(
 
     let events_rx = channel_sfu.subscribe();
     let sfu = sfu.inner().clone();
+    let db = db.inner().clone();
+    let to_tap_broadcast = bridge.broadcast.clone();
+    let hum_outbox = bridge.hum_outbox.clone();
 
     let ws_channel = ws.channel(move |io| {
         Box::pin(async move {
@@ -549,11 +609,16 @@ pub async fn signal(
                 io,
                 did,
                 channel,
+                is_loopback,
+                community_authority,
                 sfu,
                 channel_sfu,
                 producer_transport,
                 consumer_transport,
                 events_rx,
+                db,
+                to_tap_broadcast,
+                hum_outbox,
             )
             .await;
             Ok(())

@@ -5,17 +5,15 @@ use crate::lib::event_scope::{EventScope, SharedScopedEvent};
 use crate::lib::events::{
     ColibriServerEventData, CommunityCreationProgressEvent, MuteEvent, NotificationEventData,
     NotificationEventMessage, SeenEvent, TypingEventData, TypingMessageData, ViewData,
-    VoiceChannelData, VoiceStateData,
+    VoiceStateData,
 };
 use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::permissions::Permission;
-use crate::lib::state::{
-    broadcast_state_change, clear_viewed_channel, join_vc, leave_vc, set_vc_state, view_channel,
-};
+use crate::lib::state::{broadcast_state_change, clear_viewed_channel, set_vc_state, view_channel};
 use crate::lib::tap::CommsBridge;
-use crate::lib::voice_events::{broadcast_voice_presence, broadcast_voice_state};
+use crate::lib::voice_events::broadcast_voice_state;
 use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
 use crate::{
     lib::{
@@ -55,7 +53,6 @@ async fn parse_client_event(
 ) -> Option<String> {
     let user_message = serde_json::from_str::<ColibriClientEvent>(text).ok()?;
 
-    // `view`, `voice_join`, `voice_leave`
     match user_message.event_type.as_str() {
         "heartbeat" => {
             let ack_res = ColibriServerEvent {
@@ -91,49 +88,6 @@ async fn parse_client_event(
 
             None
         }
-        "voice_join" => {
-            let vc_msg_data: VoiceChannelData = serde_json::from_value(user_message.data?).ok()?;
-
-            if let Ok(states) = get_did_states(did.clone(), db).await
-                && let Some(existing) = states.vc
-                && existing != vc_msg_data.channel
-            {
-                leave_vc_and_broadcast(&did, to_tap_broadcast, hum_outbox, db).await;
-            }
-
-            join_vc(
-                did.clone(),
-                vc_msg_data.channel.clone(),
-                vc_msg_data.community.clone(),
-                db,
-            )
-            .await;
-
-            hum_client::enqueue(
-                hum_outbox,
-                OutboundHum::Voice {
-                    did: did.clone(),
-                    channel: vc_msg_data.channel.clone(),
-                    event: String::from("join"),
-                },
-            );
-
-            if let Some(uri) = AtUri::parse(&vc_msg_data.community) {
-                broadcast_voice_presence(
-                    to_tap_broadcast,
-                    &uri.authority,
-                    &vc_msg_data.channel,
-                    &did,
-                    "join",
-                );
-            }
-
-            None
-        }
-        "voice_leave" => {
-            leave_vc_and_broadcast(&did, to_tap_broadcast, hum_outbox, db).await;
-            None
-        }
         "voice_state" => {
             let state_data: VoiceStateData = serde_json::from_value(user_message.data?).ok()?;
 
@@ -165,34 +119,6 @@ async fn parse_client_event(
             None
         }
         _ => None,
-    }
-}
-
-async fn leave_vc_and_broadcast(
-    did: &str,
-    to_tap_broadcast: &Sender<SharedScopedEvent>,
-    hum_outbox: &mpsc::Sender<OutboundHum>,
-    db: &DatabaseConnection,
-) {
-    if let Ok(states) = get_did_states(did.to_string(), db).await
-        && let Some(channel) = states.vc
-    {
-        leave_vc(did.to_string(), db).await;
-
-        hum_client::enqueue(
-            hum_outbox,
-            OutboundHum::Voice {
-                did: did.to_string(),
-                channel: channel.clone(),
-                event: String::from("leave"),
-            },
-        );
-
-        if let Some(community) = states.vc_community
-            && let Some(uri) = AtUri::parse(&community)
-        {
-            broadcast_voice_presence(to_tap_broadcast, &uri.authority, &channel, did, "leave");
-        }
     }
 }
 
@@ -644,7 +570,6 @@ async fn run_event_loop(
         }
     }
 
-    leave_vc_and_broadcast(&did, &to_tap_broadcast, &hum_outbox, &db).await;
     save_state(&db, did.clone(), String::from("offline")).await;
     clear_viewed_channel(did.clone(), &db).await;
     broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;

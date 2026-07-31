@@ -473,12 +473,6 @@ pub struct HumEnvelope {
 // -- Client -> Server
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VoiceChannelData {
-    pub channel: String,
-    pub community: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VoiceStateData {
     pub channel: String,
     pub community: String,
