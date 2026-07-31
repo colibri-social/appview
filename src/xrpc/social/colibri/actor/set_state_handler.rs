@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::lib::event_scope::SharedScopedEvent;
 use crate::lib::hum_client::OutboundHum;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 use crate::lib::state::broadcast_state_change;
 use crate::lib::tap::CommsBridge;
@@ -87,24 +87,14 @@ where
 {
     let did = verify_auth_fn(auth, String::from("social.colibri.actor.setState"))
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     let maybe_state = validate_state_str(&state);
 
     if maybe_state.is_none() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidState"),
-                message: String::from(
-                    "Given state is invalid. State must be one of 'online', 'away', 'dnd', or 'offline'.",
-                ),
-            }),
-        });
+        return Err(ErrorCode::InvalidState.with(
+            "Given state is invalid. State must be one of 'online', 'away', 'dnd', or 'offline'.",
+        ));
     }
 
     let verified_state = maybe_state.unwrap().to_string();

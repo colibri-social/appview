@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::lib::at_uri::AtUri;
 use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::notifications;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::xrpc::social::colibri::channel::get_read_cursor_handler::{
     ReadCursor, fetch_latest_read_cursor,
 };
@@ -31,12 +31,7 @@ async fn get_channel_view_with(
     verify_auth_fn: &VerifyAuthFn,
 ) -> Result<Json<GetChannelViewResponse>, ErrorResponse> {
     if AtUri::parse(&channel_uri).is_none() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Invalid channel AT-URI."),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with("Invalid channel AT-URI."));
     }
 
     with_authenticated(
@@ -136,6 +131,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

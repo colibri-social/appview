@@ -17,7 +17,7 @@ use crate::lib::moderation::{
     revoke_member_boxed, write_moderation_boxed,
 };
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::state::leave_vc;
 use crate::lib::tap::CommsBridge;
 use crate::lib::voice_control::{VoiceAction, VoiceControlCommand};
@@ -143,14 +143,7 @@ async fn moderate_user_with(
                 )
                 .await?;
                 if !ctx.authz.outranks(&target_authz) {
-                    return Err(ErrorResponse {
-                        body: Json(ErrorBody {
-                            error: String::from("Forbidden"),
-                            message: String::from(
-                                "Cannot act on a member with an equal or higher role position.",
-                            ),
-                        }),
-                    });
+                    return Err(ErrorCode::Forbidden.with("Cannot act on a member with an equal or higher role position.",));
                 }
             }
 

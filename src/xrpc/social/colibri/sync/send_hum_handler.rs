@@ -43,7 +43,7 @@ use crate::lib::events::{
 };
 use crate::lib::get_atproto_record::get_atproto_record;
 use crate::lib::map_tap_event::build_presence_user_event;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::tap::CommsBridge;
 use crate::models::record_data;
@@ -427,57 +427,27 @@ pub(crate) async fn ingest_trusted_hum(
 }
 
 fn auth_error(err: ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthRequired"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 fn not_enabled() -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("NotEnabled"),
-            message: String::from("Humming is disabled on this AppView"),
-        }),
-    }
+    ErrorCode::NotEnabled.with("Humming is disabled on this AppView")
 }
 
 fn rate_limited() -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("RateLimited"),
-            message: String::from("peer exceeded the sendHum rate limit"),
-        }),
-    }
+    ErrorCode::RateLimited.with("peer exceeded the sendHum rate limit")
 }
 
 fn forbidden(message: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("Forbidden"),
-            message: message.into(),
-        }),
-    }
+    ErrorCode::Forbidden.with(message.into())
 }
 
 fn invalid_request(message: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: message.into(),
-        }),
-    }
+    ErrorCode::InvalidRequest.with(message.into())
 }
 
 fn internal_error(message: String) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InternalServerError"),
-            message,
-        }),
-    }
+    ErrorCode::InternalError.with(message)
 }
 
 fn verify_auth_boxed(

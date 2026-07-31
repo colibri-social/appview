@@ -216,12 +216,22 @@ fn expected_verb(kind: &str) -> &'static str {
 struct Exceptions {
     #[serde(default)]
     exception: Vec<Exception>,
+    #[serde(default)]
+    error_exception: Vec<ErrorException>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct Exception {
     nsid: String,
     param: String,
+    reason: String,
+    expires: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ErrorException {
+    nsid: String,
+    code: String,
     reason: String,
     expires: String,
 }
@@ -274,6 +284,104 @@ fn today() -> String {
     }
 
     format!("{y:04}-{:02}-{:02}", m + 1, d + 1)
+}
+
+const COMBINATOR_CODES: &[(&str, &[&str])] = &[
+    (
+        "with_community_authz",
+        &["AuthRequired", "InvalidRequest", "Forbidden"],
+    ),
+    (
+        "with_community_authz_scoped",
+        &["AuthRequired", "InvalidRequest", "Forbidden"],
+    ),
+    ("with_authenticated", &["AuthRequired"]),
+    ("handler::auth_error", &["AuthRequired"]),
+    ("handler::invalid_community_uri", &["InvalidRequest"]),
+    ("handler::forbidden", &["Forbidden"]),
+    ("responses::pds_unavailable", &["PdsUnavailable"]),
+    ("community_write::not_found_error", &["NotFound"]),
+    ("community_write::invalid_request", &["InvalidRequest"]),
+];
+
+const COMMUNITY_WRITE_FNS: &[&str] = &[
+    "community_write::community_session",
+    "community_write::with_session",
+    "community_write::create_record",
+    "community_write::put_record",
+    "community_write::delete_record",
+    "community_write::upload_blob",
+];
+const COMMUNITY_WRITE_CODES: &[&str] = &["PdsUnavailable", "CommunityCredentialsUnrecoverable"];
+
+const UNDECLARED_CODES: &[&str] = &["InternalError"];
+
+fn emitted_codes() -> BTreeMap<String, BTreeSet<String>> {
+    let attr = Regex::new(r#"#\[(?:get|post|put|delete|patch)\(\s*"([^"]*)""#)
+        .expect("route attribute regex compiles");
+    let code_use = Regex::new(r"\bErrorCode::([A-Za-z]+)").expect("code regex compiles");
+
+    let mut files = Vec::new();
+    rust_sources(&repo_root().join("src"), &mut files);
+    files.sort();
+
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+
+    for file in files {
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
+
+        let nsids: Vec<String> = attr
+            .captures_iter(&text)
+            .filter_map(|m| {
+                let raw = m[1].to_string();
+                let path = raw.split('?').next().unwrap_or_default();
+                path.strip_prefix("/xrpc/").map(str::to_string)
+            })
+            .collect();
+        if nsids.is_empty() {
+            continue;
+        }
+
+        let body = text.split("mod tests").next().unwrap_or(&text);
+
+        let mut codes: BTreeSet<String> = code_use
+            .captures_iter(body)
+            .map(|m| m[1].to_string())
+            .collect();
+
+        for (needle, extra) in COMBINATOR_CODES {
+            if body.contains(needle) {
+                codes.extend(extra.iter().map(|s| (*s).to_string()));
+            }
+        }
+        if COMMUNITY_WRITE_FNS.iter().any(|f| body.contains(f)) {
+            codes.extend(COMMUNITY_WRITE_CODES.iter().map(|s| (*s).to_string()));
+        }
+        for undeclared in UNDECLARED_CODES {
+            codes.remove(*undeclared);
+        }
+
+        for nsid in nsids {
+            out.entry(nsid).or_default().extend(codes.iter().cloned());
+        }
+    }
+
+    out
+}
+
+fn lexicon_errors(def: &Value) -> BTreeSet<String> {
+    def.get("errors")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|e| e.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn build_report() -> Report {
@@ -420,11 +528,82 @@ fn routes_and_lexicons_do_not_contradict_each_other() {
 }
 
 #[test]
+fn error_codes_match_the_lexicons() {
+    let emitted = emitted_codes();
+    let lexicons = load_lexicons();
+    let exceptions = load_exceptions();
+
+    assert!(
+        !emitted.is_empty(),
+        "found no error codes in src/. The ErrorCode regex has probably drifted"
+    );
+
+    let excused = |nsid: &str, code: &str| {
+        exceptions
+            .error_exception
+            .iter()
+            .any(|e| e.nsid == nsid && e.code == code)
+    };
+
+    let mut failures = Vec::new();
+    let mut skipped = Vec::new();
+
+    for (nsid, codes) in &emitted {
+        if nsid.starts_with(UPSTREAM_NSID_PREFIX) {
+            continue;
+        }
+        let Some(def) = lexicons.get(nsid).and_then(main_def) else {
+            skipped.push(nsid.clone());
+            continue;
+        };
+        let declared = lexicon_errors(def);
+
+        for code in codes.difference(&declared) {
+            if excused(nsid, code) {
+                continue;
+            }
+            failures.push(format!(
+                "{nsid}: a handler can emit `{code}` but the lexicon does not declare it, \
+                 so no client knows to handle it"
+            ));
+        }
+
+        for code in declared.difference(codes) {
+            if excused(nsid, code) {
+                continue;
+            }
+            failures.push(format!(
+                "{nsid}: the lexicon declares `{code}` but no handler emits it, \
+                 so a client would branch on an error it can never receive"
+            ));
+        }
+    }
+
+    print_list(
+        "Routed methods with no lexicon yet (not a failure)",
+        &skipped,
+    );
+
+    assert!(
+        failures.is_empty(),
+        "\n{} error-code mismatch(es) between src/ and lexicons/:\n{}\n\nFix the lexicon \
+         (in the client repo, then re-run ./scripts/sync-lexicons.sh) or add an \
+         [[error_exception]] to lexicons/exceptions.toml.\n",
+        failures.len(),
+        failures
+            .iter()
+            .map(|f| format!("  - {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[test]
 fn exceptions_have_not_expired() {
     let exceptions = load_exceptions();
     let today = today();
 
-    let expired: Vec<String> = exceptions
+    let mut expired: Vec<String> = exceptions
         .exception
         .iter()
         .filter(|e| e.expires < today)
@@ -435,6 +614,19 @@ fn exceptions_have_not_expired() {
             )
         })
         .collect();
+
+    expired.extend(
+        exceptions
+            .error_exception
+            .iter()
+            .filter(|e| e.expires < today)
+            .map(|e| {
+                format!(
+                    "{} / error {} expired on {} ({})",
+                    e.nsid, e.code, e.expires, e.reason
+                )
+            }),
+    );
 
     assert!(
         expired.is_empty(),

@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::lib::handler::{load_authz_boxed, verify_auth_boxed, with_community_authz};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::state::leave_vc;
 use crate::lib::tap::CommsBridge;
 use crate::lib::voice_control::{VoiceAction, VoiceControlCommand};
@@ -23,12 +23,7 @@ fn parse_action(action: &str) -> Result<VoiceAction, ErrorResponse> {
         "deafen" => Ok(VoiceAction::ServerDeafen(true)),
         "undeafen" => Ok(VoiceAction::ServerDeafen(false)),
         "disconnect" => Ok(VoiceAction::Disconnect),
-        _ => Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Unknown voice moderation action."),
-            }),
-        }),
+        _ => Err(ErrorCode::InvalidRequest.with("Unknown voice moderation action.")),
     }
 }
 
@@ -60,14 +55,8 @@ pub async fn moderate_voice(
             let target_authz =
                 load_authz_boxed(db.clone(), ctx.community_uri.clone(), target_did.clone()).await?;
             if !ctx.authz.outranks(&target_authz) {
-                return Err(ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("Forbidden"),
-                        message: String::from(
-                            "Cannot moderate a member with an equal or higher role position.",
-                        ),
-                    }),
-                });
+                return Err(ErrorCode::Forbidden
+                    .with("Cannot moderate a member with an equal or higher role position."));
             }
 
             let community_did = ctx.community.authority.clone();

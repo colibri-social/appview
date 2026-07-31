@@ -12,7 +12,7 @@ use crate::lib::handler::{
 };
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::xrpc::social::colibri::community::reads::list_roles_handler::fetch_role_records;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
@@ -25,12 +25,7 @@ pub struct RoleUriResponse {
 }
 
 fn forbidden(message: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("Forbidden"),
-            message: message.into(),
-        }),
-    }
+    ErrorCode::Forbidden.with(message.into())
 }
 
 fn assert_position_manageable(authz: &ActorAuthz, position: i64) -> Result<(), ErrorResponse> {

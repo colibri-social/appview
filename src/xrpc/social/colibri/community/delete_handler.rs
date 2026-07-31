@@ -36,7 +36,7 @@ use crate::lib::handler::{
 };
 use crate::lib::pds_client::{self, PdsError};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
 #[derive(Serialize, Debug)]
@@ -88,12 +88,7 @@ enum Teardown {
 }
 
 fn upstream_error(message: String) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("UpstreamError"),
-            message,
-        }),
-    }
+    ErrorCode::UpstreamFailure.with(message)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,12 +308,8 @@ pub async fn delete_community(
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<DeleteCommunityResponse>, ErrorResponse> {
-    let admin_password = std::env::var("PDS_ADMIN_PASS").map_err(|_| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InternalServerError"),
-            message: String::from("PDS_ADMIN_PASS env var not set"),
-        }),
-    })?;
+    let admin_password = std::env::var("PDS_ADMIN_PASS")
+        .map_err(|_| ErrorCode::InternalError.with("PDS_ADMIN_PASS env var not set"))?;
 
     let response = delete_community_with(
         community.to_string(),

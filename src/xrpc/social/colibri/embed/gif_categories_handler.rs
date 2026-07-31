@@ -4,7 +4,7 @@ use rocket::serde::json::Json;
 use serde::Serialize;
 
 use crate::lib::klipy::{self, GifCategory};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 
 const LXM: &str = "social.colibri.embed.gifCategories";
@@ -18,12 +18,7 @@ pub struct GifCategoriesResponse {
 }
 
 fn auth_error(err: service_auth::ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 async fn gif_categories_with<VA, FE>(
@@ -70,6 +65,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

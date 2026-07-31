@@ -19,7 +19,7 @@
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::events::HumEnvelope;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 use crate::lib::tap::CommsBridge;
 use crate::models::record_data;
@@ -29,7 +29,7 @@ use crate::xrpc::social::colibri::sync::subscribe_events_handler::{
 use futures_util::{SinkExt, StreamExt};
 use rocket::tokio::sync::broadcast::Receiver;
 use rocket::tokio::sync::broadcast::error::RecvError;
-use rocket::{State, get, serde::json::Json};
+use rocket::{State, get};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -189,12 +189,7 @@ pub async fn subscribe_hums(
     bridge: &State<CommsBridge>,
 ) -> Result<ChannelWithProtocol, ErrorResponse> {
     if !crate::lib::hum_client::humming_enabled() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("NotEnabled"),
-                message: String::from("Humming is disabled on this AppView"),
-            }),
-        });
+        return Err(ErrorCode::NotEnabled.with("Humming is disabled on this AppView"));
     }
 
     let used_subprotocol = subprotocol_auth.token().is_some();
@@ -206,12 +201,7 @@ pub async fn subscribe_hums(
 
     let peer_did = service_auth::verify_appview_auth(&token, "social.colibri.sync.subscribeHums")
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthRequired"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     // Cap concurrent inbound streams so a community that unexpectedly spans many
     // AppViews can't exhaust a small self-hosted hub. The slot is released when
@@ -219,11 +209,8 @@ pub async fn subscribe_hums(
     let slot = crate::lib::hum_guard::SubscriberSlot::try_acquire(
         crate::lib::hum_guard::max_subscribers(),
     )
-    .ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("TooManySubscribers"),
-            message: String::from("hub is at its subscribeHums connection limit"),
-        }),
+    .ok_or_else(|| {
+        ErrorCode::TooManySubscribers.with("hub is at its subscribeHums connection limit")
     })?;
 
     let declared: HashSet<String> = communities.into_iter().collect();

@@ -4,7 +4,7 @@ use rocket::{State, get};
 
 use crate::lib::embed_cache::EmbedCache;
 use crate::lib::embed_fetch::{EmbedMetadata, FetchError, FetchedResource, extract_metadata};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 use reqwest::Url;
 
@@ -13,25 +13,11 @@ const LXM: &str = "social.colibri.embed.getMetadata";
 const MAX_HTML_BYTES: usize = 1024 * 1024;
 
 fn auth_error(err: service_auth::ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 fn upstream_error(err: FetchError) -> ErrorResponse {
-    let code = match err {
-        FetchError::InvalidUrl(_) | FetchError::Blocked(_) => "InvalidRequest",
-        _ => "UpstreamError",
-    };
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from(code),
-            message: err.to_string(),
-        }),
-    }
+    ErrorResponse::from(err)
 }
 
 /// Core logic, parameterized over the auth + fetch dependencies so it can be
@@ -89,12 +75,7 @@ pub async fn get_metadata(
 ) -> Result<Json<EmbedMetadata>, ErrorResponse> {
     // Guard against obviously bad input before doing any work.
     if Url::parse(uri).is_err() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Malformed URL"),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with("Malformed URL"));
     }
 
     get_metadata_with(
@@ -146,7 +127,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]

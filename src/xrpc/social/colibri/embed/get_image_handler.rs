@@ -3,15 +3,14 @@ use std::net::IpAddr;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use rocket::http::{ContentType, Status};
+use rocket::http::ContentType;
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::response::{Responder, Response};
-use rocket::serde::json::Json;
 use rocket::{get, response};
 
-use crate::lib::embed_fetch::{FetchError, validate_and_fetch};
+use crate::lib::embed_fetch::validate_and_fetch;
 use crate::lib::hum_guard::RateLimiter;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 /// Preview images can be larger than HTML; cap at 8 MiB.
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -101,14 +100,9 @@ impl<'r> Responder<'r, 'static> for GetImageResponse {
     fn respond_to(self, req: &'r Request<'_>) -> response::Result<'static> {
         match self {
             GetImageResponse::Image(b) => b.respond_to(req),
-            GetImageResponse::NotImage => {
-                let body = r#"{"error":"NotAnImage"}"#;
-                Response::build()
-                    .status(Status::UnsupportedMediaType)
-                    .header(ContentType::JSON)
-                    .sized_body(body.len(), Cursor::new(body))
-                    .ok()
-            }
+            GetImageResponse::NotImage => ErrorCode::NotAnImage
+                .with("The linked resource is not an image type we serve.")
+                .respond_to(req),
             GetImageResponse::Upstream(e) => e.respond_to(req),
         }
     }
@@ -117,12 +111,9 @@ impl<'r> Responder<'r, 'static> for GetImageResponse {
 type RateOkFn = dyn Fn(&str) -> bool + Send + Sync;
 
 fn rate_limited() -> GetImageResponse {
-    GetImageResponse::Upstream(ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("RateLimited"),
-            message: String::from("Too many image requests; try again shortly."),
-        }),
-    })
+    GetImageResponse::Upstream(
+        ErrorCode::RateLimited.with("Too many image requests; try again shortly."),
+    )
 }
 
 async fn get_image_inner(url: &str, rate_key: &str, rate_ok_fn: &RateOkFn) -> GetImageResponse {
@@ -132,18 +123,7 @@ async fn get_image_inner(url: &str, rate_key: &str, rate_ok_fn: &RateOkFn) -> Ge
 
     let resource = match validate_and_fetch(url, MAX_IMAGE_BYTES).await {
         Ok(r) => r,
-        Err(err) => {
-            let code = match err {
-                FetchError::InvalidUrl(_) | FetchError::Blocked(_) => "InvalidRequest",
-                _ => "UpstreamError",
-            };
-            return GetImageResponse::Upstream(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from(code),
-                    message: err.to_string(),
-                }),
-            });
-        }
+        Err(err) => return GetImageResponse::Upstream(ErrorResponse::from(err)),
     };
 
     // Only ever stream back a known-safe raster image type — never SVG

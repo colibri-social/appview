@@ -39,7 +39,7 @@ use crate::lib::events::{CommunityCreationProgressData, CommunityCreationProgres
 use crate::lib::moderation::generate_tid;
 use crate::lib::pds_client::{self, CreatedAccount, PdsError, PdsSession, RecordRef};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{self, ErrorBody, ErrorResponse};
+use crate::lib::responses::{self, ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::tap::CommsBridge;
 use crate::lib::time::current_iso8601_utc;
@@ -276,15 +276,10 @@ async fn bootstrap_community(
                 "community.create: rejecting picture for {community_did} (mime={mime}, \
                  account already minted)"
             );
-            return Err(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("InvalidRequest"),
-                    message: format!(
-                        "Unsupported picture mimeType `{mime}`. Accepted: {}.",
-                        ALLOWED_PICTURE_MIME_TYPES.join(", ")
-                    ),
-                }),
-            });
+            return Err(ErrorCode::InvalidRequest.with(format!(
+                "Unsupported picture mimeType `{mime}`. Accepted: {}.",
+                ALLOWED_PICTURE_MIME_TYPES.join(", ")
+            )));
         }
         let byte_len = bytes.len();
         let blob = upload_blob_fn(
@@ -307,12 +302,8 @@ async fn bootstrap_community(
             "community.create: rejecting picture for {community_did}: mimeType missing \
              (account already minted)"
         );
-        Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("`mimeType` is required when a picture body is supplied."),
-            }),
-        })
+        Err(ErrorCode::InvalidRequest
+            .with("`mimeType` is required when a picture body is supplied."))
     };
 
     let picture_blob = match (input.picture_blob.as_deref(), input.picture_mime.as_deref()) {
@@ -701,12 +692,7 @@ where
 }
 
 fn auth_error(err: ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 /// Wraps a PDS failure, promoting the ones that mean the endpoint itself is
@@ -717,21 +703,11 @@ fn pds_error(err: &PdsError, message: String) -> ErrorResponse {
         return responses::pds_unavailable(message);
     }
 
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("UpstreamError"),
-            message,
-        }),
-    }
+    ErrorCode::UpstreamFailure.with(message)
 }
 
 fn internal_error(message: String) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InternalServerError"),
-            message,
-        }),
-    }
+    ErrorCode::InternalError.with(message)
 }
 
 // ---- Boxed production dependencies --------------------------------------
@@ -1543,7 +1519,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]
@@ -1573,7 +1552,7 @@ mod tests {
 
         assert!(result.is_err());
         let body = result.err().unwrap().body.into_inner();
-        assert_eq!(body.error, "UpstreamError");
+        assert_eq!(body.error, "UpstreamFailure");
         assert!(body.message.contains("createAccount"));
     }
 

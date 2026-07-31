@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::lib::list_atproto_records::list_atproto_records;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 #[derive(Serialize, Debug)]
 pub struct ListRecordsResponse {
@@ -33,12 +33,8 @@ async fn list_records_with_db(
     .await;
 
     if result.is_err() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InternalServerError"),
-                message: String::from("An error occurred while attempting to fetch the records."),
-            }),
-        });
+        return Err(ErrorCode::InternalError
+            .with("An error occurred while attempting to fetch the records."));
     }
 
     let paged = result.unwrap();
@@ -141,7 +137,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap().body.into_inner().error,
-            "InternalServerError"
+            "InternalError"
         );
     }
 }

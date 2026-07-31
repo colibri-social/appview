@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::lib::did_document::DidDocument;
 use crate::lib::embed_fetch;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use trust_dns_resolver::TokioAsyncResolver;
 use trust_dns_resolver::config::*;
 
@@ -76,12 +76,7 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
             if text.starts_with("did:") {
                 Ok(text)
             } else {
-                Err(ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("UpstreamError"),
-                        message: String::from("Invalid DID from atproto-did"),
-                    }),
-                })
+                Err(ErrorCode::UpstreamFailure.with("Invalid DID from atproto-did"))
             }
         }
         .boxed()
@@ -92,23 +87,14 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
         async move {
             let response = resolver.txt_lookup(format!("_atproto.{handle}")).await?;
             let record_data = response.iter().next().and_then(|r| r.txt_data().first());
-            let record_bytes = record_data.ok_or_else(|| ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("UpstreamError"),
-                    message: String::from("Unable to read DNS record"),
-                }),
-            })?;
+            let record_bytes = record_data
+                .ok_or_else(|| ErrorCode::UpstreamFailure.with("Unable to read DNS record"))?;
             let did_entry = String::from_utf8_lossy(record_bytes);
             let did = did_entry.replace("did=", "");
             if did.starts_with("did:") {
                 Ok(did)
             } else {
-                Err(ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("UpstreamError"),
-                        message: String::from("Invalid DID from DNS record"),
-                    }),
-                })
+                Err(ErrorCode::UpstreamFailure.with("Invalid DID from DNS record"))
             }
         }
         .boxed()
@@ -120,12 +106,7 @@ pub async fn resolve_handle(handle: &str) -> Result<Json<DidResponse>, ErrorResp
     let did = match select_ok(futures).await {
         Ok((did, _)) => did,
         Err(_) => {
-            return Err(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("UpstreamError"),
-                    message: String::from("Unable to resolve handle"),
-                }),
-            });
+            return Err(ErrorCode::UpstreamFailure.with("Unable to resolve handle"));
         }
     };
 

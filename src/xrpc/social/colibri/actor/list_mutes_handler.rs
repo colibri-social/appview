@@ -6,7 +6,7 @@ use rocket::{State, get};
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect};
 use serde::Serialize;
 
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::models::record_data;
 
@@ -82,12 +82,7 @@ async fn list_mutes_with(
 ) -> Result<Json<ListMutesResponse>, ErrorResponse> {
     let did = verify_auth_fn(auth, String::from("social.colibri.actor.listMutes"))
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     let records = fetch_mutes_fn(db, did).await?;
 
@@ -262,6 +257,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

@@ -3,7 +3,7 @@ use rocket::get;
 use rocket::serde::json::Json;
 
 use crate::lib::klipy::{self, GifPage};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 
 const LXM: &str = "social.colibri.embed.trendingGifs";
@@ -12,12 +12,7 @@ type AuthFut = BoxFuture<'static, Result<String, service_auth::ServiceAuthError>
 type PageFut = BoxFuture<'static, Result<GifPage, ErrorResponse>>;
 
 fn auth_error(err: service_auth::ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 async fn trending_gifs_with<VA, FE>(
@@ -71,6 +66,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

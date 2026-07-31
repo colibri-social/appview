@@ -7,3 +7,15 @@
 # Entries suppress a single lexicon-check failure for one nsid/param pair. The
 # `expires` date is checked on every run: once it passes, the build fails until
 # the entry is resolved or the date is deliberately extended.
+
+# Error-code mismatches use their own table, keyed on the code rather than a
+# param:
+#
+#   [[error_exception]]
+#   nsid = "social.colibri.voice.signal"
+#   code = "NotFound"
+#   reason = "Emitted only on the pre-join channel lookup; lexicon lands in #456."
+#   expires = "2026-09-01"
+#
+# Codes are resolved per source file, so a file serving several routes reports
+# its codes for all of them. Use an entry here when that over-reports.

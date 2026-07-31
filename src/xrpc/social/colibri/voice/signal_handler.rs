@@ -6,7 +6,7 @@ use mediasoup::prelude::*;
 use rocket::tokio::sync::broadcast::Sender;
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::tokio::sync::{Notify, mpsc};
-use rocket::{State, get, serde::json::Json, tokio};
+use rocket::{State, get, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
 
@@ -15,7 +15,7 @@ use crate::lib::colibri::ColibriChannel;
 use crate::lib::event_scope::SharedScopedEvent;
 use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::state::{join_vc, leave_vc};
 use crate::lib::tap::CommsBridge;
 use crate::lib::voice_events::broadcast_voice_presence;
@@ -88,12 +88,9 @@ async fn authorize_channel_access(
 
     let community_uri = format!("at://{}/social.colibri.community/self", parsed.authority);
     match community_authz::load_actor_authz(db, &community_uri, did).await {
-        Ok(authz) if !channel_authz::can_post(&channel, &authz, did) => Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("Forbidden"),
-                message: String::from("You are not permitted to join this voice channel."),
-            }),
-        }),
+        Ok(authz) if !channel_authz::can_post(&channel, &authz, did) => {
+            Err(ErrorCode::Forbidden.with("You are not permitted to join this voice channel."))
+        }
         Ok(_) => Ok(()),
         Err(e) => {
             log::warn!("voice authz lookup failed for {did}: {e}; allowing");
@@ -550,12 +547,7 @@ pub async fn signal(
 
     let did = service_auth::verify_service_auth(&token, LXM)
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     authorize_channel_access(db.inner(), &channel, &did).await?;
 
@@ -567,33 +559,16 @@ pub async fn signal(
     let channel_sfu = sfu
         .get_or_create_channel(&channel)
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("SfuError"),
-                message: e,
-            }),
-        })?;
+        .map_err(|e| ErrorCode::SfuError.with(e))?;
 
-    let producer_transport =
-        channel_sfu
-            .create_webrtc_transport()
-            .await
-            .map_err(|e| ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("SfuError"),
-                    message: e,
-                }),
-            })?;
-    let consumer_transport =
-        channel_sfu
-            .create_webrtc_transport()
-            .await
-            .map_err(|e| ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("SfuError"),
-                    message: e,
-                }),
-            })?;
+    let producer_transport = channel_sfu
+        .create_webrtc_transport()
+        .await
+        .map_err(|e| ErrorCode::SfuError.with(e))?;
+    let consumer_transport = channel_sfu
+        .create_webrtc_transport()
+        .await
+        .map_err(|e| ErrorCode::SfuError.with(e))?;
 
     log::info!("User connected to {LXM}: {did} in {channel}");
 

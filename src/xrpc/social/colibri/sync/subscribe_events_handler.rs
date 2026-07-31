@@ -18,7 +18,7 @@ use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorize
 use crate::{
     lib::{
         events::{ColibriClientEvent, ColibriServerEvent},
-        responses::{ErrorBody, ErrorResponse},
+        responses::{ErrorCode, ErrorResponse},
         service_auth,
         tap::register_dids,
     },
@@ -31,7 +31,7 @@ use rocket::response::{self, Responder, Response};
 use rocket::tokio::sync::broadcast::error::RecvError;
 use rocket::tokio::sync::broadcast::{Receiver, Sender};
 use rocket::tokio::sync::mpsc;
-use rocket::{Request, State, get, serde::json::Json, tokio};
+use rocket::{Request, State, get, tokio};
 use rocket_ws::{Message as WsMessage, WebSocket, stream::DuplexStream};
 use sea_orm::DatabaseConnection;
 use std::collections::HashSet;
@@ -658,12 +658,7 @@ pub async fn subscribe_events(
 
     let did = service_auth::verify_service_auth(&token, "social.colibri.sync.subscribeEvents")
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     log::info!("User connected to social.colibri.sync.subscribeEvents: {did}");
 

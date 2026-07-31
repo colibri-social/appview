@@ -21,7 +21,7 @@ use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::time::current_iso8601_utc;
 use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::community_invitations::{
@@ -270,20 +270,14 @@ async fn get_invitation_with(
     fetch_fn: &FetchByCodeFn,
     fetch_community_fn: &FetchInvitationCommunityFn,
 ) -> Result<Json<InvitationResolvedView>, ErrorResponse> {
-    let row = fetch_fn(code.clone()).await?.ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("NotFound"),
-            message: format!("Invitation '{code}' not found."),
-        }),
-    })?;
+    let row = fetch_fn(code.clone())
+        .await?
+        .ok_or_else(|| ErrorCode::NotFound.with(format!("Invitation '{code}' not found.")))?;
 
     let community = fetch_community_fn(row.community_uri.clone())
         .await?
-        .ok_or_else(|| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("NotFound"),
-                message: format!("Community for invitation '{code}' not found."),
-            }),
+        .ok_or_else(|| {
+            ErrorCode::NotFound.with(format!("Community for invitation '{code}' not found."))
         })?;
 
     Ok(Json(InvitationResolvedView {
@@ -497,25 +491,13 @@ async fn delete_invitation_with(
         verify_auth_fn,
         load_authz_fn,
         |ctx, db| async move {
-            let invitation =
-                fetch_fn(db.clone(), code.clone())
-                    .await?
-                    .ok_or_else(|| ErrorResponse {
-                        body: Json(ErrorBody {
-                            error: String::from("NotFound"),
-                            message: format!("Invitation '{code}' not found."),
-                        }),
-                    })?;
+            let invitation = fetch_fn(db.clone(), code.clone()).await?.ok_or_else(|| {
+                ErrorCode::NotFound.with(format!("Invitation '{code}' not found."))
+            })?;
 
             if invitation.community_uri != ctx.community_uri {
-                return Err(ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("InvalidRequest"),
-                        message: String::from(
-                            "Invitation does not belong to the specified community.",
-                        ),
-                    }),
-                });
+                return Err(ErrorCode::InvalidRequest
+                    .with("Invitation does not belong to the specified community."));
             }
 
             deactivate_fn(db, code.clone()).await?;

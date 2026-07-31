@@ -18,8 +18,7 @@ use crate::lib::image_variant::{self, Variant};
 use crate::lib::pds_client;
 use crate::lib::range::{RangeResult, parse_range};
 use crate::lib::repo_endpoint::{self, RepoEndpoint};
-use crate::lib::responses::{self, ErrorBody, ErrorResponse};
-use rocket::serde::json::Json;
+use crate::lib::responses::{self, ErrorCode, ErrorResponse};
 
 /// Blobs are content-addressed (immutable), so they can be cached aggressively.
 const CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
@@ -261,12 +260,9 @@ async fn fetch_upstream(
             )));
         }
         Err(e) => {
-            return Err(GetBlobResponse::Upstream(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("UpstreamError"),
-                    message: format!("Failed to resolve DID: {e}"),
-                }),
-            }));
+            return Err(GetBlobResponse::Upstream(
+                ErrorCode::UpstreamFailure.with(format!("Failed to resolve DID: {e}")),
+            ));
         }
     };
 
@@ -312,12 +308,9 @@ async fn fetch_upstream(
                 message,
             )));
         }
-        return Err(GetBlobResponse::Upstream(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("UpstreamError"),
-                message,
-            }),
-        }));
+        return Err(GetBlobResponse::Upstream(
+            ErrorCode::UpstreamFailure.with(message),
+        ));
     }
 
     let content_type = resp
@@ -330,12 +323,9 @@ async fn fetch_upstream(
     let bytes = match read_capped(resp, MAX_BLOB_BYTES).await {
         Ok(b) => b,
         Err(e) => {
-            return Err(GetBlobResponse::Upstream(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("UpstreamError"),
-                    message: format!("Failed to read blob bytes: {e}"),
-                }),
-            }));
+            return Err(GetBlobResponse::Upstream(
+                ErrorCode::UpstreamFailure.with(format!("Failed to read blob bytes: {e}")),
+            ));
         }
     };
 

@@ -13,7 +13,7 @@ use crate::lib::handler::{
 };
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
@@ -22,12 +22,7 @@ const CHANNEL_NSID: &str = "social.colibri.channel";
 const ROLE_NSID: &str = "social.colibri.role";
 
 fn forbidden_message(message: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("Forbidden"),
-            message: message.into(),
-        }),
-    }
+    ErrorCode::Forbidden.with(message.into())
 }
 
 #[derive(Serialize, Debug)]

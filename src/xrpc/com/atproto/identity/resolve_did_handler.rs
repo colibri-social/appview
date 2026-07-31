@@ -8,7 +8,7 @@ use rocket::{get, serde::json::Json};
 use crate::lib::embed_fetch;
 use crate::lib::{
     did_document::DidDocument,
-    responses::{ErrorBody, ErrorResponse},
+    responses::{ErrorCode, ErrorResponse},
 };
 
 /// How long a resolved DID document stays fresh in the cache. DID documents
@@ -61,12 +61,7 @@ fn did_lock(did: &str) -> Arc<AsyncMutex<()>> {
 /// short-TTL process-wide cache (see [`DID_CACHE_TTL`]).
 pub async fn resolve_did(did: &str) -> Result<Json<DidDocument>, ErrorResponse> {
     if !did.starts_with("did:") {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Invalid DID given."),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with("Invalid DID given."));
     }
 
     if let Some(doc) = did_cache_get(did) {

@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriCommunity, community_hub_did};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::record_data;
 
@@ -115,29 +115,17 @@ async fn get_data_with(
     moderation: ModerationLookup,
     fetch_data_fn: FetchDataFn,
 ) -> Result<Json<CommunityDataResponse>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
+    let community = AtUri::parse(&community_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid community AT-URI."))?;
 
     let raw = fetch_data_fn(db.clone(), community_uri, moderation).await?;
 
-    let community_record = raw.community_record.ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("NotFound"),
-            message: String::from("Community not found."),
-        }),
-    })?;
+    let community_record = raw
+        .community_record
+        .ok_or_else(|| ErrorCode::NotFound.with("Community not found."))?;
 
     let stored_community = serde_json::from_value::<ColibriCommunity>(community_record.data)
-        .map_err(|_| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InternalError"),
-                message: String::from("Failed to parse community record."),
-            }),
-        })?;
+        .map_err(|_| ErrorCode::InternalError.with("Failed to parse community record."))?;
 
     let appview = community_hub_did(&stored_community);
 

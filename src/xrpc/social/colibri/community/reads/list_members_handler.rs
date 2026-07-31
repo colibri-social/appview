@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::{record_data, repos, user_states};
 use crate::xrpc::social::colibri::actor::get_data_handler::{
@@ -295,12 +295,8 @@ async fn list_members_with(
     moderation: ModerationLookup,
     fetch_aggregate_fn: FetchAggregateFn,
 ) -> Result<Json<MemberList>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
+    let community = AtUri::parse(&community_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid community AT-URI."))?;
 
     let mut aggregate = fetch_aggregate_fn(db, community_uri, moderation).await?;
     let members = build_members(&mut aggregate, &community.authority);

@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::lib::get_atproto_record::get_atproto_record;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 #[derive(Serialize, Debug)]
 pub struct GetRecordResponse {
@@ -28,12 +28,7 @@ async fn get_record_with_db(
     .await;
 
     if record.is_err() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("NotFound"),
-                message: String::from("Unable to find record in AppView cache."),
-            }),
-        });
+        return Err(ErrorCode::NotFound.with("Unable to find record in AppView cache."));
     }
 
     let safe_record = record.unwrap();

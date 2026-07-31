@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::lib::at_uri::AtUri;
 use crate::lib::moderation::{currently_banned_dids, is_user_banned};
 use crate::lib::reactions::{ReactionSummary, list_reactions_for_message};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
 const MESSAGE_NSID: &str = "social.colibri.message";
@@ -34,12 +34,8 @@ async fn list_reactions_with(
     db: DatabaseConnection,
     assemble_fn: &AssembleReactionsFn,
 ) -> Result<Json<ReactionList>, ErrorResponse> {
-    let parsed = AtUri::parse(&message_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid message AT-URI."),
-        }),
-    })?;
+    let parsed = AtUri::parse(&message_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid message AT-URI."))?;
 
     let reactions = assemble_fn(db, parsed).await?;
     Ok(Json(ReactionList { reactions }))
@@ -190,7 +186,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propagates_db_error_as_upstream_error() {
+    async fn propagates_db_error_as_internal_error() {
         let db = mock_db();
         let result = list_reactions_with(
             String::from("at://did:plc:author/social.colibri.message/msg-1"),
@@ -202,7 +198,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.err().unwrap().body.into_inner().error,
-            "UpstreamError"
+            "InternalError"
         );
     }
 

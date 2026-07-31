@@ -43,7 +43,7 @@ use crate::lib::crypto;
 use crate::lib::moderation::generate_tid;
 use crate::lib::pds_client::{self, PdsError, RecordRef};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
@@ -651,30 +651,22 @@ async fn cache_record<T: Serialize>(
 // ---- Error helpers ------------------------------------------------------
 
 fn auth_error(err: ServiceAuthError) -> ErrorResponse {
-    error_response("AuthError", err.to_string())
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 fn pds_error(message: String) -> ErrorResponse {
-    error_response("UpstreamError", message)
+    ErrorCode::UpstreamFailure.with(message)
 }
 fn internal_error(message: String) -> ErrorResponse {
-    error_response("InternalServerError", message)
+    ErrorCode::InternalError.with(message)
 }
 fn invalid_request(message: String) -> ErrorResponse {
-    error_response("InvalidRequest", message)
+    ErrorCode::InvalidRequest.with(message)
 }
 fn forbidden(message: String) -> ErrorResponse {
-    error_response("Forbidden", message)
+    ErrorCode::Forbidden.with(message)
 }
 fn not_found(message: String) -> ErrorResponse {
-    error_response("NotFound", message)
-}
-fn error_response(error: &str, message: String) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from(error),
-            message,
-        }),
-    }
+    ErrorCode::NotFound.with(message)
 }
 
 // ---- Production dependency implementations ------------------------------

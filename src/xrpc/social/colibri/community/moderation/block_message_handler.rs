@@ -10,7 +10,7 @@ use crate::lib::handler::{
 };
 use crate::lib::moderation::{self, ACTION_HIDE_MESSAGE, WriteRecordFn, write_moderation_boxed};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
 const MESSAGE_NSID: &str = "social.colibri.message";
@@ -54,12 +54,7 @@ async fn block_message_with(
     write_record_fn: &WriteRecordFn,
 ) -> Result<Json<BlockMessageResponse>, ErrorResponse> {
     let Some(message) = AtUri::parse(&message_uri) else {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Invalid message AT-URI."),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with("Invalid message AT-URI."));
     };
     let channel_rkey = message_channel_rkey(&db, &message).await?;
 

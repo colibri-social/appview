@@ -20,7 +20,7 @@ use crate::lib::handler::{
 use crate::lib::moderation::community_moderation_state;
 use crate::lib::permissions::Permission;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::{record_data, repos, user_states};
 use crate::xrpc::social::colibri::actor::get_data_handler::{
     ActorData, ActorStatus, actor_data_from_effective,
@@ -581,12 +581,8 @@ async fn list_messages_with(
     load_authz_fn: &LoadAuthzFn,
     assemble_fn: &AssemblePageFn,
 ) -> Result<Json<MessageList>, ErrorResponse> {
-    let channel = AtUri::parse(&channel_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid channel AT-URI."),
-        }),
-    })?;
+    let channel = AtUri::parse(&channel_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid channel AT-URI."))?;
 
     // Ordinary messages are public AT-Proto records, so this endpoint stays unauthenticated by default.
     // Moderator-hidden messages are an AppView-only overlay, so `all=true`
@@ -692,12 +688,8 @@ pub async fn build_message_list(
     cursor: Option<&str>,
     include_hidden: bool,
 ) -> Result<MessageList, ErrorResponse> {
-    let channel = AtUri::parse(channel_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid channel AT-URI."),
-        }),
-    })?;
+    let channel = AtUri::parse(channel_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid channel AT-URI."))?;
     let effective_limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let page = assemble_message_page(db, &channel, effective_limit, cursor, include_hidden).await?;
     Ok(message_list_from_page(page, channel_uri, effective_limit))
@@ -1086,7 +1078,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]

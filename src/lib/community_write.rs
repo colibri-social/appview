@@ -22,10 +22,9 @@ use crate::lib::community_session_cache;
 use crate::lib::credential_recovery;
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError};
-use crate::lib::responses::{self, ErrorBody, ErrorResponse};
+use crate::lib::responses::{self, ErrorCode, ErrorResponse};
 use crate::lib::time::current_iso8601_utc;
 use crate::models::record_data;
-use rocket::serde::json::Json;
 
 // ---- Error helpers ---------------------------------------------------------
 
@@ -47,21 +46,11 @@ pub fn pds_err_to_db(e: PdsError) -> DbErr {
 }
 
 pub fn not_found_error(message: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("NotFound"),
-            message: message.into(),
-        }),
-    }
+    ErrorCode::NotFound.with(message.into())
 }
 
 pub fn invalid_request(message: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: message.into(),
-        }),
-    }
+    ErrorCode::InvalidRequest.with(message.into())
 }
 
 // ---- Session helper --------------------------------------------------------

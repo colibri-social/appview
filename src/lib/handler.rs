@@ -20,13 +20,12 @@
 use std::future::Future;
 
 use futures::future::BoxFuture;
-use rocket::serde::json::Json;
 use sea_orm::{DatabaseConnection, DbErr};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::community_authz::{self, ActorAuthz};
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 
 // ---- Reusable dependency types ------------------------------------------
@@ -55,30 +54,15 @@ pub fn load_authz_boxed(
 // ---- Error-response constructors ----------------------------------------
 
 pub fn auth_error(err: ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 pub fn invalid_community_uri() -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    }
+    ErrorCode::InvalidRequest.with("Invalid community AT-URI.")
 }
 
 pub fn forbidden(permission: Permission) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("Forbidden"),
-            message: format!("Missing permission: {permission}"),
-        }),
-    }
+    ErrorCode::Forbidden.with(format!("Missing permission: {permission}"))
 }
 
 // ---- Caller context -----------------------------------------------------
@@ -104,7 +88,7 @@ pub struct CallerContext {
 /// Runs the prelude every community-scoped endpoint shares:
 ///
 /// 1. Parse `community_uri` to an [`AtUri`] (→ `InvalidRequest` on failure).
-/// 2. Verify `auth` for `lxm` to a caller DID (→ `AuthError`).
+/// 2. Verify `auth` for `lxm` to a caller DID (→ `AuthRequired`).
 /// 3. Load the caller's [`ActorAuthz`] for the community.
 /// 4. If `permission` is `Some`, refuse with `Forbidden` unless the caller
 ///    holds it (no channel scope — use [`with_community_authz_scoped`] for
@@ -288,7 +272,10 @@ mod tests {
             |_, _| async { panic!("should not run body") },
         )
         .await;
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]

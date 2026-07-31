@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::lib::embed_fetch;
 use crate::lib::handler::{VerifyAuthFn, verify_auth_boxed, with_authenticated};
 use crate::lib::push_subscriptions;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 /// Web Push subscription keys, as produced by the browser `PushSubscription`.
 #[derive(Deserialize, Clone, Debug)]
@@ -83,19 +83,13 @@ async fn register_push_with(
                 PushSubscriptionInput::Web { endpoint, .. } => {
                     embed_fetch::assert_url_allowed(endpoint)
                         .await
-                        .map_err(|e| ErrorResponse {
-                            body: Json(ErrorBody {
-                                error: String::from("InvalidRequest"),
-                                message: format!("Invalid push endpoint: {e}"),
-                            }),
+                        .map_err(|e| {
+                            ErrorCode::InvalidRequest.with(format!("Invalid push endpoint: {e}"))
                         })?;
                 }
                 PushSubscriptionInput::Fcm { token } => {
-                    validate_fcm_token(token).map_err(|e| ErrorResponse {
-                        body: Json(ErrorBody {
-                            error: String::from("InvalidRequest"),
-                            message: format!("Invalid FCM token: {e}"),
-                        }),
+                    validate_fcm_token(token).map_err(|e| {
+                        ErrorCode::InvalidRequest.with(format!("Invalid FCM token: {e}"))
                     })?;
                 }
             }
@@ -329,6 +323,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

@@ -3,7 +3,7 @@ use rocket::get;
 use rocket::serde::json::Json;
 
 use crate::lib::did_document::DidDocument;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::xrpc::com::atproto::identity::resolve_handle_handler::DidResponse;
 use crate::xrpc::com::atproto::identity::{resolve_did, resolve_handle};
 
@@ -23,12 +23,7 @@ async fn resolve_identity_with(
         let did_res = resolve_handle_fn(identity).await;
 
         if did_res.is_err() {
-            return Err(ErrorResponse {
-                body: Json(ErrorBody {
-                    error: String::from("UpstreamError"),
-                    message: String::from("Unable to resolve handle"),
-                }),
-            });
+            return Err(ErrorCode::UpstreamFailure.with("Unable to resolve handle"));
         }
 
         let did = did_res.unwrap();
@@ -110,16 +105,7 @@ mod tests {
         let result = resolve_identity_with(
             String::from("alice.test"),
             &|_| Box::pin(async { panic!("should not resolve did") }),
-            &|_| {
-                Box::pin(async {
-                    Err(ErrorResponse {
-                        body: Json(ErrorBody {
-                            error: String::from("UpstreamError"),
-                            message: String::from("boom"),
-                        }),
-                    })
-                })
-            },
+            &|_| Box::pin(async { Err(ErrorCode::UpstreamFailure.with("boom")) }),
         )
         .await;
 

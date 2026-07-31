@@ -9,7 +9,7 @@ use crate::lib::channel_unread::{self, ChannelUnreadStatus};
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 #[derive(Serialize, Debug)]
 pub struct ListUnreadStatusResponse {
@@ -25,12 +25,7 @@ type ComputeFn = dyn Fn(
     + Sync;
 
 fn not_a_member() -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("Forbidden"),
-            message: String::from("caller is not a member of this community"),
-        }),
-    }
+    ErrorCode::Forbidden.with("caller is not a member of this community")
 }
 
 async fn list_unread_status_with(
@@ -172,7 +167,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]

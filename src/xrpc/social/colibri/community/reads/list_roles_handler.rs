@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriRole;
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -96,12 +96,8 @@ async fn list_roles_with(
     db: DatabaseConnection,
     fetch_roles_fn: &FetchRolesFn,
 ) -> Result<Json<RoleList>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
+    let community = AtUri::parse(&community_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid community AT-URI."))?;
 
     let records = fetch_roles_fn(db.clone(), community.authority.clone()).await?;
     crate::lib::owner_role_heal::spawn_heal(&db, &community.authority, &records);

@@ -6,7 +6,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -58,12 +58,8 @@ async fn list_categories_with(
     db: DatabaseConnection,
     fetch_categories_fn: &FetchCategoriesFn,
 ) -> Result<Json<CategoryList>, ErrorResponse> {
-    let community = AtUri::parse(&community_uri).ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: String::from("Invalid community AT-URI."),
-        }),
-    })?;
+    let community = AtUri::parse(&community_uri)
+        .ok_or_else(|| ErrorCode::InvalidRequest.with("Invalid community AT-URI."))?;
 
     let records =
         fetch_categories_fn(db, community.authority.clone(), community.rkey.clone()).await?;

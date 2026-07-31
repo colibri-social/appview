@@ -3,7 +3,7 @@ use rocket::get;
 use rocket::serde::json::Json;
 
 use crate::lib::klipy::{self, GifPage};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 
 const LXM: &str = "social.colibri.embed.searchGifs";
@@ -12,12 +12,7 @@ type AuthFut = BoxFuture<'static, Result<String, service_auth::ServiceAuthError>
 type PageFut = BoxFuture<'static, Result<GifPage, ErrorResponse>>;
 
 fn auth_error(err: service_auth::ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 async fn search_gifs_with<VA, FE>(
@@ -52,12 +47,7 @@ pub async fn search_gifs(
     auth: &str,
 ) -> Result<Json<GifPage>, ErrorResponse> {
     if q.trim().is_empty() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Missing search query"),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with("Missing search query"));
     }
 
     search_gifs_with(
@@ -87,7 +77,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@ pub mod author_cache;
 pub mod backfill_status;
 pub mod blob_cache;
 pub mod bsky;
+pub mod catchers;
 pub mod channel_authz;
 pub mod channel_unread;
 pub mod colibri;

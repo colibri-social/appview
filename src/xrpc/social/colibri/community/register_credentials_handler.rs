@@ -23,7 +23,7 @@ use crate::lib::community_credentials::{self, SOURCE_BYO};
 use crate::lib::community_write;
 use crate::lib::crypto;
 use crate::lib::pds_client::{self, PdsError, PdsSession};
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
@@ -71,15 +71,10 @@ async fn register_with(
         .map_err(|e| upstream_error(format!("createSession failed: {e}")))?;
 
     if session.did != community_did {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: format!(
-                    "credentials authenticate as {} but registration claimed {}",
-                    session.did, community_did
-                ),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with(format!(
+            "credentials authenticate as {} but registration claimed {}",
+            session.did, community_did
+        )));
     }
 
     upsert_fn(community_did.clone(), pds_endpoint, identifier, password)
@@ -93,30 +88,15 @@ async fn register_with(
 }
 
 fn auth_error(err: ServiceAuthError) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: err.to_string(),
-        }),
-    }
+    ErrorCode::AuthRequired.with(err.to_string())
 }
 
 fn upstream_error(message: String) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("UpstreamError"),
-            message,
-        }),
-    }
+    ErrorCode::UpstreamFailure.with(message)
 }
 
 fn internal_error(message: String) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InternalServerError"),
-            message,
-        }),
-    }
+    ErrorCode::InternalError.with(message)
 }
 
 fn verify_auth_boxed(
@@ -335,7 +315,7 @@ mod tests {
 
         assert!(result.is_err());
         let body = result.err().unwrap().body.into_inner();
-        assert_eq!(body.error, "UpstreamError");
+        assert_eq!(body.error, "UpstreamFailure");
         assert!(body.message.contains("createSession"));
     }
 
@@ -354,6 +334,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

@@ -1,6 +1,6 @@
-use rocket::{data::ByteUnit, fs::TempFile, serde::json::Json, tokio::io::AsyncReadExt};
+use rocket::{data::ByteUnit, fs::TempFile, tokio::io::AsyncReadExt};
 
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 pub async fn unpack_image_file(
     f: &Option<TempFile<'_>>,
@@ -11,12 +11,9 @@ pub async fn unpack_image_file(
     };
 
     if f.len() > max_size {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: format!("picture exceeds the maximum allowed size of {max_size}"),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with(format!(
+            "picture exceeds the maximum allowed size of {max_size}"
+        )));
     }
 
     let Ok(mut buf) = f.open().await else {

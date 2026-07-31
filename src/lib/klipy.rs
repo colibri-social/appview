@@ -1,11 +1,10 @@
 use std::time::Duration;
 
 use reqwest::Client;
-use rocket::serde::json::Json;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 const KLIPY_BASE: &str = "https://api.klipy.com/api/v1";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(6);
@@ -45,12 +44,7 @@ pub struct GifCategory {
 }
 
 fn upstream(msg: impl Into<String>) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: "UpstreamError".into(),
-            message: msg.into(),
-        }),
-    }
+    ErrorCode::UpstreamFailure.with(msg.into())
 }
 
 fn api_key() -> Result<String, ErrorResponse> {

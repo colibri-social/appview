@@ -11,7 +11,7 @@ use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
 };
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 use crate::xrpc::social::colibri::community::reads::list_roles_handler::fetch_role_records;
 
@@ -96,14 +96,8 @@ async fn set_member_roles_with(
                 highest_position_among(&db, community_did, &newly_granted_rkeys).await?
                 && !ctx.authz.outranks_position(max_position)
             {
-                return Err(ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("Forbidden"),
-                        message: String::from(
-                            "Cannot assign a role at or above your own position.",
-                        ),
-                    }),
-                });
+                return Err(ErrorCode::Forbidden
+                    .with("Cannot assign a role at or above your own position."));
             }
 
             let new_roles = member.roles.clone();

@@ -32,7 +32,7 @@ use crate::lib::handler::{
 };
 use crate::lib::moderation;
 use crate::lib::permissions::Permission;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::tap::CommsBridge;
 use crate::models::record_data;
 
@@ -146,12 +146,7 @@ pub fn clear_dismissal_boxed(
 }
 
 fn invalid_request(message: &str) -> ErrorResponse {
-    ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("InvalidRequest"),
-            message: message.to_string(),
-        }),
-    }
+    ErrorCode::InvalidRequest.with(message.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,14 +192,8 @@ async fn approve_membership_with(
             )
             .await?
             {
-                return Err(ErrorResponse {
-                    body: Json(ErrorBody {
-                        error: String::from("Forbidden"),
-                        message: String::from(
-                            "Cannot approve membership for a banned user; unban first.",
-                        ),
-                    }),
-                });
+                return Err(ErrorCode::Forbidden
+                    .with("Cannot approve membership for a banned user; unban first."));
             }
 
             let written = write_member_fn(

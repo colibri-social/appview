@@ -8,7 +8,7 @@ use sea_orm::{
 use serde::Serialize;
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 use crate::models::record_data;
 
@@ -60,39 +60,20 @@ async fn get_read_cursor_with(
     fetch_cursor_fn: &FetchCursorFn,
 ) -> Result<Json<ReadCursor>, ErrorResponse> {
     if AtUri::parse(&channel_uri).is_none() {
-        return Err(ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InvalidRequest"),
-                message: String::from("Invalid channel AT-URI."),
-            }),
-        });
+        return Err(ErrorCode::InvalidRequest.with("Invalid channel AT-URI."));
     }
 
     let did = verify_auth_fn(auth, String::from("social.colibri.channel.getReadCursor"))
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     let maybe_record = fetch_cursor_fn(db, did, channel_uri.clone()).await?;
 
-    let record = maybe_record.ok_or_else(|| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("NotFound"),
-            message: String::from("No read cursor exists for this channel."),
-        }),
-    })?;
+    let record = maybe_record
+        .ok_or_else(|| ErrorCode::NotFound.with("No read cursor exists for this channel."))?;
 
-    let stored: StoredCursor =
-        serde_json::from_value(record.data.clone()).map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("InternalServerError"),
-                message: e.to_string(),
-            }),
-        })?;
+    let stored: StoredCursor = serde_json::from_value(record.data.clone())
+        .map_err(|e| ErrorCode::InternalError.with(e.to_string()))?;
 
     Ok(Json(ReadCursor {
         uri: format!("at://{}/{}/{}", record.did, record.nsid, record.rkey),
@@ -216,7 +197,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use sea_orm::{DatabaseConnection, DbErr};
 use serde::Serialize;
 
 use crate::lib::notification_preferences::level_for;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth::{self, ServiceAuthError};
 
 #[derive(Serialize, Debug)]
@@ -29,12 +29,7 @@ async fn get_notification_preference_with(
         String::from("social.colibri.actor.getNotificationPreference"),
     )
     .await
-    .map_err(|e| ErrorResponse {
-        body: Json(ErrorBody {
-            error: String::from("AuthError"),
-            message: e.to_string(),
-        }),
-    })?;
+    .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     let level = level_for_fn(db, did).await?;
 
@@ -120,6 +115,9 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 }

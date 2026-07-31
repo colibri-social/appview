@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::lib::colibri::{ColibriActorData, ColibriMember};
 use crate::lib::get_atproto_record::get_atproto_record;
-use crate::lib::responses::{ErrorBody, ErrorResponse};
+use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
 use crate::models::record_data;
 
@@ -291,12 +291,7 @@ async fn list_communities_with(
 ) -> Result<Json<CommunityList>, ErrorResponse> {
     let did = verify_auth_fn(auth, String::from("social.colibri.actor.listCommunities"))
         .await
-        .map_err(|e| ErrorResponse {
-            body: Json(ErrorBody {
-                error: String::from("AuthError"),
-                message: e.to_string(),
-            }),
-        })?;
+        .map_err(|e| ErrorCode::AuthRequired.with(e.to_string()))?;
 
     let order = get_order_fn(db.clone(), did.clone()).await?;
     let community_models = get_communities_fn(db, did).await?;
@@ -450,7 +445,10 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert_eq!(result.err().unwrap().body.into_inner().error, "AuthError");
+        assert_eq!(
+            result.err().unwrap().body.into_inner().error,
+            "AuthRequired"
+        );
     }
 
     fn community(did: &str, name: &str) -> Community {
