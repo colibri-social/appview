@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/colibri-social/appview/compare/v0.2.2...v0.2.3) - 2026-08-01
+
+### Added
+
+- Proper error reporting with error codes
+
+### Fixed
+
+- widen auth scope for read markers
+- Only disconnect user from VC when joining VC from other device
+
 ## [0.2.2](https://github.com/colibri-social/appview/compare/v0.2.1...v0.2.2) - 2026-07-29
 
 ### Added
