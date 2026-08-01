@@ -6,6 +6,7 @@ use crate::lib::permissions::Permission;
 use crate::models::record_data;
 
 const MEMBER_NSID: &str = "social.colibri.member";
+const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 const ROLE_NSID: &str = "social.colibri.role";
 
 /// Aggregated authz state for a single (actor, community) pair.
@@ -110,6 +111,43 @@ impl ActorAuthz {
     }
 }
 
+async fn legacy_membership_member(
+    db: &DatabaseConnection,
+    community_uri: &str,
+    actor_did: &str,
+) -> Result<Option<ColibriMember>, DbErr> {
+    let record = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(actor_did))
+        .filter(record_data::Column::Nsid.eq(MEMBERSHIP_NSID))
+        .filter(sea_orm::prelude::Expr::cust_with_values(
+            r#""record_data"."data"->>'community' = $1"#,
+            vec![sea_orm::Value::from(community_uri.to_string())],
+        ))
+        .one(db)
+        .await?;
+
+    Ok(record.map(|record| {
+        let joined_at = record
+            .data
+            .get("createdAt")
+            .and_then(|value| value.as_str())
+            .unwrap_or(record.indexed_at.as_str())
+            .to_string();
+
+        ColibriMember {
+            record_type: None,
+            subject: actor_did.to_string(),
+            roles: Vec::new(),
+            joined_at,
+            nickname: None,
+            from_membership: Some(format!(
+                "at://{}/{MEMBERSHIP_NSID}/{}",
+                record.did, record.rkey
+            )),
+        }
+    }))
+}
+
 /// Loads the authz state for `actor_did` in the community identified by
 /// `community_uri`. Returns the assembled state, doing per-table queries.
 pub async fn load_actor_authz(
@@ -132,7 +170,30 @@ pub async fn load_actor_authz(
         .one(db)
         .await?;
 
-    let member = member_record.and_then(|m| serde_json::from_value::<ColibriMember>(m.data).ok());
+    let member = match member_record {
+        Some(record) => {
+            let rkey = record.rkey.clone();
+            match serde_json::from_value::<ColibriMember>(record.data) {
+                Ok(member) => Some(member),
+                Err(e) => {
+                    log::warn!(
+                        "member record {}/{MEMBER_NSID}/{rkey} for {actor_did} is unusable: {e}",
+                        community.authority
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
+    let member = match member {
+        Some(member) => Some(member),
+        None if community.rkey != "self" => {
+            legacy_membership_member(db, community_uri, actor_did).await?
+        }
+        None => None,
+    };
 
     let role_rkeys: Vec<String> = member.as_ref().map(|m| m.roles.clone()).unwrap_or_default();
 
@@ -171,6 +232,91 @@ pub async fn load_actor_authz(
 mod tests {
     use super::*;
     use crate::lib::test_fixtures::{member, role, role_with_override};
+    use rocket::tokio;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+
+    const LEGACY_COMMUNITY_URI: &str = "at://did:plc:host/social.colibri.community/c1";
+
+    fn membership_record() -> record_data::Model {
+        record_data::Model {
+            id: 0,
+            did: String::from("did:plc:joiner"),
+            nsid: MEMBERSHIP_NSID.to_string(),
+            rkey: String::from("m1"),
+            data: serde_json::json!({
+                "$type": MEMBERSHIP_NSID,
+                "community": LEGACY_COMMUNITY_URI,
+                "createdAt": "2026-05-13T00:00:00.000Z",
+            }),
+            indexed_at: String::from("2026-05-14T00:00:00.000Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_membership_stands_in_for_a_missing_member_record() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([vec![membership_record()]])
+            .into_connection();
+
+        let authz = load_actor_authz(&db, LEGACY_COMMUNITY_URI, "did:plc:joiner")
+            .await
+            .unwrap();
+
+        let member = authz.member.expect("legacy membership should stand in");
+        assert!(!authz.is_owner);
+        assert_eq!(member.subject, "did:plc:joiner");
+        assert_eq!(member.joined_at, "2026-05-13T00:00:00.000Z");
+        assert_eq!(
+            member.from_membership.as_deref(),
+            Some("at://did:plc:joiner/social.colibri.membership/m1")
+        );
+        assert!(member.roles.is_empty());
+        assert!(authz.roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_community_ignores_the_membership_fallback() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([vec![membership_record()]])
+            .into_connection();
+
+        let authz = load_actor_authz(
+            &db,
+            "at://did:plc:host/social.colibri.community/self",
+            "did:plc:joiner",
+        )
+        .await
+        .unwrap();
+
+        assert!(authz.member.is_none());
+    }
+
+    #[tokio::test]
+    async fn unparsable_member_record_falls_back_to_membership() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![record_data::Model {
+                id: 0,
+                did: String::from("did:plc:host"),
+                nsid: MEMBER_NSID.to_string(),
+                rkey: String::from("x1"),
+                data: serde_json::json!({ "subject": "did:plc:joiner" }),
+                indexed_at: String::from("2026-05-14T00:00:00.000Z"),
+            }]])
+            .append_query_results([vec![membership_record()]])
+            .into_connection();
+
+        let authz = load_actor_authz(&db, LEGACY_COMMUNITY_URI, "did:plc:joiner")
+            .await
+            .unwrap();
+
+        let member = authz.member.expect("membership fallback should run");
+        assert_eq!(
+            member.from_membership.as_deref(),
+            Some("at://did:plc:joiner/social.colibri.membership/m1")
+        );
+    }
 
     #[test]
     fn owner_has_every_permission() {

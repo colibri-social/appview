@@ -38,6 +38,7 @@ const CHANNEL_NSID: &str = "social.colibri.channel";
 const MESSAGE_NSID: &str = "social.colibri.message";
 const READ_NSID: &str = "social.colibri.channel.read";
 const MEMBER_NSID: &str = "social.colibri.member";
+const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 const COMMUNITY_NSID: &str = "social.colibri.community";
 
 /// Hard cap on channels processed per `listUnreadStatus` request
@@ -100,6 +101,22 @@ async fn join_boundary_indexed_at(
         .one(db)
         .await?;
     if let Some(record) = member {
+        return Ok(Some(record.indexed_at));
+    }
+
+    let membership = record_data::Entity::find()
+        .filter(record_data::Column::Did.eq(caller_did))
+        .filter(record_data::Column::Nsid.eq(MEMBERSHIP_NSID))
+        .filter(Expr::cust_with_values(
+            r#""record_data"."data"->>'community' = $1"#,
+            vec![sea_orm::Value::from(format!(
+                "at://{}/{}/{}",
+                community.authority, community.collection, community.rkey
+            ))],
+        ))
+        .one(db)
+        .await?;
+    if let Some(record) = membership {
         return Ok(Some(record.indexed_at));
     }
 

@@ -93,7 +93,7 @@ pub async fn list_unread_status(
 mod tests {
     use super::*;
     use crate::lib::service_auth::ServiceAuthError;
-    use crate::lib::test_fixtures::{empty_authz, mock_db, owner_authz};
+    use crate::lib::test_fixtures::{empty_authz, member_authz, mock_db, owner_authz};
     use rocket::tokio;
 
     fn status(uri: &str, unread: bool, pings: u64) -> ChannelUnreadStatus {
@@ -171,6 +171,31 @@ mod tests {
             result.err().unwrap().body.into_inner().error,
             "AuthRequired"
         );
+    }
+
+    #[tokio::test]
+    async fn admits_a_member_who_is_not_the_owner() {
+        let db = mock_db();
+        let result = list_unread_status_with(
+            String::from("at://did:plc:host/social.colibri.community/c1"),
+            String::from("token"),
+            db,
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:joiner")) }),
+            &|_, _, _| Box::pin(async { Ok(member_authz("did:plc:joiner", vec![])) }),
+            &|_, _, _| {
+                Box::pin(async {
+                    Ok(vec![status(
+                        "at://did:plc:host/social.colibri.channel/a",
+                        true,
+                        1,
+                    )])
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.channels.len(), 1);
     }
 
     #[tokio::test]
