@@ -39,6 +39,7 @@ use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember, ColibriRole,
 };
 use crate::lib::community_credentials::{self, SOURCE_APPVIEW_MANAGED, SOURCE_BYO};
+use crate::lib::community_write;
 use crate::lib::crypto;
 use crate::lib::moderation::generate_tid;
 use crate::lib::pds_client::{self, PdsError, RecordRef};
@@ -56,7 +57,6 @@ const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 const COMMUNITY_RKEY: &str = "self";
 const SUPPORTED_KIND: &str = "legacy-community";
 
-const ALLOWED_PICTURE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif"];
 const MAX_PICTURE_MEBIBYTES: i64 = 10;
 
 // ---- Wire types ---------------------------------------------------------
@@ -581,10 +581,10 @@ async fn upload_picture(
 ) -> Result<Option<Value>, ErrorResponse> {
     match (input.picture_blob.as_deref(), input.picture_mime.as_deref()) {
         (Some(bytes), Some(mime)) => {
-            if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime) {
+            if !community_write::is_allowed_picture_mime(mime) {
                 return Err(invalid_request(format!(
                     "Unsupported picture mimeType `{mime}`. Accepted: {}.",
-                    ALLOWED_PICTURE_MIME_TYPES.join(", ")
+                    community_write::ALLOWED_PICTURE_MIME_TYPES.join(", ")
                 )));
             }
             let blob = upload_blob_fn(
