@@ -43,8 +43,5 @@ jobs:
           body: |
             Pulls the latest exported lexicons from the client repository.
 
-            `cargo test --test lexicons` on this PR is the real check: it reports
-            any route that now contradicts the lexicons, and lists the routes and
-            lexicon methods that exist on only one side. Absence is never a
-            failure, so a red build here means a genuine breaking change.
+            If `cargo test --test lexicons` fails on this PR, there is a route that now contradicts the lexicons. Anything red = breaking change.
           delete-branch: true
