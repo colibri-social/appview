@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/colibri-social/appview/compare/v0.2.3...v0.2.4) - 2026-08-03
+
+### Added
+
+- WebP support for community picture and banner ([#78](https://github.com/colibri-social/appview/pull/78))
+
 ## [0.2.3](https://github.com/colibri-social/appview/compare/v0.2.2...v0.2.3) - 2026-08-01
 
 ### Added
