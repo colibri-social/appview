@@ -224,6 +224,8 @@ fn list_messages_response_matches_its_fixture() {
                     4096,
                 ),
                 name: Some(String::from("screenshot.webp")),
+                width: Some(1280),
+                height: Some(720),
             }],
             reactions: vec![ReactionSummary {
                 emoji: String::from("🎉"),

@@ -157,6 +157,8 @@ mod tests {
             EmbedImage {
                 url: String::from("https://example.com/cover.png"),
                 alt: None,
+                width: None,
+                height: None,
             }
         );
 

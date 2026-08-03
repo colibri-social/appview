@@ -3,6 +3,7 @@ pub mod auth_bridge;
 pub mod author_cache;
 pub mod backfill_status;
 pub mod blob_cache;
+pub mod blob_dimensions;
 pub mod bsky;
 pub mod catchers;
 pub mod channel_authz;

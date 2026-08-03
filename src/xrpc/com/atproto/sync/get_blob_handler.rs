@@ -12,6 +12,7 @@ use rocket::{State, get, response};
 use sea_orm::DatabaseConnection;
 
 use crate::lib::blob_cache::{BlobCache, CacheEntry};
+use crate::lib::blob_dimensions::{DimensionCache, Dimensions};
 use crate::lib::embed_fetch;
 use crate::lib::http::HTTP;
 use crate::lib::image_variant::{self, Variant};
@@ -332,6 +333,48 @@ async fn fetch_upstream(
     Ok((bytes, content_type))
 }
 
+pub async fn warm_dimensions(
+    did: &str,
+    cid: &str,
+    blobs: &BlobCache,
+    dimensions: &DimensionCache,
+    db: &DatabaseConnection,
+) {
+    if dimensions.get(cid).is_some() {
+        return;
+    }
+
+    let (bytes, content_type) = match get_blob_inner(did, cid, None, blobs, db).await {
+        GetBlobResponse::Blob {
+            bytes,
+            content_type,
+        } => (bytes, content_type),
+        GetBlobResponse::NotFound => {
+            dimensions.remember(cid, None);
+            return;
+        }
+        GetBlobResponse::Upstream(_) => return,
+    };
+
+    if !image_variant::is_resizable(&content_type) {
+        dimensions.remember(cid, None);
+        return;
+    }
+
+    let read = rocket::tokio::task::spawn_blocking(move || image_variant::dimensions(&bytes)).await;
+
+    match read {
+        Ok(Ok((width, height))) => {
+            dimensions.remember(cid, Some(Dimensions { width, height }));
+        }
+        Ok(Err(e)) => {
+            log::debug!("Blob {cid} has no readable image dimensions: {e}");
+            dimensions.remember(cid, None);
+        }
+        Err(e) => log::warn!("Dimension read for {cid} panicked: {e}"),
+    }
+}
+
 #[get("/xrpc/com.atproto.sync.getBlob?<did>&<cid>&<variant>")]
 /// Proxies a blob fetch to the PDS that hosts the given DID, caching the bytes
 /// in memory and serving HTTP Range requests itself (the PDS doesn't), so media
@@ -343,7 +386,7 @@ pub async fn get_blob(
     did: &str,
     cid: &str,
     variant: Option<&str>,
-    cache: &State<BlobCache>,
+    cache: &State<Arc<BlobCache>>,
     db: &State<DatabaseConnection>,
 ) -> GetBlobResponse {
     let variant = variant.and_then(Variant::parse);

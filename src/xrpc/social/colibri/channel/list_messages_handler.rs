@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use rocket::serde::json::Json;
@@ -12,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::blob_cache::BlobCache;
+use crate::lib::blob_dimensions::{DimensionCache, blob_cid_and_mime};
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
 use crate::lib::handler::{
@@ -22,6 +25,7 @@ use crate::lib::permissions::Permission;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::{record_data, repos, user_states};
+use crate::xrpc::com::atproto::sync::get_blob_handler::warm_dimensions;
 use crate::xrpc::social::colibri::actor::get_data_handler::{
     ActorData, ActorStatus, actor_data_from_effective,
 };
@@ -38,6 +42,10 @@ pub struct Attachment {
     pub blob: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 /// Full profile, status, and handle for a message author.
@@ -713,6 +721,7 @@ fn assemble_message_page_boxed(
 /// Messages hidden by a `hideMessage` moderation action are filtered out by
 /// default. Passing `all=true` includes them (e.g. for moderator views); doing
 /// so requires `auth` for a caller holding the `message.hide` permission.
+#[allow(clippy::too_many_arguments)]
 pub async fn list_messages(
     channel: &str,
     limit: Option<u64>,
@@ -720,8 +729,10 @@ pub async fn list_messages(
     all: Option<bool>,
     auth: Option<&str>,
     db: &State<DatabaseConnection>,
+    blobs: &State<Arc<BlobCache>>,
+    dimensions: &State<Arc<DimensionCache>>,
 ) -> Result<Json<MessageList>, ErrorResponse> {
-    list_messages_with(
+    let mut list = list_messages_with(
         channel.to_string(),
         limit,
         cursor.map(|c| c.to_string()),
@@ -732,7 +743,105 @@ pub async fn list_messages(
         &load_authz_boxed,
         &assemble_message_page_boxed,
     )
-    .await
+    .await?;
+
+    let unread = annotate_dimensions(&mut list.messages, dimensions);
+    spawn_dimension_warm(
+        unread,
+        blobs.inner().clone(),
+        dimensions.inner().clone(),
+        db.inner().clone(),
+    );
+
+    Ok(list)
+}
+
+const DIMENSION_WARM_LIMIT: usize = 64;
+
+fn annotate_dimensions(messages: &mut [Message], cache: &DimensionCache) -> Vec<(String, String)> {
+    let mut unknown = Vec::new();
+    let mut queued = HashSet::new();
+
+    for message in messages.iter_mut() {
+        let did = message.author.did.clone();
+        annotate_attachments(
+            &mut message.attachments,
+            &did,
+            cache,
+            &mut unknown,
+            &mut queued,
+        );
+
+        if let Some(parent) = message.parent.as_mut() {
+            let parent_did = parent.author.did.clone();
+            annotate_attachments(
+                &mut parent.attachments,
+                &parent_did,
+                cache,
+                &mut unknown,
+                &mut queued,
+            );
+        }
+    }
+
+    unknown
+}
+
+fn annotate_attachments(
+    attachments: &mut [Attachment],
+    did: &str,
+    cache: &DimensionCache,
+    unknown: &mut Vec<(String, String)>,
+    queued: &mut HashSet<String>,
+) {
+    for attachment in attachments.iter_mut() {
+        let Some((cid, mime)) = blob_cid_and_mime(&attachment.blob) else {
+            continue;
+        };
+
+        if !mime.starts_with("image/") {
+            continue;
+        }
+
+        match cache.get(&cid) {
+            Some(Some(dimensions)) => {
+                attachment.width = Some(dimensions.width);
+                attachment.height = Some(dimensions.height);
+            }
+            // Known not to be a decodable image; nothing to annotate or retry.
+            Some(None) => {}
+            None => {
+                if queued.insert(cid.clone()) {
+                    unknown.push((did.to_string(), cid));
+                }
+            }
+        }
+    }
+}
+
+fn spawn_dimension_warm(
+    unknown: Vec<(String, String)>,
+    blobs: Arc<BlobCache>,
+    dimensions: Arc<DimensionCache>,
+    db: DatabaseConnection,
+) {
+    if unknown.is_empty() {
+        return;
+    }
+
+    let total = unknown.len();
+    if total > DIMENSION_WARM_LIMIT {
+        log::debug!(
+            "Deferring {} of {total} blob dimension reads past the per-request cap",
+            total - DIMENSION_WARM_LIMIT
+        );
+    }
+
+    rocket::tokio::spawn(async move {
+        for (did, cid) in unknown.into_iter().take(DIMENSION_WARM_LIMIT) {
+            warm_dimensions(&did, &cid, &blobs, &dimensions, &db).await;
+        }
+    });
 }
 
 #[cfg(test)]
