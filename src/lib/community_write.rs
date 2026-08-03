@@ -237,6 +237,20 @@ pub async fn delete_record(
     Ok(())
 }
 
+pub const ALLOWED_PICTURE_MIME_TYPES: &[&str] =
+    &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+pub fn is_allowed_picture_mime(content_type: &str) -> bool {
+    let base = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    ALLOWED_PICTURE_MIME_TYPES.contains(&base.as_str())
+}
+
 /// Uploads a blob to the community's PDS and returns the `blob` object the PDS
 /// issues back, ready to embed in a record field
 pub async fn upload_blob(
@@ -823,5 +837,28 @@ mod tests {
         assert_eq!(attempts, 2, "one attempt plus exactly one retry");
 
         community_session_cache::invalidate(&did);
+    }
+
+    #[test]
+    fn allows_every_picture_format_the_lexicon_accepts() {
+        assert!(is_allowed_picture_mime("image/jpeg"));
+        assert!(is_allowed_picture_mime("image/png"));
+        assert!(is_allowed_picture_mime("image/gif"));
+        assert!(is_allowed_picture_mime("image/webp"));
+    }
+
+    #[test]
+    fn ignores_picture_mime_parameters_and_casing() {
+        assert!(is_allowed_picture_mime("image/webp; charset=binary"));
+        assert!(is_allowed_picture_mime("image/WebP"));
+        assert!(is_allowed_picture_mime("  image/png  "));
+    }
+
+    #[test]
+    fn rejects_non_picture_mime_types() {
+        assert!(!is_allowed_picture_mime("image/svg+xml"));
+        assert!(!is_allowed_picture_mime("video/mp4"));
+        assert!(!is_allowed_picture_mime("application/octet-stream"));
+        assert!(!is_allowed_picture_mime(""));
     }
 }

@@ -19,7 +19,6 @@ use crate::xrpc::util::unpack_image_file;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
-const ALLOWED_PICTURE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif"];
 
 /// Upper bound (in mebibytes) on the image bytes accepted in the request
 /// body. Generous enough for community avatars while still capping abusive
@@ -186,10 +185,10 @@ async fn upload_image_to_pds(
     mime_type: &str,
     bytes: Vec<u8>,
 ) -> Result<Value, ErrorResponse> {
-    if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime_type) {
+    if !community_write::is_allowed_picture_mime(mime_type) {
         return Err(invalid_request(format!(
             "Unsupported image MIME type `{mime_type}`. Accepted: {}.",
-            ALLOWED_PICTURE_MIME_TYPES.join(", ")
+            community_write::ALLOWED_PICTURE_MIME_TYPES.join(", ")
         )));
     }
 

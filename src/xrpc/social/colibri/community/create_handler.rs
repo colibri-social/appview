@@ -34,6 +34,7 @@ use crate::lib::colibri::{
     ColibriActorData, ColibriCategory, ColibriChannel, ColibriCommunity, ColibriMember, ColibriRole,
 };
 use crate::lib::community_credentials::{self, SOURCE_APPVIEW_MANAGED, SOURCE_BYO};
+use crate::lib::community_write;
 use crate::lib::crypto;
 use crate::lib::events::{CommunityCreationProgressData, CommunityCreationProgressEvent};
 use crate::lib::moderation::generate_tid;
@@ -60,11 +61,6 @@ const DEFAULT_CATEGORY_NAME: &str = "General";
 const DEFAULT_CHANNEL_NAME: &str = "general";
 const TEXT_CHANNEL_TYPE: &str = "social.colibri.channel.text";
 const COMMUNITY_RKEY: &str = "self";
-
-/// MIME types the community lexicon's `picture` field accepts. Mirrors
-/// `accept: ["image/jpeg", "image/png", "image/gif"]` in the lexicon doc;
-/// keep in sync.
-const ALLOWED_PICTURE_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif"];
 
 /// Upper bound (in mebibytes) on the image bytes accepted in the request
 /// body. Generous enough for community avatars while still capping abusive
@@ -271,14 +267,14 @@ async fn bootstrap_community(
     let member_rkey = generate_tid();
 
     let upload_image_to_pds = async |mime: &str, bytes: &[u8]| {
-        if !ALLOWED_PICTURE_MIME_TYPES.contains(&mime) {
+        if !community_write::is_allowed_picture_mime(mime) {
             log::warn!(
                 "community.create: rejecting picture for {community_did} (mime={mime}, \
                  account already minted)"
             );
             return Err(ErrorCode::InvalidRequest.with(format!(
                 "Unsupported picture mimeType `{mime}`. Accepted: {}.",
-                ALLOWED_PICTURE_MIME_TYPES.join(", ")
+                community_write::ALLOWED_PICTURE_MIME_TYPES.join(", ")
             )));
         }
         let byte_len = bytes.len();
@@ -1717,7 +1713,7 @@ mod tests {
             description: None,
             requires_approval_to_join: false,
             picture_blob: Some(vec![0x89, b'P', b'N', b'G']),
-            picture_mime: Some(String::from("image/webp")),
+            picture_mime: Some(String::from("image/svg+xml")),
             banner_blob: None,
             banner_mime: None,
         };
@@ -1748,7 +1744,99 @@ mod tests {
 
         let body = result.err().unwrap().body.into_inner();
         assert_eq!(body.error, "InvalidRequest");
-        assert!(body.message.contains("image/webp"));
+        assert!(body.message.contains("image/svg+xml"));
+    }
+
+    #[tokio::test]
+    async fn accepts_webp_picture() {
+        let created_records: CapturedRecords = Arc::new(Mutex::new(vec![]));
+        let upload_captured: CapturedUpload = Arc::new(Mutex::new(None));
+        let cr = created_records.clone();
+        let uc = upload_captured.clone();
+
+        let create_record = move |_: String,
+                                  _: String,
+                                  _: String,
+                                  collection: String,
+                                  rkey: Option<String>,
+                                  record: Value|
+              -> BoxFuture<'static, Result<RecordRef, PdsError>> {
+            let cr = cr.clone();
+            Box::pin(async move {
+                cr.lock()
+                    .unwrap()
+                    .push((collection.clone(), rkey.clone(), record));
+                let assigned_rkey = rkey.unwrap_or_else(|| String::from("auto-rkey"));
+                Ok(RecordRef {
+                    uri: format!("at://did:plc:newcomm/{collection}/{assigned_rkey}"),
+                    cid: String::from("cid"),
+                })
+            })
+        };
+        let upload_blob = move |_: String,
+                                _: String,
+                                bytes: Vec<u8>,
+                                mime: String|
+              -> BoxFuture<'static, Result<Value, PdsError>> {
+            let uc = uc.clone();
+            Box::pin(async move {
+                *uc.lock().unwrap() = Some((bytes, mime.clone()));
+                Ok(serde_json::json!({
+                    "$type": "blob",
+                    "ref": { "$link": "bafyreigh2akiscaildc7fmsxxq6jr2dpqyz4khsxqzfvuxe7osnrxrxv7q" },
+                    "mimeType": mime,
+                    "size": 70,
+                }))
+            })
+        };
+
+        let input_with_picture = CreateCommunityInput {
+            name: String::from("Webp"),
+            description: None,
+            requires_approval_to_join: false,
+            picture_blob: Some(Vec::from(b"RIFF____WEBPVP8 ")),
+            picture_mime: Some(String::from("image/webp")),
+            banner_blob: None,
+            banner_mime: None,
+        };
+
+        let result = create_with(
+            String::from("token"),
+            input_with_picture,
+            String::from("community.test"),
+            String::from("https://pds.example"),
+            admin(),
+            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            &|_, _, handle, _, _| {
+                Box::pin(async move {
+                    Ok(CreatedAccount {
+                        did: String::from("did:plc:newcomm"),
+                        access_jwt: String::from("jwt-from-create"),
+                        handle,
+                    })
+                })
+            },
+            &|_, _, _| Box::pin(async { Ok(String::from("jwt-session")) }),
+            &create_record,
+            &|_, _, _, _| Box::pin(async { Ok(()) }),
+            &upload_blob,
+            &|_, _, _, _| Box::pin(async {}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.did, "did:plc:newcomm");
+
+        let captured = upload_captured.lock().unwrap();
+        let (_, mime) = captured.as_ref().unwrap();
+        assert_eq!(mime, "image/webp");
+
+        let records = created_records.lock().unwrap();
+        let (_, _, community_value) = records
+            .iter()
+            .find(|(c, _, _)| c == "social.colibri.community")
+            .unwrap();
+        assert_eq!(community_value["picture"]["mimeType"], "image/webp");
     }
 
     #[tokio::test]
@@ -1911,7 +1999,7 @@ mod tests {
             picture_blob: None,
             picture_mime: None,
             banner_blob: Some(vec![0x89, b'P', b'N', b'G']),
-            banner_mime: Some(String::from("image/webp")),
+            banner_mime: Some(String::from("image/svg+xml")),
         };
 
         let result = create_with(
@@ -1940,6 +2028,6 @@ mod tests {
 
         let body = result.err().unwrap().body.into_inner();
         assert_eq!(body.error, "InvalidRequest");
-        assert!(body.message.contains("image/webp"));
+        assert!(body.message.contains("image/svg+xml"));
     }
 }
