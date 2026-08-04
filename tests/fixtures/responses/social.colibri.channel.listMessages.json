@@ -12,7 +12,9 @@
             },
             "size": 4096
           },
-          "name": "screenshot.webp"
+          "height": 720,
+          "name": "screenshot.webp",
+          "width": 1280
         }
       ],
       "author": {

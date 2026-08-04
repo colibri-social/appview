@@ -434,7 +434,12 @@ async fn rocket() -> _ {
             .manage(tap_bridge)
             .manage(c2c_broadcast_channel)
             .manage(crate::lib::embed_cache::EmbedCache::from_env())
-            .manage(crate::lib::blob_cache::BlobCache::from_env())
+            .manage(std::sync::Arc::new(
+                crate::lib::blob_cache::BlobCache::from_env(),
+            ))
+            .manage(std::sync::Arc::new(
+                crate::lib::blob_dimensions::DimensionCache::from_env(),
+            ))
             .manage(safe_cors);
     }
 

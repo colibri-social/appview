@@ -54,6 +54,10 @@ pub struct EmbedImage {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 impl EmbedMetadata {
@@ -401,10 +405,25 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
     .filter_map(|raw| base.join(&raw).ok())
     .find(|abs| abs.as_str() != page_url.as_str() && abs.as_str() != base.as_str());
 
+    let declared = |keys: [&str; 2]| -> Option<u32> {
+        get(keys[0])
+            .or_else(|| get(keys[1]))
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .filter(|parsed| *parsed > 0)
+    };
+    let image_width = declared(["og:image:width", "twitter:image:width"]);
+    let image_height = declared(["og:image:height", "twitter:image:height"]);
+    let (image_width, image_height) = match (image_width, image_height) {
+        (Some(w), Some(h)) => (Some(w), Some(h)),
+        _ => (None, None),
+    };
+
     let image = image_url.map(|abs| {
         vec![EmbedImage {
             url: abs.to_string(),
             alt: get("og:image:alt").or_else(|| get("twitter:image:alt")),
+            width: image_width,
+            height: image_height,
         }]
     });
 

@@ -96,6 +96,14 @@ fn decode(bytes: &[u8]) -> Result<DynamicImage, RenderError> {
         .map_err(|e| RenderError::Decode(e.to_string()))
 }
 
+pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), RenderError> {
+    ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| RenderError::Decode(e.to_string()))?
+        .into_dimensions()
+        .map_err(|e| RenderError::Decode(e.to_string()))
+}
+
 fn render_decoded(decoded: &DynamicImage, variant: Variant) -> Result<Rendered, RenderError> {
     let edge = variant.edge();
     let resized = if decoded.width() <= edge && decoded.height() <= edge {
