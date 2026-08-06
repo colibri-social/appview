@@ -168,15 +168,15 @@ async fn handle_client_message(
         {
             Ok(producer) => {
                 let id = producer.id();
-                if kind == MediaKind::Audio {
-                    channel.observe_audio(id).await;
-                }
                 let local = LocalProducer {
                     producer,
                     source: source.clone(),
                 };
-                if server_muted && local.is_mic() {
-                    let _ = local.producer.pause().await;
+                if local.is_mic() {
+                    channel.observe_audio(id).await;
+                    if server_muted {
+                        let _ = local.producer.pause().await;
+                    }
                 }
                 channel.add_producer(id, did.to_string(), kind, source);
                 my_producer_ids.push(id);
