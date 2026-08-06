@@ -1,3 +1,4 @@
+pub mod account_purge;
 pub mod at_uri;
 pub mod auth_bridge;
 pub mod author_cache;

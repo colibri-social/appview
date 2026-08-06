@@ -1,3 +1,4 @@
+use crate::lib::account_purge::{self, TapTeardown};
 use crate::lib::at_uri::AtUri;
 use crate::lib::author_cache::AuthorCache;
 use crate::lib::channel_authz;
@@ -36,6 +37,8 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::client::IntoClientRequest,
 };
 
+const ACCOUNT_STATUS_DELETED: &str = "deleted";
+
 const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 const MEMBER_NSID: &str = "social.colibri.member";
 
@@ -68,12 +71,19 @@ pub struct TapMessageRecord {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct TapIdentity {
+    pub did: String,
+    pub status: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct TapMessage {
     pub id: Number,
     #[serde(rename = "type")]
     #[allow(dead_code)]
     pub message_type: String,
     pub record: Option<TapMessageRecord>,
+    pub identity: Option<TapIdentity>,
 }
 
 #[derive(Serialize)]
@@ -179,6 +189,34 @@ pub async fn force_redo_backfill(dids: Vec<String>) {
     }
     remove_dids(dids.clone()).await;
     register_dids(dids).await;
+}
+
+async fn handle_identity_event(
+    db: &DatabaseConnection,
+    to_tap: &mut Sender<String>,
+    text: String,
+    identity: TapIdentity,
+) {
+    if identity.status != ACCOUNT_STATUS_DELETED {
+        ack_tap_msg(db, to_tap, text, false).await;
+        return;
+    }
+
+    match account_purge::purge_did(db, &identity.did, TapTeardown::AlreadyGone).await {
+        Ok(deleted) => {
+            log::info!(
+                "Purged deleted account {}: {} records, {} community records, {} notifications",
+                identity.did,
+                deleted.record_data,
+                deleted.community_records,
+                deleted.notifications
+            );
+            ack_tap_msg(db, to_tap, text, false).await;
+        }
+        Err(e) => {
+            log::error!("Unable to purge deleted account {}: {e}", identity.did);
+        }
+    }
 }
 
 /// Acknowledges a message from Tap and saves the data in the database.
@@ -518,6 +556,15 @@ pub async fn run_connection(
         // by id to drop/handle duplicates below; if it somehow isn't an integer
         // we skip dedup and process it (correctness over dedup).
         let event_id = tap_msg.id.as_u64();
+
+        if let Some(identity) = tap_msg.identity.clone() {
+            let db = db.clone();
+            let mut to_tap = dispatcher_to_tap.clone();
+            rocket::tokio::spawn(async move {
+                handle_identity_event(&db, &mut to_tap, text, identity).await;
+            });
+            continue;
+        }
 
         let Some(record) = tap_msg.record else {
             // Event does not carry a record — ack immediately, no DB work.
@@ -1335,6 +1382,63 @@ mod tests {
     use rocket::tokio;
     use rocket::tokio::sync::{broadcast, mpsc};
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
+
+    const DELETED_IDENTITY: &str = r#"{"id":9,"type":"identity","identity":{"did":"did:plc:gone","handle":"gone.example","is_active":false,"status":"deleted"}}"#;
+
+    const DEACTIVATED_IDENTITY: &str = r#"{"id":10,"type":"identity","identity":{"did":"did:plc:away","handle":"away.example","is_active":false,"status":"deactivated"}}"#;
+
+    #[test]
+    fn parses_an_identity_event_off_the_identity_key() {
+        let msg: TapMessage = serde_json::from_str(DELETED_IDENTITY).expect("parses");
+        let identity = msg.identity.expect("identity payload");
+
+        assert_eq!(msg.message_type, "identity");
+        assert!(msg.record.is_none());
+        assert_eq!(identity.did, "did:plc:gone");
+        assert_eq!(identity.status, ACCOUNT_STATUS_DELETED);
+    }
+
+    #[test]
+    fn survives_tap_renaming_fields_we_never_read() {
+        let renamed = r#"{"id":9,"type":"identity","identity":{"did":"did:plc:gone","handle":"gone.example","isActive":false,"status":"deleted"}}"#;
+        let identity = serde_json::from_str::<TapMessage>(renamed)
+            .expect("parses")
+            .identity
+            .expect("identity payload");
+
+        assert_eq!(identity.status, ACCOUNT_STATUS_DELETED);
+    }
+
+    #[test]
+    fn still_parses_record_events_after_the_identity_field() {
+        let msg: TapMessage = serde_json::from_str(
+            r#"{"id":7,"type":"record","record":{"live":true,"did":"did:plc:alice","rev":"r","collection":"social.colibri.message","rkey":"k1","action":"create","record":{},"cid":"c"}}"#,
+        )
+        .expect("parses");
+
+        assert!(msg.identity.is_none());
+        assert_eq!(
+            msg.record.expect("record").collection,
+            "social.colibri.message"
+        );
+    }
+
+    #[tokio::test]
+    async fn acks_a_non_deleted_identity_event_without_purging() {
+        let db = mock_db();
+        let (mut tx, mut rx) = mpsc::channel::<String>(1);
+        let identity = serde_json::from_str::<TapMessage>(DEACTIVATED_IDENTITY)
+            .expect("parses")
+            .identity
+            .expect("identity payload");
+
+        handle_identity_event(&db, &mut tx, String::from(DEACTIVATED_IDENTITY), identity).await;
+
+        let ack: Value = serde_json::from_str(&rx.try_recv().expect("ack")).expect("ack json");
+        assert_eq!(ack["type"], "ack");
+        assert_eq!(ack["id"], 10);
+        assert_eq!(db.into_transaction_log().len(), 0);
+    }
 
     #[tokio::test]
     async fn sends_ack_for_non_record_messages() {

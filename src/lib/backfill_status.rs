@@ -60,8 +60,8 @@ pub fn report_interval_secs() -> u64 {
 /// What one of tap's `repos.state` values means for backfill progress.
 #[derive(Debug, PartialEq, Eq)]
 enum RepoState {
-    /// Backfill queued, needed, or actively running (`pending`, `dirty`,
-    /// `resyncing`).
+    /// Backfill queued, needed, or actively running (`pending`,
+    /// `desynchronized`, `resyncing`).
     Waiting,
     /// Backfilled and following the live firehose (`active`).
     Ready,
@@ -76,7 +76,7 @@ enum RepoState {
 
 fn classify_state(state: &str) -> RepoState {
     match state.trim().to_ascii_lowercase().as_str() {
-        "pending" | "dirty" | "resyncing" => RepoState::Waiting,
+        "pending" | "desynchronized" | "resyncing" => RepoState::Waiting,
         "active" => RepoState::Ready,
         "error" => RepoState::Errored,
         _ => RepoState::Unknown,
@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn classify_state_buckets_taps_states() {
         assert_eq!(classify_state("pending"), RepoState::Waiting);
-        assert_eq!(classify_state("dirty"), RepoState::Waiting);
+        assert_eq!(classify_state("desynchronized"), RepoState::Waiting);
         assert_eq!(classify_state("resyncing"), RepoState::Waiting);
         assert_eq!(classify_state("active"), RepoState::Ready);
         assert_eq!(classify_state("error"), RepoState::Errored);
@@ -528,7 +528,7 @@ mod tests {
         let snapshot = RepoSnapshot::from_rows(vec![
             row("active", 519),
             row("pending", 8),
-            row("dirty", 4),
+            row("desynchronized", 4),
             row("error", 14),
             row("brand-new", 1),
         ]);
