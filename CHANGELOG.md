@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/colibri-social/appview/compare/v0.2.4...v0.2.5) - 2026-08-06
+
+### Added
+
+- Delete Colibri data from AppView ([#82](https://github.com/colibri-social/appview/pull/82))
+- image metadata transmission ([#81](https://github.com/colibri-social/appview/pull/81))
+
+### Other
+
+- Update sync-lexicons.yml
+
 ## [0.2.4](https://github.com/colibri-social/appview/compare/v0.2.3...v0.2.4) - 2026-08-03
 
 ### Added
