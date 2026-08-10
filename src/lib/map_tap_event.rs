@@ -800,16 +800,27 @@ async fn map_tap_event_with(
             if event_record.action != "delete" {
                 let record_data = parse_payload::<ColibriMessage>(event_record)?;
 
-                // Messages live on the AUTHOR's repo and carry only a bare
-                // channel rkey, so the owning community is resolved via the
-                // channel record. The message row isn't indexed yet at
-                // create-time (ack runs after mapping), so resolve from the
-                // payload's channel rkey, not the message rkey.
-                let scope = resolver
+                // Messages live on the AUTHOR's repo, so the owning community is
+                // resolved via the channel record. The message row isn't indexed
+                // yet at create-time (ack runs after mapping), so resolve from
+                // the payload's channel reference, not the message rkey.
+                let community = resolver
                     .community_for_channel(&db, &record_data.channel)
-                    .await
+                    .await;
+                let scope = community
+                    .clone()
                     .map(EventScope::Community)
                     .unwrap_or(EventScope::Global);
+                let channel_uri = community.as_ref().map_or_else(
+                    || record_data.channel.clone(),
+                    |community| {
+                        expand_rkey(
+                            community,
+                            "social.colibri.channel",
+                            &AtUri::rkey_or_value(&record_data.channel),
+                        )
+                    },
+                );
 
                 // Best-effort author enrichment: individual fetch failures fall
                 // back to safe defaults so a missing profile never drops the event.
@@ -861,7 +872,7 @@ async fn map_tap_event_with(
                             event: String::from("upsert"),
                             uri,
                             attachments: record_data.attachments,
-                            channel: Some(record_data.channel),
+                            channel: Some(channel_uri),
                             created_at: Some(record_data.created_at),
                             edited: record_data.edited,
                             facets: record_data.facets,
@@ -874,11 +885,11 @@ async fn map_tap_event_with(
                 ))
             } else {
                 // The message row is still indexed at delete-time (ack runs
-                // after mapping), so resolve the community by message rkey.
-                let scope = resolver
-                    .community_for_message(&db, &event_record.rkey)
-                    .await
-                    .map(EventScope::Community)
+                // after mapping), so resolve the channel by message rkey.
+                let location = resolver.locate_message(&db, &event_record.rkey).await;
+                let scope = location
+                    .as_ref()
+                    .map(|location| EventScope::Community(location.community.clone()))
                     .unwrap_or(EventScope::Global);
                 Ok(scoped(
                     ColibriServerEvent {
@@ -887,7 +898,13 @@ async fn map_tap_event_with(
                             event: String::from("delete"),
                             uri,
                             attachments: None,
-                            channel: None,
+                            channel: location.map(|location| {
+                                expand_rkey(
+                                    &location.community,
+                                    "social.colibri.channel",
+                                    &location.channel_rkey,
+                                )
+                            }),
                             created_at: None,
                             edited: None,
                             facets: None,
@@ -1163,6 +1180,9 @@ async fn map_tap_event_with(
                     .subject
                     .uri
                     .ok_or_else(|| serde_json::Error::custom("hideMessage missing subject.uri"))?;
+                let channel_rkey = resolver
+                    .channel_for_message(&db, &AtUri::rkey_or_value(&message_uri))
+                    .await;
                 Ok(scoped(
                     ColibriServerEvent {
                         event_type: String::from("message_event"),
@@ -1170,7 +1190,13 @@ async fn map_tap_event_with(
                             event: String::from("delete"),
                             uri: message_uri,
                             attachments: None,
-                            channel: None,
+                            channel: channel_rkey.map(|channel_rkey| {
+                                expand_rkey(
+                                    &event_record.did,
+                                    "social.colibri.channel",
+                                    &channel_rkey,
+                                )
+                            }),
                             created_at: None,
                             edited: None,
                             facets: None,
@@ -1860,10 +1886,10 @@ mod tests {
 
     #[tokio::test]
     async fn maps_message_delete_event() {
-        // The message row is still indexed at delete-time, so the community is
-        // resolved from the message rkey ("r1" from the `record` helper).
+        // The message row is still indexed at delete-time, so the channel and
+        // community are resolved from the message rkey ("r1" from `record`).
         let resolver = resolver();
-        resolver.seed_message("r1", "did:plc:community");
+        resolver.seed_message("r1", "c1", "did:plc:community");
         let (event, scope) = only(
             map_tap_event_with(
                 &record(
@@ -1894,6 +1920,10 @@ mod tests {
             assert_eq!(data.event, "delete");
             assert_eq!(data.text, None);
             assert!(data.author.is_none());
+            assert_eq!(
+                data.channel.as_deref(),
+                Some("at://did:plc:community/social.colibri.channel/c1")
+            );
         } else {
             panic!("expected message event data");
         }
@@ -1950,7 +1980,10 @@ mod tests {
         if let Some(ColibriServerEventData::Message(data)) = event.data {
             assert_eq!(data.event, "upsert");
             assert_eq!(data.text.as_deref(), Some("hello"));
-            assert_eq!(data.channel.as_deref(), Some("chan-1"));
+            assert_eq!(
+                data.channel.as_deref(),
+                Some("at://did:plc:community/social.colibri.channel/chan-1")
+            );
             let author = data.author.expect("author should be present");
             assert_eq!(author.did, "did:plc:abc");
             assert_eq!(author.handle, "alice.test");
@@ -1959,6 +1992,86 @@ mod tests {
             assert_eq!(author.data.status.text, "Coding");
             assert_eq!(author.data.status.emoji.as_deref(), Some("💻"));
             assert!(author.data.avatar.is_some());
+        } else {
+            panic!("expected message event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn hide_message_delete_carries_the_channel() {
+        let resolver = resolver();
+        resolver.seed_message("msg-1", "chan-1", "did:plc:abc");
+        let (event, scope) = only(
+            map_tap_event_with(
+                &record(
+                    "social.colibri.moderation",
+                    "create",
+                    json!({
+                        "$type": "social.colibri.moderation",
+                        "action": "hideMessage",
+                        "subject": { "uri": "at://did:plc:author/social.colibri.message/msg-1" },
+                        "createdBy": "did:plc:mod",
+                        "createdAt": "2026-06-04T00:00:00Z"
+                    }),
+                ),
+                mock_db(),
+                &resolver,
+                &no_fetch,
+                &no_resolve,
+                &no_state,
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(scope, EventScope::Community(String::from("did:plc:abc")));
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
+            assert_eq!(data.event, "delete");
+            assert_eq!(data.uri, "at://did:plc:author/social.colibri.message/msg-1");
+            assert_eq!(
+                data.channel.as_deref(),
+                Some("at://did:plc:abc/social.colibri.channel/chan-1")
+            );
+        } else {
+            panic!("expected message event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolves_scope_when_the_channel_reference_is_a_full_uri() {
+        let resolver = resolver();
+        resolver.seed_channel("chan-1", "did:plc:community");
+        let (event, scope) = only(
+            map_tap_event_with(
+                &record(
+                    "social.colibri.message",
+                    "create",
+                    json!({
+                        "$type": "social.colibri.message",
+                        "text": "hello",
+                        "createdAt": "2026-06-04T00:00:00Z",
+                        "channel": "at://did:plc:community/social.colibri.channel/chan-1"
+                    }),
+                ),
+                mock_db(),
+                &resolver,
+                &|_, _, _, _| Box::pin(async { Err(serde_json::Error::custom("not found")) }),
+                &|_| Box::pin(async { Err(serde_json::Error::custom("no handle")) }),
+                &|_, _| Box::pin(async { Err(serde_json::Error::custom("no state")) }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(
+            scope,
+            EventScope::Community(String::from("did:plc:community"))
+        );
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
+            assert_eq!(
+                data.channel.as_deref(),
+                Some("at://did:plc:community/social.colibri.channel/chan-1")
+            );
         } else {
             panic!("expected message event data");
         }
@@ -2288,7 +2401,7 @@ mod tests {
     #[tokio::test]
     async fn reaction_create_with_parent_field_is_accepted() {
         let resolver = resolver();
-        resolver.seed_message("3mhydckzgys2d", "did:plc:community");
+        resolver.seed_message("3mhydckzgys2d", "chan-1", "did:plc:community");
         let (event, scope) = only(
             map_tap_event_with(
                 &record(
@@ -2360,7 +2473,7 @@ mod tests {
         // The cached record is still present when the delete event fires, so
         // the removed event should carry emoji + target.
         let resolver = resolver();
-        resolver.seed_message("msg-1", "did:plc:community");
+        resolver.seed_message("msg-1", "chan-1", "did:plc:community");
         let (event, scope) = only(
             map_tap_event_with(
                 &record("social.colibri.reaction", "delete", json!({})),

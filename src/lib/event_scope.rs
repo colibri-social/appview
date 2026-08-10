@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::Deserialize;
 
+use crate::lib::at_uri::AtUri;
 use crate::lib::community_record::fetch_community_record;
 use crate::models::record_data;
 
@@ -55,6 +56,12 @@ struct StoredMessageChannel {
     channel: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageLocation {
+    pub community: String,
+    pub channel_rkey: String,
+}
+
 /// Resolves the owning community DID for a message or channel, with an
 /// in-memory cache. A channel's (and therefore a message's) community DID is
 /// immutable for a given rkey, so cached entries never go stale.
@@ -65,8 +72,8 @@ struct StoredMessageChannel {
 pub struct CommunityResolver {
     /// channel rkey -> community DID.
     channel_to_community: Mutex<HashMap<String, String>>,
-    /// message rkey -> community DID.
-    message_to_community: Mutex<HashMap<String, String>>,
+    /// message rkey -> channel rkey.
+    message_to_channel: Mutex<HashMap<String, String>>,
     /// community DID -> whether it hosts a native (`self`-rkey) community
     /// record. Both outcomes are permanent for a given DID: a legacy community
     /// never gains a `self` record on the repo it already lives on, and a
@@ -79,23 +86,24 @@ impl CommunityResolver {
         Self::default()
     }
 
-    /// Returns the community DID hosting the given channel rkey, or `None` if no
+    /// Returns the community DID hosting the given channel, or `None` if no
     /// channel record with that rkey is indexed yet. Cached after the first hit.
     pub async fn community_for_channel(
         &self,
         db: &DatabaseConnection,
-        channel_rkey: &str,
+        channel: &str,
     ) -> Option<String> {
+        let channel_rkey = AtUri::rkey_or_value(channel);
         {
             let cache = self.channel_to_community.lock().unwrap();
-            if let Some(community) = cache.get(channel_rkey) {
+            if let Some(community) = cache.get(&channel_rkey) {
                 return Some(community.clone());
             }
         }
 
         let record = record_data::Entity::find()
             .filter(record_data::Column::Nsid.eq(CHANNEL_NSID))
-            .filter(record_data::Column::Rkey.eq(channel_rkey))
+            .filter(record_data::Column::Rkey.eq(channel_rkey.clone()))
             .one(db)
             .await
             .ok()??;
@@ -104,22 +112,19 @@ impl CommunityResolver {
         self.channel_to_community
             .lock()
             .unwrap()
-            .insert(channel_rkey.to_string(), community.clone());
+            .insert(channel_rkey, community.clone());
         Some(community)
     }
 
-    /// Returns the community DID owning the given message rkey by resolving
-    /// message -> channel -> community, or `None` if the message/channel record
-    /// is not indexed. Cached after the first hit.
-    pub async fn community_for_message(
+    pub async fn channel_for_message(
         &self,
         db: &DatabaseConnection,
         message_rkey: &str,
     ) -> Option<String> {
         {
-            let cache = self.message_to_community.lock().unwrap();
-            if let Some(community) = cache.get(message_rkey) {
-                return Some(community.clone());
+            let cache = self.message_to_channel.lock().unwrap();
+            if let Some(channel_rkey) = cache.get(message_rkey) {
+                return Some(channel_rkey.clone());
             }
         }
 
@@ -129,16 +134,41 @@ impl CommunityResolver {
             .one(db)
             .await
             .ok()??;
-        let channel_rkey = serde_json::from_value::<StoredMessageChannel>(record.data)
-            .ok()?
-            .channel;
+        let channel_rkey = AtUri::rkey_or_value(
+            &serde_json::from_value::<StoredMessageChannel>(record.data)
+                .ok()?
+                .channel,
+        );
 
-        let community = self.community_for_channel(db, &channel_rkey).await?;
-        self.message_to_community
+        self.message_to_channel
             .lock()
             .unwrap()
-            .insert(message_rkey.to_string(), community.clone());
-        Some(community)
+            .insert(message_rkey.to_string(), channel_rkey.clone());
+        Some(channel_rkey)
+    }
+
+    pub async fn locate_message(
+        &self,
+        db: &DatabaseConnection,
+        message_rkey: &str,
+    ) -> Option<MessageLocation> {
+        let channel_rkey = self.channel_for_message(db, message_rkey).await?;
+        let community = self.community_for_channel(db, &channel_rkey).await?;
+        Some(MessageLocation {
+            community,
+            channel_rkey,
+        })
+    }
+
+    /// Returns the community DID owning the given message rkey.
+    pub async fn community_for_message(
+        &self,
+        db: &DatabaseConnection,
+        message_rkey: &str,
+    ) -> Option<String> {
+        self.locate_message(db, message_rkey)
+            .await
+            .map(|location| location.community)
     }
 
     /// Whether `community_did` hosts a native community, i.e. a
@@ -188,14 +218,15 @@ impl CommunityResolver {
             .insert(channel_rkey.to_string(), community_did.to_string());
     }
 
-    /// Test seam: pre-populate the message cache so resolution never touches the
-    /// database. `#[cfg(test)]`-only.
+    /// Test seam: pre-populate the message and channel caches so resolution
+    /// never touches the database. `#[cfg(test)]`-only.
     #[cfg(test)]
-    pub fn seed_message(&self, message_rkey: &str, community_did: &str) {
-        self.message_to_community
+    pub fn seed_message(&self, message_rkey: &str, channel_rkey: &str, community_did: &str) {
+        self.message_to_channel
             .lock()
             .unwrap()
-            .insert(message_rkey.to_string(), community_did.to_string());
+            .insert(message_rkey.to_string(), channel_rkey.to_string());
+        self.seed_channel(channel_rkey, community_did);
     }
 
     /// Test seam: pre-populate the native-community cache so the check never
@@ -229,10 +260,37 @@ mod tests {
     #[tokio::test]
     async fn seeded_message_resolves_without_db() {
         let resolver = CommunityResolver::new();
-        resolver.seed_message("msg-1", "did:plc:community");
+        resolver.seed_message("msg-1", "chan-1", "did:plc:community");
         let db = mock_db();
         assert_eq!(
             resolver.community_for_message(&db, "msg-1").await,
+            Some(String::from("did:plc:community"))
+        );
+    }
+
+    #[tokio::test]
+    async fn locate_message_returns_channel_and_community() {
+        let resolver = CommunityResolver::new();
+        resolver.seed_message("msg-1", "chan-1", "did:plc:community");
+        let db = mock_db();
+        assert_eq!(
+            resolver.locate_message(&db, "msg-1").await,
+            Some(MessageLocation {
+                community: String::from("did:plc:community"),
+                channel_rkey: String::from("chan-1"),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_lookup_accepts_a_full_at_uri() {
+        let resolver = CommunityResolver::new();
+        resolver.seed_channel("chan-1", "did:plc:community");
+        let db = mock_db();
+        assert_eq!(
+            resolver
+                .community_for_channel(&db, "at://did:plc:community/social.colibri.channel/chan-1")
+                .await,
             Some(String::from("did:plc:community"))
         );
     }

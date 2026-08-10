@@ -232,8 +232,8 @@ async fn handle_tap_message(
     match event {
         Ok(ev) => forward_scoped_event(ws_sink, ev, did, communities, db).await,
         Err(RecvError::Lagged(n)) => {
-            log::warn!("Tap stream lagged by {n} messages for {did}, continuing");
-            true
+            log::warn!("Tap stream lagged by {n} messages for {did}, closing to force a resync");
+            false
         }
         Err(RecvError::Closed) => {
             eprintln!("Tap stream closed");
