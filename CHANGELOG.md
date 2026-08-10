@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/colibri-social/appview/compare/v0.2.6...v0.2.7) - 2026-08-10
+
+### Fixed
+
+- Transmit live status of Tap events
+- more message deletion data, stop dropping events
+- keep user state across multiple devices
+
+### Other
+
+- Sync lexicons
+
 ## [0.2.6](https://github.com/colibri-social/appview/compare/v0.2.5...v0.2.6) - 2026-08-06
 
 ### Fixed
