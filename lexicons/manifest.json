@@ -1,11 +1,11 @@
 {
-	"count": 91,
+	"count": 92,
 	"lexicons": {
 		"social.colibri.actor.data": "bc3300b598727c4bec99c103125d7caef74e11a5a56493d7fe5cc5c246989d9a",
 		"social.colibri.actor.defs": "ebbcaa03dab2d790294ec25f85aa03a160b26125c3d92d524655bd9134adf57a",
 		"social.colibri.actor.deleteAccount": "f522c7598bd68534ec2cb7094e7c7199c94ee790d53ce234939da2903ba0403d",
 		"social.colibri.actor.getData": "44ccd897bdd3debad86bc2bd9311f3435435802c2db61fc9ce62005aed4e856f",
-		"social.colibri.actor.getDeletionStatus": "9bb58d4eb88cdd8bfd1868aa28d6a599b6debb3daa85cf6d961753b8b9694607",
+		"social.colibri.actor.getDeletionStatus": "a61845f15a733ea6c33986d36ad8955457fddd06224621c2daa709727db4c41a",
 		"social.colibri.actor.getNotificationPreference": "0597e4d31fcdaaa3f59fba3ad3358d1d13d97d3e6a08823115931fcc5690345d",
 		"social.colibri.actor.listCommunities": "26b7e8d188b348f2e91f4e97fd87859b8cf24fd232196c872a14fa3329f022e1",
 		"social.colibri.actor.listMutes": "b6d8cc8c985a1276940039c32b7e52996925117b17c0fc2660e16e7e707ff534",
@@ -63,6 +63,7 @@
 		"social.colibri.embed.gifCategories": "004fd3dcf9569a3d1da7072347c20aa2c069eeba6130be497b4d9d14bc0510b2",
 		"social.colibri.embed.searchGifs": "82b450183a02fd97a22a46469bdc615528668fba476b211e7f1bfe5794465e30",
 		"social.colibri.embed.trendingGifs": "e1ff32c743b9a51b4812f948ace9cafe8044a32783919359bbb005f511b54fa2",
+		"social.colibri.labeler.service": "31f40230d5691db81a452bfcfe8085fae2a5418814da63326603068c51c9329a",
 		"social.colibri.member": "de77ad98c37c429cd2af3ca44ca670f679ef466d1393fc1d2217963404409f96",
 		"social.colibri.membership": "7009de91464b1f9572f59fd5953aaf674f9b5871cc3cece0cdf5c98f5b0ba6bc",
 		"social.colibri.message": "eed4b4ff4bb9e7b99c903453cd16821cd9874fbace0cccc4c2dea0ac8a8fc096",
