@@ -79,8 +79,11 @@ pub async fn resolve_did(did: &str) -> Result<Json<DidDocument>, ErrorResponse> 
         let host = did.replace("did:web:", "");
         format!("https://{host}/.well-known/did.json")
     } else {
-        format!("https://plc.directory/{did}")
+        let plc_directory =
+            std::env::var("PDS_DID_PLC_URL").unwrap_or(String::from("https://plc.directory"));
+        format!("{plc_directory}/{did}")
     };
+
     let resp = embed_fetch::guarded_get(&url)
         .await?
         .json::<DidDocument>()

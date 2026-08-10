@@ -1212,6 +1212,7 @@ mod tests {
         user_states::Model {
             did: String::from(did),
             state: String::from("online"),
+            manual_state: None,
             vc: None,
             vc_community: None,
             channel: channel.map(String::from),

@@ -196,6 +196,8 @@ pub struct MessageEventData {
     pub attachments: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<MessageEventAuthor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

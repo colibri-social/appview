@@ -4,7 +4,7 @@ use crate::lib::event_scope::SharedScopedEvent;
 use crate::lib::hum_client::OutboundHum;
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::service_auth;
-use crate::lib::state::broadcast_state_change;
+use crate::lib::state::{EffectiveState, broadcast_state_change, refresh_effective_state};
 use crate::lib::tap::CommsBridge;
 use crate::lib::validate_state::validate_state_str;
 use crate::models::user_states::{self, ActiveModel as UserStatesModel, Entity as UserStates};
@@ -59,12 +59,13 @@ impl UserState {
 pub async fn save_state(db: &DatabaseConnection, did: String, state: String) {
     let _ = UserStates::insert(UserStatesModel {
         did: ActiveValue::Set(did),
-        state: ActiveValue::Set(state),
+        state: ActiveValue::Set(UserState::Offline.as_str().to_string()),
+        manual_state: ActiveValue::Set(Some(state)),
         ..Default::default()
     })
     .on_conflict(
         sea_query::OnConflict::columns([user_states::Column::Did])
-            .update_column(user_states::Column::State)
+            .update_column(user_states::Column::ManualState)
             .to_owned(),
     )
     .exec(db)
@@ -72,7 +73,7 @@ pub async fn save_state(db: &DatabaseConnection, did: String, state: String) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn set_state_with<VA, SV>(
+async fn set_state_with<VA, SV, RF>(
     state: String,
     auth: String,
     db: DatabaseConnection,
@@ -80,10 +81,12 @@ async fn set_state_with<VA, SV>(
     hum_outbox: mpsc::Sender<OutboundHum>,
     verify_auth_fn: VA,
     save_state_fn: SV,
+    refresh_state_fn: RF,
 ) -> Result<Json<SetStateResponse>, ErrorResponse>
 where
     VA: Fn(String, String) -> BoxFuture<'static, Result<String, service_auth::ServiceAuthError>>,
     SV: Fn(DatabaseConnection, String, String) -> BoxFuture<'static, ()>,
+    RF: Fn(DatabaseConnection, String) -> BoxFuture<'static, Option<EffectiveState>>,
 {
     let did = verify_auth_fn(auth, String::from("social.colibri.actor.setState"))
         .await
@@ -100,10 +103,12 @@ where
     let verified_state = maybe_state.unwrap().to_string();
 
     save_state_fn(db.clone(), did.clone(), verified_state.clone()).await;
+
+    let effective = refresh_state_fn(db.clone(), did.clone()).await;
     broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
 
     Ok(Json(SetStateResponse {
-        online_state: verified_state,
+        online_state: effective.map_or(verified_state, |effective| effective.state),
     }))
 }
 
@@ -116,6 +121,13 @@ fn verify_auth_boxed(
 
 fn save_state_boxed(db: DatabaseConnection, did: String, state: String) -> BoxFuture<'static, ()> {
     Box::pin(async move { save_state(&db, did, state).await })
+}
+
+fn refresh_state_boxed(
+    db: DatabaseConnection,
+    did: String,
+) -> BoxFuture<'static, Option<EffectiveState>> {
+    Box::pin(async move { refresh_effective_state(&db, &did).await })
 }
 
 #[post("/xrpc/social.colibri.actor.setState?<state>&<auth>")]
@@ -134,6 +146,7 @@ pub async fn set_state(
         bridge.hum_outbox.clone(),
         verify_auth_boxed,
         save_state_boxed,
+        refresh_state_boxed,
     )
     .await
 }
@@ -181,6 +194,14 @@ mod tests {
                     *captured_clone.lock().unwrap() = Some((did, state));
                 })
             },
+            |_, _| {
+                Box::pin(async {
+                    Some(EffectiveState {
+                        state: String::from("away"),
+                        changed: true,
+                    })
+                })
+            },
         )
         .await
         .unwrap();
@@ -190,6 +211,55 @@ mod tests {
             *captured.lock().unwrap(),
             Some((String::from("did:plc:abc"), String::from("away")))
         );
+    }
+
+    #[tokio::test]
+    async fn set_state_with_reports_the_effective_state() {
+        let db = mock_db();
+        let (tx, _rx) = broadcast::channel(4);
+        let (hum_tx, _hum_rx) = mpsc::channel(4);
+        let result = set_state_with(
+            String::from("away"),
+            String::from("token"),
+            db,
+            tx,
+            hum_tx,
+            |_, _| Box::pin(async { Ok(String::from("did:plc:abc")) }),
+            |_, _, _| Box::pin(async {}),
+            |_, _| {
+                Box::pin(async {
+                    Some(EffectiveState {
+                        state: String::from("offline"),
+                        changed: false,
+                    })
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.online_state, "offline");
+    }
+
+    #[tokio::test]
+    async fn set_state_with_falls_back_to_the_requested_state() {
+        let db = mock_db();
+        let (tx, _rx) = broadcast::channel(4);
+        let (hum_tx, _hum_rx) = mpsc::channel(4);
+        let result = set_state_with(
+            String::from("dnd"),
+            String::from("token"),
+            db,
+            tx,
+            hum_tx,
+            |_, _| Box::pin(async { Ok(String::from("did:plc:abc")) }),
+            |_, _, _| Box::pin(async {}),
+            |_, _| Box::pin(async { None }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.online_state, "dnd");
     }
 
     #[tokio::test]
@@ -205,6 +275,7 @@ mod tests {
             hum_tx,
             |_, _| Box::pin(async { Ok(String::from("did:plc:abc")) }),
             |_, _, _| Box::pin(async {}),
+            |_, _| Box::pin(async { None }),
         )
         .await;
 

@@ -15,6 +15,7 @@ mod m20260710_000000_add_mention_role_to_notifications;
 mod m20260715_000000_fix_push_subscriptions_unique_key;
 mod m20260715_010000_add_record_data_hot_path_indexes;
 mod m20260722_000000_add_provider_to_push_subscriptions;
+mod m20260810_000000_add_manual_state_to_user_states;
 
 pub struct Migrator;
 
@@ -37,6 +38,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260715_000000_fix_push_subscriptions_unique_key::Migration),
             Box::new(m20260715_010000_add_record_data_hot_path_indexes::Migration),
             Box::new(m20260722_000000_add_provider_to_push_subscriptions::Migration),
+            Box::new(m20260810_000000_add_manual_state_to_user_states::Migration),
         ]
     }
 }

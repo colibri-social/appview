@@ -942,7 +942,8 @@ async fn process_event(
     // Centralized notification indexing for newly authored Colibri messages.
     // Persists rows + broadcasts to live WS subscribers, so each notification is
     // written exactly once regardless of subscriber count.
-    if record.collection == "social.colibri.message"
+    if record.live
+        && record.collection == "social.colibri.message"
         && record.action == "create"
         && let Some(payload) = record.record.clone()
         && let Ok(message) = serde_json::from_value::<ColibriMessage>(payload)
