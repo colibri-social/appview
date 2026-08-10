@@ -58,6 +58,7 @@ mod tests {
             .append_query_results([vec![user_states::Model {
                 did: String::from("did:plc:abc"),
                 state: String::from("dnd"),
+                manual_state: None,
                 channel: None,
                 vc: None,
                 vc_community: None,

@@ -11,19 +11,20 @@ use crate::lib::get_state::get_did_states;
 use crate::lib::hum_client::{self, OutboundHum};
 use crate::lib::notifications::IndexedNotification;
 use crate::lib::permissions::Permission;
-use crate::lib::state::{broadcast_state_change, clear_viewed_channel, set_vc_state, view_channel};
+use crate::lib::presence;
+use crate::lib::state::{
+    broadcast_state_change, clear_viewed_channel, refresh_effective_state, set_vc_state,
+    view_channel,
+};
 use crate::lib::tap::CommsBridge;
 use crate::lib::voice_events::broadcast_voice_state;
-use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
-use crate::{
-    lib::{
-        events::{ColibriClientEvent, ColibriServerEvent},
-        responses::{ErrorCode, ErrorResponse},
-        service_auth,
-        tap::register_dids,
-    },
-    xrpc::social::colibri::actor::set_state_handler::save_state,
+use crate::lib::{
+    events::{ColibriClientEvent, ColibriServerEvent},
+    responses::{ErrorCode, ErrorResponse},
+    service_auth,
+    tap::register_dids,
 };
+use crate::xrpc::social::colibri::actor::list_communities_handler::get_authorized_communities;
 use ::serde::Serialize;
 use futures_util::{SinkExt, StreamExt};
 use rocket::request::{FromRequest, Outcome};
@@ -544,9 +545,14 @@ async fn run_event_loop(
     let mut from_mute = from_mute;
     let mut from_progress = from_progress;
 
-    save_state(&db, did.clone(), String::from("online")).await;
+    presence::add_connection(&did);
+    let transitioned = refresh_effective_state(&db, &did)
+        .await
+        .is_some_and(|effective| effective.changed);
     register_dids(vec![did.clone()]).await;
-    broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
+    if transitioned {
+        broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
+    }
 
     // The communities this user belongs to, used to route `Community`-scoped
     // events. Refreshed whenever the user's own membership changes (see
@@ -570,9 +576,17 @@ async fn run_event_loop(
         }
     }
 
-    save_state(&db, did.clone(), String::from("offline")).await;
+    if presence::remove_connection(&did) > 0 {
+        return;
+    }
+
+    let transitioned = refresh_effective_state(&db, &did)
+        .await
+        .is_some_and(|effective| effective.changed);
     clear_viewed_channel(did.clone(), &db).await;
-    broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
+    if transitioned {
+        broadcast_state_change(&to_tap_broadcast, &did, &db, &hum_outbox).await;
+    }
 }
 
 /// Sentinel `Sec-WebSocket-Protocol` value that flags the *next* offered
@@ -924,6 +938,7 @@ mod tests {
             .append_query_results([vec![user_states::Model {
                 did: String::from("did:plc:me"),
                 state: String::from("online"),
+                manual_state: None,
                 vc: None,
                 vc_community: None,
                 channel: Some(String::from("community-1")),

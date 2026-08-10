@@ -380,6 +380,7 @@ mod tests {
         user_states::Model {
             did: String::from(did),
             state: String::from("online"),
+            manual_state: None,
             channel: None,
             vc: Some(String::from(vc)),
             vc_community: Some(String::from(community)),
@@ -451,6 +452,7 @@ mod tests {
             .append_query_results([vec![user_states::Model {
                 did: String::from("did:plc:alice"),
                 state: String::from("online"),
+                manual_state: None,
                 channel: None,
                 vc: None,
                 vc_community: None,

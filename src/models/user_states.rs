@@ -12,6 +12,8 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub state: String,
     #[sea_orm(column_type = "Text")]
+    pub manual_state: Option<String>,
+    #[sea_orm(column_type = "Text")]
     pub vc: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub vc_community: Option<String>,

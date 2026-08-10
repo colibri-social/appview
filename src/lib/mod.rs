@@ -45,6 +45,7 @@ pub mod participation;
 pub mod pds_client;
 pub mod pds_status;
 pub mod permissions;
+pub mod presence;
 pub mod push_send;
 pub mod push_subscriptions;
 pub mod range;
