@@ -879,6 +879,7 @@ async fn map_tap_event_with(
                             parent: record_data.parent,
                             text: Some(record_data.text),
                             author: Some(author),
+                            live: Some(event_record.live),
                         })),
                     },
                     scope,
@@ -911,6 +912,7 @@ async fn map_tap_event_with(
                             parent: None,
                             text: None,
                             author: None,
+                            live: None,
                         })),
                     },
                     scope,
@@ -1203,6 +1205,7 @@ async fn map_tap_event_with(
                             parent: None,
                             text: None,
                             author: None,
+                            live: None,
                         })),
                     },
                     EventScope::Community(event_record.did.clone()),
@@ -1992,6 +1995,44 @@ mod tests {
             assert_eq!(author.data.status.text, "Coding");
             assert_eq!(author.data.status.emoji.as_deref(), Some("💻"));
             assert!(author.data.avatar.is_some());
+            assert_eq!(data.live, Some(true));
+        } else {
+            panic!("expected message event data");
+        }
+    }
+
+    #[tokio::test]
+    async fn marks_a_replayed_message_upsert_as_not_live() {
+        let resolver = resolver();
+        resolver.seed_channel("chan-1", "did:plc:community");
+        let mut replayed = record(
+            "social.colibri.message",
+            "create",
+            json!({
+                "$type": "social.colibri.message",
+                "text": "old news",
+                "createdAt": "2024-01-01T00:00:00Z",
+                "channel": "chan-1"
+            }),
+        );
+        replayed.live = false;
+
+        let (event, _scope) = only(
+            map_tap_event_with(
+                &replayed,
+                mock_db(),
+                &resolver,
+                &|_, _, _, _| Box::pin(async { Err(serde_json::Error::custom("no profile")) }),
+                &|_| Box::pin(async { Ok(String::from("alice.test")) }),
+                &|_, _| Box::pin(async { Ok(String::from("offline")) }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        if let Some(ColibriServerEventData::Message(data)) = event.data {
+            assert_eq!(data.event, "upsert");
+            assert_eq!(data.live, Some(false));
         } else {
             panic!("expected message event data");
         }
