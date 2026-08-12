@@ -94,6 +94,105 @@ impl<'r> Responder<'r, 'static> for GetBlobResponse {
     }
 }
 
+pub struct WithAttachmentName<R> {
+    inner: R,
+    filename: Option<String>,
+}
+
+impl<'r, R: Responder<'r, 'static>> Responder<'r, 'static> for WithAttachmentName<R> {
+    fn respond_to(self, req: &'r Request<'_>) -> response::Result<'static> {
+        let inner = self.inner.respond_to(req)?;
+
+        let Some(name) = self.filename else {
+            return Ok(inner);
+        };
+
+        if !inner.status().class().is_success() {
+            return Ok(inner);
+        }
+
+        Ok(Response::build_from(inner)
+            .raw_header("Content-Disposition", attachment_disposition(&name))
+            .finalize())
+    }
+}
+
+const MAX_FILENAME_BYTES: usize = 256;
+
+fn sanitize_filename(raw: &str) -> Option<String> {
+    let base = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>();
+
+    let trimmed = base.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return None;
+    }
+
+    let mut capped = trimmed;
+    while capped.len() > MAX_FILENAME_BYTES {
+        let mut end = MAX_FILENAME_BYTES;
+        while end > 0 && !capped.is_char_boundary(end) {
+            end -= 1;
+        }
+        capped = &capped[..end];
+    }
+
+    let capped = capped.trim();
+    if capped.is_empty() {
+        return None;
+    }
+
+    Some(capped.to_string())
+}
+
+fn ascii_fallback(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn encode_rfc5987(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+
+    for byte in name.as_bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            );
+
+        if keep {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    out
+}
+
+fn attachment_disposition(raw: &str) -> String {
+    match sanitize_filename(raw) {
+        Some(name) => format!(
+            "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+            ascii_fallback(&name),
+            encode_rfc5987(&name)
+        ),
+        None => "attachment".to_string(),
+    }
+}
+
 /// The cache key for one rendition of a blob: the content-addressed CID (which
 /// also dedupes the same blob across DIDs), plus the variant when the caller
 /// asked for a resized one.
@@ -375,7 +474,7 @@ pub async fn warm_dimensions(
     }
 }
 
-#[get("/xrpc/com.atproto.sync.getBlob?<did>&<cid>&<variant>")]
+#[get("/xrpc/com.atproto.sync.getBlob?<did>&<cid>&<variant>&<filename>")]
 /// Proxies a blob fetch to the PDS that hosts the given DID, caching the bytes
 /// in memory and serving HTTP Range requests itself (the PDS doesn't), so media
 /// players can read duration up front and seek.
@@ -386,19 +485,212 @@ pub async fn get_blob(
     did: &str,
     cid: &str,
     variant: Option<&str>,
+    filename: Option<&str>,
     cache: &State<Arc<BlobCache>>,
     db: &State<DatabaseConnection>,
-) -> GetBlobResponse {
+) -> WithAttachmentName<GetBlobResponse> {
     let variant = variant.and_then(Variant::parse);
-    get_blob_inner(did, cid, variant, cache.inner(), db.inner()).await
+
+    WithAttachmentName {
+        inner: get_blob_inner(did, cid, variant, cache.inner(), db.inner()).await,
+        filename: filename.map(str::to_string),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::local::blocking::Client;
     use rocket::tokio;
+    use rocket::{Rocket, routes};
 
     const CID: &str = "bafkreiexamplecid";
+
+    #[get("/blob?<filename>")]
+    fn probe_blob(filename: Option<&str>) -> WithAttachmentName<GetBlobResponse> {
+        WithAttachmentName {
+            inner: GetBlobResponse::Blob {
+                bytes: Bytes::from_static(b"hello"),
+                content_type: "text/plain".to_string(),
+            },
+            filename: filename.map(str::to_string),
+        }
+    }
+
+    #[get("/missing?<filename>")]
+    fn probe_missing(filename: Option<&str>) -> WithAttachmentName<GetBlobResponse> {
+        WithAttachmentName {
+            inner: GetBlobResponse::NotFound,
+            filename: filename.map(str::to_string),
+        }
+    }
+
+    fn probe_client() -> Client {
+        let rocket: Rocket<rocket::Build> =
+            rocket::build().mount("/", routes![probe_blob, probe_missing]);
+        Client::tracked(rocket).expect("a local client")
+    }
+
+    #[test]
+    fn omitting_filename_leaves_the_response_untouched() {
+        let client = probe_client();
+        let response = client.get("/blob").dispatch();
+
+        assert_eq!(response.status(), Status::Ok);
+        assert!(
+            response.headers().get_one("Content-Disposition").is_none(),
+            "display callers must not be turned into downloads"
+        );
+        assert_eq!(
+            response.headers().get_one("Accept-Ranges"),
+            Some("bytes"),
+            "the inner response's own headers must survive"
+        );
+    }
+
+    #[test]
+    fn passing_filename_attaches_the_disposition() {
+        let client = probe_client();
+        let response = client.get("/blob?filename=notes.txt").dispatch();
+
+        assert_eq!(response.status(), Status::Ok);
+        assert_eq!(
+            response.headers().get_one("Content-Disposition"),
+            Some("attachment; filename=\"notes.txt\"; filename*=UTF-8''notes.txt")
+        );
+        assert_eq!(
+            response.headers().get_one("Cache-Control"),
+            Some(CACHE_CONTROL),
+            "the inner response's own headers must survive"
+        );
+    }
+
+    #[test]
+    fn a_range_request_keeps_its_partial_headers() {
+        let client = probe_client();
+        let response = client
+            .get("/blob?filename=notes.txt")
+            .header(rocket::http::Header::new("Range", "bytes=0-1"))
+            .dispatch();
+
+        assert_eq!(response.status(), Status::PartialContent);
+        assert_eq!(
+            response.headers().get_one("Content-Range"),
+            Some("bytes 0-1/5")
+        );
+        assert!(
+            response.headers().get_one("Content-Disposition").is_some(),
+            "a ranged download is still a download"
+        );
+    }
+
+    #[test]
+    fn an_error_response_never_carries_the_disposition() {
+        let client = probe_client();
+        let response = client.get("/missing?filename=notes.txt").dispatch();
+
+        assert_eq!(response.status(), Status::NotFound);
+        assert!(
+            response.headers().get_one("Content-Disposition").is_none(),
+            "a 404 body is not an attachment"
+        );
+    }
+
+    #[test]
+    fn a_plain_name_appears_in_both_forms() {
+        assert_eq!(
+            attachment_disposition("notes.txt"),
+            "attachment; filename=\"notes.txt\"; filename*=UTF-8''notes.txt"
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_name_keeps_utf8_and_degrades_the_fallback() {
+        let header = attachment_disposition("Präsentation.pdf");
+
+        assert!(
+            header.contains("filename=\"Pr_sentation.pdf\""),
+            "non-ASCII must not leak into the quoted fallback: {header}"
+        );
+        assert!(
+            header.contains("filename*=UTF-8''Pr%C3%A4sentation.pdf"),
+            "the real name must survive percent-encoded: {header}"
+        );
+    }
+
+    #[test]
+    fn control_characters_cannot_inject_a_header() {
+        let header = attachment_disposition("a\r\nX-Injected: 1.txt");
+
+        assert!(!header.contains('\r'), "CR survived: {header}");
+        assert!(!header.contains('\n'), "LF survived: {header}");
+        assert_eq!(
+            header,
+            "attachment; filename=\"aX-Injected: 1.txt\"; filename*=UTF-8''aX-Injected%3A%201.txt"
+        );
+    }
+
+    #[test]
+    fn traversal_reduces_to_the_basename() {
+        let header = attachment_disposition("../../etc/passwd");
+
+        assert!(
+            header.contains("filename=\"passwd\""),
+            "path segments must be dropped: {header}"
+        );
+    }
+
+    #[test]
+    fn windows_separators_reduce_to_the_basename() {
+        let header = attachment_disposition(r"C:\Users\me\secret.txt");
+
+        assert!(
+            header.contains("filename=\"secret.txt\""),
+            "backslash segments must be dropped: {header}"
+        );
+    }
+
+    #[test]
+    fn a_quote_cannot_escape_the_quoted_string() {
+        let header = attachment_disposition(r#"a"b.txt"#);
+
+        assert!(
+            header.contains("filename=\"a_b.txt\""),
+            "the quote must be neutralised: {header}"
+        );
+        assert_eq!(
+            header.matches('"').count(),
+            2,
+            "exactly one quoted pair may appear: {header}"
+        );
+    }
+
+    #[test]
+    fn an_over_long_name_is_truncated_on_a_char_boundary() {
+        let name = "ä".repeat(400);
+        let header = attachment_disposition(&name);
+
+        let quoted = header
+            .split_once("filename=\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(name, _)| name.to_string())
+            .expect("a quoted filename must be present");
+
+        assert!(
+            quoted.len() <= MAX_FILENAME_BYTES,
+            "truncation must respect the cap, got {}",
+            quoted.len()
+        );
+    }
+
+    #[test]
+    fn a_name_that_sanitizes_to_nothing_yields_a_bare_attachment() {
+        assert_eq!(attachment_disposition(""), "attachment");
+        assert_eq!(attachment_disposition(".."), "attachment");
+        assert_eq!(attachment_disposition("   "), "attachment");
+        assert_eq!(attachment_disposition("dir/"), "attachment");
+        assert_eq!(attachment_disposition("\r\n"), "attachment");
+    }
 
     #[test]
     fn variants_and_originals_get_distinct_cache_keys() {
