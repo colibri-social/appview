@@ -1,7 +1,7 @@
 use rocket::Request;
 use rocket::http::Status;
 use rocket::response::{self, Responder, Response};
-use rocket::serde::{Serialize, json::Json};
+use rocket::serde::{Deserialize, Serialize, json::Json};
 use sea_orm::DbErr;
 use trust_dns_resolver::error::ResolveError;
 
@@ -21,6 +21,8 @@ pub enum ErrorCode {
     SfuError,
     PdsUnavailable,
     CommunityCredentialsUnrecoverable,
+    NotCommunityHub,
+    AppViewNotAuthorized,
     UpstreamFailure,
     InternalError,
 }
@@ -40,20 +42,46 @@ impl ErrorCode {
             Self::SfuError => "SfuError",
             Self::PdsUnavailable => "PdsUnavailable",
             Self::CommunityCredentialsUnrecoverable => "CommunityCredentialsUnrecoverable",
+            Self::NotCommunityHub => "NotCommunityHub",
+            Self::AppViewNotAuthorized => "AppViewNotAuthorized",
             Self::UpstreamFailure => "UpstreamFailure",
             Self::InternalError => "InternalError",
         }
     }
 
+    pub fn try_from_str(name: &str) -> Option<Self> {
+        let code = match name {
+            "AuthRequired" => Self::AuthRequired,
+            "Forbidden" => Self::Forbidden,
+            "InvalidRequest" => Self::InvalidRequest,
+            "NotFound" => Self::NotFound,
+            "NotEnabled" => Self::NotEnabled,
+            "InvalidState" => Self::InvalidState,
+            "RateLimited" => Self::RateLimited,
+            "TooManySubscribers" => Self::TooManySubscribers,
+            "NotAnImage" => Self::NotAnImage,
+            "SfuError" => Self::SfuError,
+            "PdsUnavailable" => Self::PdsUnavailable,
+            "CommunityCredentialsUnrecoverable" => Self::CommunityCredentialsUnrecoverable,
+            "NotCommunityHub" => Self::NotCommunityHub,
+            "AppViewNotAuthorized" => Self::AppViewNotAuthorized,
+            "UpstreamFailure" => Self::UpstreamFailure,
+            "InternalError" => Self::InternalError,
+            _ => return None,
+        };
+        Some(code)
+    }
+
     pub const fn status(self) -> Status {
         match self {
             Self::AuthRequired => Status::Unauthorized,
-            Self::Forbidden | Self::NotEnabled => Status::Forbidden,
+            Self::Forbidden | Self::NotEnabled | Self::AppViewNotAuthorized => Status::Forbidden,
             Self::InvalidRequest | Self::InvalidState => Status::BadRequest,
             Self::NotFound => Status::NotFound,
             Self::RateLimited => Status::TooManyRequests,
             Self::NotAnImage => Status::UnsupportedMediaType,
             Self::TooManySubscribers => Status::ServiceUnavailable,
+            Self::NotCommunityHub => Status::MisdirectedRequest,
             Self::SfuError | Self::PdsUnavailable | Self::UpstreamFailure => Status::BadGateway,
             Self::CommunityCredentialsUnrecoverable | Self::InternalError => {
                 Status::InternalServerError
@@ -67,6 +95,7 @@ impl ErrorCode {
             body: Json(ErrorBody {
                 error: String::from(self.as_str()),
                 message: message.into(),
+                hub: None,
             }),
         }
     }
@@ -79,16 +108,51 @@ pub const PDS_UNAVAILABLE_MARKER: &str = "\u{1}pds-unavailable\u{1}";
 /// [`ErrorCode::CommunityCredentialsUnrecoverable`] failure.
 pub const CREDENTIALS_UNRECOVERABLE_MARKER: &str = "\u{1}credentials-unrecoverable\u{1}";
 
+pub const NOT_COMMUNITY_HUB_MARKER: &str = "\u{1}not-community-hub\u{1}";
+
 #[derive(Serialize, Debug)]
 pub struct ErrorBody {
     pub message: String,
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct ErrorResponse {
     pub code: ErrorCode,
     pub body: Json<ErrorBody>,
+}
+
+impl ErrorResponse {
+    pub fn with_hub(mut self, hub: impl Into<String>) -> Self {
+        self.body.hub = Some(hub.into());
+        self
+    }
+
+    pub fn from_peer(body: &[u8]) -> Self {
+        let Ok(peer) = serde_json::from_slice::<PeerErrorBody>(body) else {
+            return ErrorCode::UpstreamFailure
+                .with("The AppView administering this community returned an unreadable error.");
+        };
+
+        let code = ErrorCode::try_from_str(&peer.error).unwrap_or(ErrorCode::UpstreamFailure);
+        let mut response = code.with(peer.message.unwrap_or_else(|| peer.error.clone()));
+        if let Some(hub) = peer.hub {
+            response = response.with_hub(hub);
+        }
+        response
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct PeerErrorBody {
+    error: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    hub: Option<String>,
 }
 
 impl<'r> Responder<'r, 'static> for ErrorResponse {
@@ -134,6 +198,12 @@ impl From<DbErr> for ErrorResponse {
             let detail = &message[index + CREDENTIALS_UNRECOVERABLE_MARKER.len()..];
             return ErrorCode::CommunityCredentialsUnrecoverable.with(detail);
         }
+        if let Some(index) = message.find(NOT_COMMUNITY_HUB_MARKER) {
+            let hub = &message[index + NOT_COMMUNITY_HUB_MARKER.len()..];
+            return ErrorCode::NotCommunityHub
+                .with(format!("This community is administered by {hub}."))
+                .with_hub(hub);
+        }
 
         ErrorCode::InternalError.with(message)
     }
@@ -158,7 +228,7 @@ impl From<&FetchError> for ErrorCode {
 mod tests {
     use super::*;
 
-    const ALL_CODES: [ErrorCode; 14] = [
+    const ALL_CODES: [ErrorCode; 16] = [
         ErrorCode::AuthRequired,
         ErrorCode::Forbidden,
         ErrorCode::InvalidRequest,
@@ -171,6 +241,8 @@ mod tests {
         ErrorCode::SfuError,
         ErrorCode::PdsUnavailable,
         ErrorCode::CommunityCredentialsUnrecoverable,
+        ErrorCode::NotCommunityHub,
+        ErrorCode::AppViewNotAuthorized,
         ErrorCode::UpstreamFailure,
         ErrorCode::InternalError,
     ];
@@ -198,6 +270,30 @@ mod tests {
         );
         assert_eq!(res.body.message, "no usable password");
         assert_eq!(res.code.status(), Status::InternalServerError);
+    }
+
+    #[test]
+    fn db_err_carrying_the_hub_marker_names_the_hub() {
+        let err = DbErr::Custom(format!("{NOT_COMMUNITY_HUB_MARKER}did:web:other.example"));
+        let res = ErrorResponse::from(err);
+        assert_eq!(res.body.error, ErrorCode::NotCommunityHub.as_str());
+        assert_eq!(res.body.hub.as_deref(), Some("did:web:other.example"));
+        assert!(res.body.message.contains("did:web:other.example"));
+        assert_eq!(res.code.status(), Status::MisdirectedRequest);
+    }
+
+    #[test]
+    fn the_hub_field_is_absent_unless_set() {
+        let res = ErrorCode::Forbidden.with("nope");
+        assert!(res.body.hub.is_none());
+    }
+
+    #[test]
+    fn try_from_str_round_trips_every_code() {
+        for code in ALL_CODES {
+            assert_eq!(ErrorCode::try_from_str(code.as_str()), Some(code));
+        }
+        assert_eq!(ErrorCode::try_from_str("SomethingNewer"), None);
     }
 
     #[test]

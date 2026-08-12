@@ -201,6 +201,8 @@ pub struct ColibriCommunity {
     pub appview: Option<String>,
 }
 
+pub const CANONICAL_HUB_DID: &str = "did:web:api.colibri.social";
+
 /// The DID of the AppView that hubs a community's off-protocol traffic (Humming
 /// presence relay and, in future, the voice SFU). Falls back to the canonical
 /// `did:web:api.colibri.social` for records written before the `appview` field
@@ -211,7 +213,7 @@ pub fn community_hub_did(community: &ColibriCommunity) -> String {
         .appview
         .as_deref()
         .filter(|d| !d.is_empty())
-        .unwrap_or("did:web:api.colibri.social")
+        .unwrap_or(CANONICAL_HUB_DID)
         .to_string()
 }
 

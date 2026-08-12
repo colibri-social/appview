@@ -5,17 +5,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriModerationSubject;
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz_scoped,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::moderation::{self, ACTION_HIDE_MESSAGE, WriteRecordFn, write_moderation_boxed};
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
 const MESSAGE_NSID: &str = "social.colibri.message";
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct BlockMessageResponse {
     pub message: String,
 }
@@ -44,12 +43,14 @@ async fn message_channel_rkey(
         .map(|m| AtUri::rkey_or_value(&m.channel)))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn block_message_with(
+    relay: RelayContext,
     community_uri: String,
     message_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
     write_record_fn: &WriteRecordFn,
 ) -> Result<Json<BlockMessageResponse>, ErrorResponse> {
@@ -58,15 +59,20 @@ async fn block_message_with(
     };
     let channel_rkey = message_channel_rkey(&db, &message).await?;
 
-    with_community_authz_scoped(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.blockMessage",
         community_uri,
         Some(Permission::MessageDelete),
         channel_rkey.as_deref(),
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             moderation::issue_action(
                 write_record_fn,
@@ -92,17 +98,19 @@ async fn block_message_with(
 #[post("/xrpc/social.colibri.community.blockMessage?<community>&<message>&<auth>")]
 /// Hides a message in a community by writing a `hideMessage` moderation record.
 pub async fn block_message(
+    relay: RelayContext,
     community: &str,
     message: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<BlockMessageResponse>, ErrorResponse> {
     block_message_with(
+        relay,
         community.to_string(),
         message.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
         &write_moderation_boxed,
     )
@@ -114,7 +122,9 @@ mod tests {
     use super::*;
     use crate::lib::colibri::ColibriModeration;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::mock_db;
+    use crate::lib::test_fixtures::{
+        local_write_deps, mock_db, relay_ctx, write_deps_never_authenticating,
+    };
     use crate::models::record_data;
     use futures::future::BoxFuture;
     use rocket::tokio;
@@ -153,11 +163,12 @@ mod tests {
             })
         };
         let result = block_message_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
@@ -188,11 +199,12 @@ mod tests {
     async fn block_message_rejects_invalid_message_uri() {
         let db = mock_db();
         let result = block_message_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("not-a-uri"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { panic!("should not authenticate when uri is invalid") }),
+            write_deps_never_authenticating(),
             &|_, _, _| Box::pin(async { panic!("should not load authz") }),
             &|_, _, _| Box::pin(async { panic!("should not write") }),
         )
@@ -209,11 +221,12 @@ mod tests {
     async fn block_message_rejects_when_caller_lacks_permission() {
         let db = db_with_no_message_record();
         let result = block_message_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
@@ -267,11 +280,12 @@ mod tests {
         };
 
         let result = block_message_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &move |_, _, _| {
                 let authz = authz.clone();
                 Box::pin(async move { Ok(authz) })
@@ -322,11 +336,12 @@ mod tests {
         };
 
         let result = block_message_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("at://did:plc:alice/social.colibri.message/msg-1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &move |_, _, _| {
                 let authz = authz.clone();
                 Box::pin(async move { Ok(authz) })

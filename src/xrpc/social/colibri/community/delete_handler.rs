@@ -25,21 +25,20 @@ use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::community_credentials::{self, CommunityCredentials, SOURCE_APPVIEW_MANAGED};
 use crate::lib::community_write::not_found_error;
 use crate::lib::credential_recovery;
 use crate::lib::crypto;
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::pds_client::{self, PdsError};
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct DeleteCommunityResponse {
     pub did: String,
 }
@@ -93,11 +92,12 @@ fn upstream_error(message: String) -> ErrorResponse {
 
 #[allow(clippy::too_many_arguments)]
 async fn delete_community_with(
+    relay: RelayContext,
     community_uri: String,
     auth: String,
     admin_password: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
     load_creds_fn: &LoadCredsFn,
     delete_account_fn: &DeleteAccountFn,
@@ -108,14 +108,20 @@ async fn delete_community_with(
     purge_records_fn: &PurgeRecordsFn,
     hosted_check_fn: &HostedCheckFn,
 ) -> Result<Json<DeleteCommunityResponse>, ErrorResponse> {
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.delete",
         community_uri,
         Some(Permission::CommunityDelete),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let did = ctx.community.authority.clone();
 
@@ -304,6 +310,7 @@ fn hosted_check_boxed(
 #[post("/xrpc/social.colibri.community.delete?<community>&<auth>")]
 /// Deletes a community. Requires the `community.delete` permission.
 pub async fn delete_community(
+    relay: RelayContext,
     community: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
@@ -312,11 +319,12 @@ pub async fn delete_community(
         .map_err(|_| ErrorCode::InternalError.with("PDS_ADMIN_PASS env var not set"))?;
 
     let response = delete_community_with(
+        relay,
         community.to_string(),
         auth.to_string(),
         admin_password,
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
         &load_creds_boxed,
         &delete_account_boxed,
@@ -335,7 +343,9 @@ pub async fn delete_community(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::test_fixtures::{empty_authz, mock_db, owner_authz};
+    use crate::lib::test_fixtures::{
+        empty_authz, local_write_deps, mock_db, owner_authz, relay_ctx,
+    };
     use rocket::tokio;
     use std::sync::{Arc, Mutex};
 
@@ -397,11 +407,12 @@ mod tests {
             };
 
         let result = delete_community_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             String::from("admin-pass"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             &|_, _| Box::pin(async { Ok(Some(creds(SOURCE_APPVIEW_MANAGED))) }),
             &delete_account,
@@ -487,11 +498,12 @@ mod tests {
             };
 
         let result = delete_community_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             String::from("admin-pass"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             &|_, _| Box::pin(async { Ok(Some(creds("byo"))) }),
             &|_, _, _| Box::pin(async { panic!("BYO must not delete the PDS account") }),
@@ -569,11 +581,12 @@ mod tests {
             };
 
         let result = delete_community_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             String::from("admin-pass"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             &|_, _| Box::pin(async { Ok(Some(creds("byo"))) }),
             &|_, _, _| Box::pin(async { panic!("BYO must not delete the PDS account") }),
@@ -595,11 +608,12 @@ mod tests {
     async fn rejects_when_caller_lacks_permission() {
         let db = mock_db();
         let result = delete_community_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             String::from("admin-pass"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &|_, _, _| Box::pin(async { Ok(empty_authz()) }),
             &|_, _| Box::pin(async { panic!("should not load creds without permission") }),
             &|_, _, _| Box::pin(async { panic!("should not delete account") }),
@@ -622,11 +636,12 @@ mod tests {
     async fn returns_not_found_when_no_credentials_stored_and_not_hosted_by_us() {
         let db = mock_db();
         let result = delete_community_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             String::from("admin-pass"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             &|_, _| Box::pin(async { Ok(None) }),
             &|_, _, _| Box::pin(async { panic!("should not delete account") }),
@@ -664,11 +679,12 @@ mod tests {
         };
 
         let result = delete_community_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("token"),
             String::from("admin-pass"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
             &|_, _| Box::pin(async { Ok(None) }),
             &delete_account,

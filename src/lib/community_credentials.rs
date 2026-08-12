@@ -14,8 +14,10 @@ use sea_orm::{
     ActiveValue, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, sea_query,
 };
 
+use crate::lib::community_hub;
 use crate::lib::community_session_cache;
 use crate::lib::crypto::{self, CryptoError};
+use crate::lib::responses::CREDENTIALS_UNRECOVERABLE_MARKER;
 use crate::lib::time::current_iso8601_utc;
 use crate::models::community_credentials::{
     self, ActiveModel as CredentialsModel, Entity as Credentials, Model as CredentialsRow,
@@ -85,13 +87,13 @@ const MISSING_CREDENTIALS_MARKER: &str = "no credentials registered for communit
 /// The error every write path returns when this AppView holds no credentials
 /// for `community_did`.
 pub fn missing_credentials_err(community_did: &str) -> DbErr {
-    DbErr::Custom(format!("{MISSING_CREDENTIALS_MARKER}{community_did}"))
+    DbErr::Custom(format!(
+        "{CREDENTIALS_UNRECOVERABLE_MARKER}{MISSING_CREDENTIALS_MARKER}{community_did}"
+    ))
 }
 
-/// Whether `err` is the missing-credentials case, without logging. Callers that
-/// need the one-shot warning should use [`warn_missing_credentials_once`].
-pub fn is_missing_credentials(err: &DbErr) -> bool {
-    err.to_string().contains(MISSING_CREDENTIALS_MARKER)
+pub fn skip_community_write(err: &DbErr) -> bool {
+    warn_missing_credentials_once(err) || warn_not_hub_once(err)
 }
 
 /// Community DIDs already warned about
@@ -99,7 +101,7 @@ static WARNED: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(Ha
 
 /// Reports whether `err` is the missing-credentials case, logging a single
 /// warning the first time it's seen for a given community
-pub fn warn_missing_credentials_once(err: &DbErr) -> bool {
+fn warn_missing_credentials_once(err: &DbErr) -> bool {
     let message = err.to_string();
     let Some(idx) = message.find(MISSING_CREDENTIALS_MARKER) else {
         return false;
@@ -114,6 +116,23 @@ pub fn warn_missing_credentials_once(err: &DbErr) -> bool {
         log::warn!(
             "this AppView holds no credentials for community {community_did}; skipping \
              community-side writes for it"
+        );
+    }
+    true
+}
+
+static WARNED_NOT_HUB: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn warn_not_hub_once(err: &DbErr) -> bool {
+    let Some(hub) = community_hub::hub_from_err(err) else {
+        return false;
+    };
+
+    if WARNED_NOT_HUB.lock().unwrap().insert(hub.clone()) {
+        log::info!(
+            "communities administered by {hub} are not ours to write to; skipping their \
+             community-side writes"
         );
     }
     true

@@ -1,22 +1,21 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriCategory, ColibriCommunity};
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::ErrorResponse;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
 const CATEGORY_NSID: &str = "social.colibri.category";
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ReorderResponse {
     pub uri: String,
 }
@@ -40,11 +39,12 @@ fn normalize_order(values: &[String], label: &str) -> Result<Vec<String>, ErrorR
 // ---- community.reorderChannels ---------------------------------------------
 
 async fn reorder_channels_with(
+    relay: RelayContext,
     category_uri: String,
     channel_order: Vec<String>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
     let category =
@@ -54,14 +54,20 @@ async fn reorder_channels_with(
         category.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.reorderChannels",
         community_uri,
         Some(Permission::ChannelUpdate),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let category_rkey = &category.rkey;
@@ -102,17 +108,19 @@ async fn reorder_channels_with(
 /// provided as repeated query-string values.
 #[allow(non_snake_case)]
 pub async fn reorder_channels(
+    relay: RelayContext,
     category: &str,
     channelOrder: Vec<String>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
     reorder_channels_with(
+        relay,
         category.to_string(),
         channelOrder,
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -121,21 +129,28 @@ pub async fn reorder_channels(
 // ---- community.reorderCategories -------------------------------------------
 
 async fn reorder_categories_with(
+    relay: RelayContext,
     community_uri: String,
     category_order: Vec<String>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.reorderCategories",
         community_uri.clone(),
         Some(Permission::CategoryUpdate),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
 
@@ -179,17 +194,19 @@ async fn reorder_categories_with(
 /// is provided as repeated query-string values.
 #[allow(non_snake_case)]
 pub async fn reorder_categories(
+    relay: RelayContext,
     community: &str,
     categoryOrder: Vec<String>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ReorderResponse>, ErrorResponse> {
     reorder_categories_with(
+        relay,
         community.to_string(),
         categoryOrder,
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await

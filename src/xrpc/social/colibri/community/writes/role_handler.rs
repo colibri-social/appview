@@ -1,17 +1,16 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriRole;
 use crate::lib::community_authz::ActorAuthz;
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::xrpc::social::colibri::community::reads::list_roles_handler::fetch_role_records;
 
@@ -19,7 +18,7 @@ const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
 const ROLE_NSID: &str = "social.colibri.role";
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct RoleUriResponse {
     pub uri: String,
 }
@@ -105,6 +104,7 @@ async fn resolve_position_conflicts(
 
 #[allow(clippy::too_many_arguments)]
 async fn create_role_with(
+    relay: RelayContext,
     community_uri: String,
     name: String,
     color: Option<String>,
@@ -114,17 +114,23 @@ async fn create_role_with(
     mentionable: Option<bool>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<RoleUriResponse>, ErrorResponse> {
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.role.create",
         community_uri,
         Some(Permission::RoleManage),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             assert_position_manageable(&ctx.authz, position)?;
             assert_permissions_grantable(&ctx.authz, &permissions)?;
@@ -169,6 +175,7 @@ async fn create_role_with(
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn create_role(
+    relay: RelayContext,
     community: &str,
     name: &str,
     color: Option<&str>,
@@ -180,6 +187,7 @@ pub async fn create_role(
     db: &State<DatabaseConnection>,
 ) -> Result<Json<RoleUriResponse>, ErrorResponse> {
     create_role_with(
+        relay,
         community.to_string(),
         name.to_string(),
         color.map(str::to_string),
@@ -189,7 +197,7 @@ pub async fn create_role(
         mentionable,
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -199,6 +207,7 @@ pub async fn create_role(
 
 #[allow(clippy::too_many_arguments)]
 async fn update_role_with(
+    relay: RelayContext,
     role_uri: String,
     name: Option<String>,
     color: Option<String>,
@@ -208,7 +217,7 @@ async fn update_role_with(
     mentionable: Option<bool>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<RoleUriResponse>, ErrorResponse> {
     let role = AtUri::parse(&role_uri).ok_or_else(|| invalid_request("Invalid role AT-URI."))?;
@@ -217,14 +226,20 @@ async fn update_role_with(
         role.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.role.update",
         community_uri,
         Some(Permission::RoleManage),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let role_rkey = &role.rkey;
@@ -284,6 +299,7 @@ async fn update_role_with(
 )]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_role(
+    relay: RelayContext,
     role: &str,
     name: Option<&str>,
     color: Option<&str>,
@@ -295,6 +311,7 @@ pub async fn update_role(
     db: &State<DatabaseConnection>,
 ) -> Result<Json<RoleUriResponse>, ErrorResponse> {
     update_role_with(
+        relay,
         role.to_string(),
         name.map(str::to_string),
         color.map(str::to_string),
@@ -304,7 +321,7 @@ pub async fn update_role(
         mentionable,
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -313,10 +330,11 @@ pub async fn update_role(
 // ---- role.delete -----------------------------------------------------------
 
 async fn delete_role_with(
+    relay: RelayContext,
     role_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<RoleUriResponse>, ErrorResponse> {
     let role = AtUri::parse(&role_uri).ok_or_else(|| invalid_request("Invalid role AT-URI."))?;
@@ -325,14 +343,20 @@ async fn delete_role_with(
         role.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.role.delete",
         community_uri,
         Some(Permission::RoleManage),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let role_rkey = &role.rkey;
@@ -360,15 +384,17 @@ async fn delete_role_with(
 
 #[post("/xrpc/social.colibri.role.delete?<role>&<auth>")]
 pub async fn delete_role(
+    relay: RelayContext,
     role: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<RoleUriResponse>, ErrorResponse> {
     delete_role_with(
+        relay,
         role.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -377,7 +403,9 @@ pub async fn delete_role(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::test_fixtures::{member, mock_db, owner_authz, role};
+    use crate::lib::test_fixtures::{
+        local_write_deps, member, mock_db, owner_authz, relay_ctx, role,
+    };
     use crate::models::record_data;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -428,6 +456,7 @@ mod tests {
             .into_connection();
 
         let result = update_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.role/admin"),
             Some(String::from("Renamed")),
             None,
@@ -437,7 +466,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_, _, _| Box::pin(async { Ok(owner_authz()) }),
         )
         .await;
@@ -453,6 +482,7 @@ mod tests {
             .into_connection();
 
         let result = update_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.role/mod"),
             Some(String::from("Renamed")),
             None,
@@ -462,7 +492,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:admin")) }),
+            local_write_deps("did:plc:admin"),
             &|_, _, _| Box::pin(async { Ok(admin_authz()) }),
         )
         .await;
@@ -477,6 +507,7 @@ mod tests {
             .into_connection();
 
         let result = update_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.role/admin"),
             Some(String::from("Renamed")),
             None,
@@ -486,7 +517,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:admin")) }),
+            local_write_deps("did:plc:admin"),
             &|_, _, _| Box::pin(async { Ok(admin_authz()) }),
         )
         .await;
@@ -503,6 +534,7 @@ mod tests {
             .into_connection();
 
         let result = update_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.role/mod"),
             Some(String::from("Renamed")),
             None,
@@ -512,7 +544,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| Box::pin(async { Ok(mod_authz()) }),
         )
         .await;
@@ -527,6 +559,7 @@ mod tests {
         let db = mock_db();
 
         let result = create_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("Helper"),
             None,
@@ -536,7 +569,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| Box::pin(async { Ok(mod_authz()) }),
         )
         .await;
@@ -549,6 +582,7 @@ mod tests {
         let db = mock_db();
 
         let result = create_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("Sneaky"),
             None,
@@ -558,7 +592,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| Box::pin(async { Ok(mod_authz()) }),
         )
         .await;
@@ -573,6 +607,7 @@ mod tests {
         let db = mock_db();
 
         let result = create_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("Helper"),
             None,
@@ -582,7 +617,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| Box::pin(async { Ok(mod_authz()) }),
         )
         .await;
@@ -599,10 +634,11 @@ mod tests {
             .into_connection();
 
         let result = delete_role_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.role/mod"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| Box::pin(async { Ok(mod_authz()) }),
         )
         .await;

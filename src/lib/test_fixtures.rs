@@ -10,11 +10,17 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use sea_orm::{DatabaseBackend, DatabaseConnection, MockDatabase};
+use futures::future::BoxFuture;
+use sea_orm::{DatabaseBackend, DatabaseConnection, DbErr, MockDatabase};
 
 use crate::lib::colibri::{ColibriMember, ColibriRole, ColibriRoleChannelOverride};
 use crate::lib::community_authz::ActorAuthz;
+use crate::lib::community_hub::HubRouting;
+use crate::lib::handler::LoadAuthzFn;
+use crate::lib::peer_client::{PeerError, PeerReply, RelayCall};
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{DeclaredAppViewFn, RelayContext, RoutingFn, VerifyDelegatedFn, WriteDeps};
+use crate::lib::service_auth::{ServiceAuthError, VerifiedCaller};
 
 // ---- Common identifiers --------------------------------------------------
 
@@ -169,5 +175,85 @@ pub fn member(subject: &str, roles: Vec<&str>) -> ColibriMember {
         joined_at: String::from("2026-05-13T00:00:00Z"),
         nickname: None,
         from_membership: None,
+    }
+}
+
+pub fn relay_ctx() -> RelayContext {
+    RelayContext {
+        method: String::from("POST"),
+        path_and_query: String::from("/xrpc/test"),
+    }
+}
+
+fn routing_local(
+    _: DatabaseConnection,
+    _: String,
+) -> BoxFuture<'static, Result<HubRouting, DbErr>> {
+    Box::pin(async { Ok(HubRouting::Local) })
+}
+
+fn no_declaration(
+    _: DatabaseConnection,
+    _: String,
+) -> BoxFuture<'static, Result<Option<String>, DbErr>> {
+    Box::pin(async { Ok(None) })
+}
+
+fn never_relays(_: RelayCall) -> BoxFuture<'static, Result<PeerReply, PeerError>> {
+    Box::pin(async { panic!("a community we administer must not be relayed") })
+}
+
+fn unset_authz(
+    _: DatabaseConnection,
+    _: String,
+    _: String,
+) -> BoxFuture<'static, Result<ActorAuthz, DbErr>> {
+    Box::pin(async { panic!("this test's own authz seam should have replaced this one") })
+}
+
+pub fn local_write_deps(caller: &'static str) -> WriteDeps<'static> {
+    let verify: &'static VerifyDelegatedFn = Box::leak(Box::new(
+        move |_: String,
+              _: String|
+              -> BoxFuture<'static, Result<VerifiedCaller, ServiceAuthError>> {
+            Box::pin(async move {
+                Ok(VerifiedCaller {
+                    iss: String::from(caller),
+                    act: None,
+                })
+            })
+        },
+    ));
+
+    WriteDeps {
+        verify_delegated_fn: verify,
+        load_authz_fn: &unset_authz,
+        routing_fn: &routing_local as &'static RoutingFn,
+        declared_appview_fn: &no_declaration as &'static DeclaredAppViewFn,
+        forward_fn: &never_relays,
+    }
+}
+
+pub fn write_deps_with_authz<'a>(
+    caller: &'static str,
+    load_authz_fn: &'a LoadAuthzFn,
+) -> WriteDeps<'a> {
+    WriteDeps {
+        load_authz_fn,
+        ..local_write_deps(caller)
+    }
+}
+
+fn never_authenticates(
+    _: String,
+    _: String,
+) -> BoxFuture<'static, Result<VerifiedCaller, ServiceAuthError>> {
+    Box::pin(async { panic!("this request should have been refused before authenticating") })
+}
+
+pub fn write_deps_never_authenticating() -> WriteDeps<'static> {
+    WriteDeps {
+        verify_delegated_fn: &never_authenticates,
+        ..local_write_deps("did:plc:unused")
     }
 }

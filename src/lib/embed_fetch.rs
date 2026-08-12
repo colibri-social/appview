@@ -197,7 +197,7 @@ static CLIENT_CACHE: LazyLock<Mutex<LruCache<ClientKey, Client>>> = LazyLock::ne
 /// is not cheap, it constructs a fresh connection pool and loads the TLS root
 /// store, so doing it per request meant every blob fetch paid a full TLS
 /// handshake against a PDS we were already talking to.
-fn pinned_client(
+pub(crate) fn pinned_client(
     host: &str,
     addrs: &[SocketAddr],
     timeout: Duration,

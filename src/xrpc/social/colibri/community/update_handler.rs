@@ -4,16 +4,15 @@ use rocket::fs::TempFile;
 use rocket::serde::json::Json;
 use rocket::{FromForm, State, post};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::lib::colibri::ColibriCommunity;
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::handler::{
-    CallerContext, LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed,
-    with_community_authz,
-};
+use crate::lib::handler::{CallerContext, LoadAuthzFn, load_authz_boxed};
+use crate::lib::peer_client::PeerBody;
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, RelayRequest, WriteDeps, with_community_write};
 use crate::lib::responses::ErrorResponse;
 use crate::xrpc::util::unpack_image_file;
 
@@ -26,7 +25,7 @@ const COMMUNITY_RKEY: &str = "self";
 const MAX_PICTURE_MEBIBYTES: u64 = 10;
 const MAX_BANNER_MEBIBYTES: u64 = 10;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct UpdateCommunityResponse {
     pub uri: String,
 }
@@ -70,6 +69,7 @@ fn apply_patch(community: &mut ColibriCommunity, patch: CommunityPatch) {
 
 #[allow(clippy::too_many_arguments)]
 async fn update_community_with(
+    relay: RelayRequest,
     community_uri: String,
     name: Option<String>,
     description: Option<String>,
@@ -82,7 +82,7 @@ async fn update_community_with(
     remove_banner: bool,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<UpdateCommunityResponse>, ErrorResponse> {
     if remove_picture && picture_blob.is_some() {
@@ -96,14 +96,20 @@ async fn update_community_with(
         ));
     }
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.update",
         community_uri.clone(),
         Some(Permission::CommunityManage),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             // Read the current community record from cache.
             let current_data = community_write::read_cached(
@@ -208,6 +214,7 @@ async fn upload_image_to_pds(
 /// `removeBanner` drop the current one instead.
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn update_community(
+    relay: RelayContext,
     community: &str,
     name: Option<&str>,
     description: Option<&str>,
@@ -231,6 +238,13 @@ pub async fn update_community(
         };
 
     update_community_with(
+        relay_request(
+            relay,
+            picture_blob.as_deref(),
+            picture_mime.as_deref(),
+            banner_blob.as_deref(),
+            banner_mime.as_deref(),
+        ),
         community.to_string(),
         name.map(str::to_string),
         description.map(str::to_string),
@@ -243,16 +257,56 @@ pub async fn update_community(
         removeBanner.unwrap_or(false),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
 }
 
+const RELAY_BOUNDARY: &str = "colibri-relay-boundary-8f2c1a";
+
+fn relay_request(
+    relay: RelayContext,
+    picture: Option<&[u8]>,
+    picture_mime: Option<&str>,
+    banner: Option<&[u8]>,
+    banner_mime: Option<&str>,
+) -> RelayRequest {
+    let mut parts: Vec<(&str, &[u8], &str)> = Vec::new();
+    if let (Some(bytes), Some(mime)) = (picture, picture_mime) {
+        parts.push(("picture", bytes, mime));
+    }
+    if let (Some(bytes), Some(mime)) = (banner, banner_mime) {
+        parts.push(("banner", bytes, mime));
+    }
+    if parts.is_empty() {
+        return relay.into();
+    }
+
+    let mut bytes: Vec<u8> = Vec::new();
+    for (name, data, mime) in parts {
+        bytes.extend_from_slice(
+            format!(
+                "--{RELAY_BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"; \
+                 filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(b"\r\n");
+    }
+    bytes.extend_from_slice(format!("--{RELAY_BOUNDARY}--\r\n").as_bytes());
+
+    relay.with_body(PeerBody {
+        content_type: format!("multipart/form-data; boundary={RELAY_BOUNDARY}"),
+        bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::test_fixtures::mock_db;
+    use crate::lib::test_fixtures::{mock_db, relay_ctx, write_deps_never_authenticating};
     use rocket::tokio;
     use serde_json::json;
 
@@ -363,6 +417,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_new_banner_combined_with_removal() {
         let err = update_community_with(
+            relay_ctx().into(),
             String::from("at://did:plc:c/social.colibri.community/self"),
             None,
             None,
@@ -375,7 +430,7 @@ mod tests {
             true,
             String::from("token"),
             mock_db(),
-            &|_, _| Box::pin(async { panic!("must not authenticate") }),
+            write_deps_never_authenticating(),
             &|_, _, _| Box::pin(async { panic!("must not load authz") }),
         )
         .await

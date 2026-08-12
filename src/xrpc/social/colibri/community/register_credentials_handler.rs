@@ -124,7 +124,7 @@ async fn stamp_appview_on_community(
     db: &sea_orm::DatabaseConnection,
     community_did: &str,
 ) -> Result<(), DbErr> {
-    let (endpoint, _jwt) = community_write::community_session(db, community_did).await?;
+    let (endpoint, _jwt) = community_write::unchecked::community_session(db, community_did).await?;
 
     let existing = pds_client::get_record(&endpoint, community_did, COMMUNITY_NSID, "self")
         .await
@@ -146,7 +146,7 @@ async fn stamp_appview_on_community(
     };
     obj.insert(String::from("appview"), Value::String(appview_did));
 
-    community_write::put_record(db, community_did, COMMUNITY_NSID, "self", record).await
+    community_write::unchecked::put_record(db, community_did, COMMUNITY_NSID, "self", record).await
 }
 
 #[post(

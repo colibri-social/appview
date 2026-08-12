@@ -108,11 +108,7 @@ fn next_id(origin: &str) -> String {
     format!("{origin}:{}", HUM_SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Host portion of a `did:web` (with any percent-encoded port decoded), or
-/// `None` for other DID methods.
-fn did_web_host(did: &str) -> Option<String> {
-    did.strip_prefix("did:web:").map(|h| h.replace("%3A", ":"))
-}
+use crate::lib::peer_client::did_web_host;
 
 /// Runs the outbound Humming manager: spawns the egress-in reconciler and drains
 /// the ingress-out queue. Returns only if the outbox is closed.

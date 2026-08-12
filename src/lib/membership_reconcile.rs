@@ -19,7 +19,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriMembership;
-use crate::lib::community_credentials::warn_missing_credentials_once;
+use crate::lib::community_credentials::skip_community_write;
 use crate::lib::community_record::fetch_community_record;
 use crate::lib::moderation;
 use crate::models::record_data;
@@ -173,7 +173,7 @@ pub async fn reconcile_once(db: &DatabaseConnection) -> Result<ReconcileSummary,
             Ok(None) => summary.already_admitted += 1,
             Err(e) => {
                 summary.failed += 1;
-                if !warn_missing_credentials_once(&e) {
+                if !skip_community_write(&e) {
                     log::warn!(
                         "reconcile: admission failed for {} in {community_did}: {e}",
                         candidate.user_did

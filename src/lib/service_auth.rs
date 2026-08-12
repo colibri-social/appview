@@ -12,6 +12,14 @@ struct ServiceAuthClaims {
     aud: String,
     exp: u64,
     lxm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    act: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCaller {
+    pub iss: String,
+    pub act: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +36,8 @@ pub enum ServiceAuthError {
     InvalidLxm,
     #[error("token lifetime exceeds the maximum allowed")]
     LifetimeExceeded,
+    #[error("token carries a delegated actor but this method does not accept delegation")]
+    UnexpectedDelegation,
     #[error("could not resolve DID: {0}")]
     DidResolution(String),
     #[error("signing error: {0}")]
@@ -67,6 +77,20 @@ pub async fn verify_service_auth(
     token: &str,
     expected_lxm: &str,
 ) -> Result<String, ServiceAuthError> {
+    reject_delegation(verify_delegated_auth(token, expected_lxm).await?)
+}
+
+fn reject_delegation(caller: VerifiedCaller) -> Result<String, ServiceAuthError> {
+    if caller.act.is_some() {
+        return Err(ServiceAuthError::UnexpectedDelegation);
+    }
+    Ok(caller.iss)
+}
+
+pub async fn verify_delegated_auth(
+    token: &str,
+    expected_lxm: &str,
+) -> Result<VerifiedCaller, ServiceAuthError> {
     // Split JWT
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() != 3 {
@@ -144,7 +168,10 @@ pub async fn verify_service_auth(
         return Err(ServiceAuthError::InvalidSignature);
     }
 
-    Ok(claims.iss)
+    Ok(VerifiedCaller {
+        iss: claims.iss,
+        act: claims.act,
+    })
 }
 
 /// Verifies an inter-service auth JWT issued by a *peer AppView* (Humming).
@@ -165,6 +192,14 @@ pub async fn verify_appview_auth(
 /// (ES256K), for calling a peer AppView. `iss` is this AppView's `did:web`,
 /// `aud` the peer's DID, `lxm` the target method NSID. Short-lived (60s).
 pub fn mint_appview_auth(aud: &str, lxm: &str) -> Result<String, ServiceAuthError> {
+    mint_appview_auth_for(aud, lxm, None)
+}
+
+pub fn mint_appview_auth_for(
+    aud: &str,
+    lxm: &str,
+    act: Option<&str>,
+) -> Result<String, ServiceAuthError> {
     let raw_key = std::env::var("K256_PRIVATE_KEY")
         .map_err(|_| ServiceAuthError::Signing("K256_PRIVATE_KEY not set".into()))?;
     let bytes = hex::decode(raw_key).map_err(|e| ServiceAuthError::Signing(e.to_string()))?;
@@ -182,6 +217,7 @@ pub fn mint_appview_auth(aud: &str, lxm: &str) -> Result<String, ServiceAuthErro
         aud: aud.to_string(),
         exp: now + 60,
         lxm: Some(lxm.to_string()),
+        act: act.map(str::to_string),
     };
     let claims_b64 = URL_SAFE_NO_PAD.encode(
         serde_json::to_string(&claims).map_err(|e| ServiceAuthError::Signing(e.to_string()))?,
@@ -543,6 +579,61 @@ mod tests {
     fn select_vm_returns_none_when_nothing_has_a_key() {
         let methods = vec![vm_without_key("did:plc:abc#atproto")];
         assert!(select_verification_method(&methods, None).is_none());
+    }
+
+    #[test]
+    fn a_delegated_caller_is_refused_where_delegation_is_not_expected() {
+        let err = reject_delegation(VerifiedCaller {
+            iss: String::from("did:web:relay.example"),
+            act: Some(String::from("did:plc:victim")),
+        })
+        .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::UnexpectedDelegation));
+    }
+
+    #[test]
+    fn an_undelegated_caller_narrows_to_its_issuer() {
+        let did = reject_delegation(VerifiedCaller {
+            iss: String::from("did:plc:abc"),
+            act: None,
+        })
+        .unwrap();
+        assert_eq!(did, "did:plc:abc");
+    }
+
+    fn claims_json(act: Option<&str>) -> serde_json::Value {
+        let claims = ServiceAuthClaims {
+            iss: String::from("did:web:a"),
+            aud: String::from("did:web:b"),
+            exp: 1,
+            lxm: Some(String::from("social.colibri.community.banUser")),
+            act: act.map(str::to_string),
+        };
+        serde_json::to_value(&claims).unwrap()
+    }
+
+    #[test]
+    fn act_is_omitted_from_the_wire_when_absent() {
+        assert!(claims_json(None).get("act").is_none());
+    }
+
+    #[test]
+    fn act_is_carried_when_present() {
+        assert_eq!(
+            claims_json(Some("did:plc:actor")).get("act").unwrap(),
+            "did:plc:actor"
+        );
+    }
+
+    #[test]
+    fn claims_without_act_still_deserialise() {
+        let claims: ServiceAuthClaims = serde_json::from_value(json!({
+            "iss": "did:plc:abc",
+            "aud": "did:web:api.colibri.social",
+            "exp": 1u64,
+        }))
+        .unwrap();
+        assert!(claims.act.is_none());
     }
 
     #[test]

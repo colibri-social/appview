@@ -8,7 +8,7 @@ use sea_orm::DatabaseConnection;
 use serde_json::Value;
 
 use crate::lib::colibri::ColibriRole;
-use crate::lib::community_credentials::warn_missing_credentials_once;
+use crate::lib::community_credentials::skip_community_write;
 use crate::lib::community_write;
 use crate::lib::permissions::Permission;
 use crate::models::record_data;
@@ -47,7 +47,7 @@ pub fn spawn_heal(db: &DatabaseConnection, community_did: &str, records: &[recor
             if let Err(e) =
                 community_write::put_record(&db, &community_did, "social.colibri.role", &rkey, data)
                     .await
-                && !warn_missing_credentials_once(&e)
+                && !skip_community_write(&e)
             {
                 log::warn!("owner-role permission heal for {uri} failed: {e}");
             }

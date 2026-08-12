@@ -2,15 +2,14 @@ use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::prelude::Expr;
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriMember, ColibriRole};
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::models::record_data;
 use crate::xrpc::social::colibri::community::reads::list_roles_handler::fetch_role_records;
@@ -34,29 +33,37 @@ async fn highest_position_among(
         .max())
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SetMemberRolesResponse {
     pub did: String,
     pub roles: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn set_member_roles_with(
+    relay: RelayContext,
     community_uri: String,
     member_did: String,
     roles: Vec<String>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<SetMemberRolesResponse>, ErrorResponse> {
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.setMemberRoles",
         community_uri,
         Some(Permission::RoleManage),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
 
@@ -120,6 +127,7 @@ async fn set_member_roles_with(
 /// Replaces the role set for a community member. `roles` is provided as
 /// repeated query-string values (AT-URIs or bare rkeys).
 pub async fn set_member_roles(
+    relay: RelayContext,
     community: &str,
     member: &str,
     roles: Vec<String>,
@@ -127,12 +135,13 @@ pub async fn set_member_roles(
     db: &State<DatabaseConnection>,
 ) -> Result<Json<SetMemberRolesResponse>, ErrorResponse> {
     set_member_roles_with(
+        relay,
         community.to_string(),
         member.to_string(),
         roles,
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -142,7 +151,7 @@ pub async fn set_member_roles(
 mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::{member, role};
+    use crate::lib::test_fixtures::{local_write_deps, member, relay_ctx, role};
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
@@ -184,12 +193,13 @@ mod tests {
             .into_connection();
 
         let result = set_member_roles_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("did:plc:other"),
             vec![String::from("mod")],
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            local_write_deps("did:plc:caller"),
             &|_, _, _| Box::pin(async { Ok(caller_authz()) }),
         )
         .await;
@@ -207,12 +217,13 @@ mod tests {
             .into_connection();
 
         let result = set_member_roles_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("did:plc:caller"),
             vec![String::from("admin")],
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            local_write_deps("did:plc:caller"),
             &|_, _, _| Box::pin(async { Ok(caller_authz()) }),
         )
         .await;
@@ -232,12 +243,13 @@ mod tests {
             .into_connection();
 
         let result = set_member_roles_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("did:plc:caller"),
             vec![String::from("mod"), String::from("helper")],
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            local_write_deps("did:plc:caller"),
             &|_, _, _| Box::pin(async { Ok(caller_authz()) }),
         )
         .await;
@@ -260,12 +272,13 @@ mod tests {
             .into_connection();
 
         let result = set_member_roles_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("did:plc:target"),
             vec![String::from("admin")],
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:caller")) }),
+            local_write_deps("did:plc:caller"),
             &|_, _, _| Box::pin(async { Ok(caller_authz()) }),
         )
         .await;

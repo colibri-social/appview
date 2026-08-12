@@ -1,18 +1,16 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::channel_authz;
 use crate::lib::colibri::{ColibriCategory, ColibriChannel, ColibriRole};
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-    with_community_authz_scoped,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
@@ -25,7 +23,7 @@ fn forbidden_message(message: impl Into<String>) -> ErrorResponse {
     ErrorCode::Forbidden.with(message.into())
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ChannelUriResponse {
     pub uri: String,
 }
@@ -34,6 +32,7 @@ pub struct ChannelUriResponse {
 
 #[allow(clippy::too_many_arguments)]
 async fn create_channel_with(
+    relay: RelayContext,
     community_uri: String,
     category_uri: String,
     name: String,
@@ -43,20 +42,26 @@ async fn create_channel_with(
     allowed_members: Vec<String>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
     let category =
         AtUri::parse(&category_uri).ok_or_else(|| invalid_request("Invalid category AT-URI."))?;
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.channel.create",
         community_uri,
         Some(Permission::ChannelCreate),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let channel_rkey = generate_tid();
@@ -154,6 +159,7 @@ async fn create_channel_with(
 )]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn create_channel(
+    relay: RelayContext,
     community: &str,
     category: &str,
     name: &str,
@@ -165,6 +171,7 @@ pub async fn create_channel(
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
     create_channel_with(
+        relay,
         community.to_string(),
         category.to_string(),
         name.to_string(),
@@ -174,7 +181,7 @@ pub async fn create_channel(
         allowedMembers,
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -184,6 +191,7 @@ pub async fn create_channel(
 
 #[allow(clippy::too_many_arguments)]
 async fn update_channel_with(
+    relay: RelayContext,
     channel_uri: String,
     name: Option<String>,
     description: Option<String>,
@@ -195,7 +203,7 @@ async fn update_channel_with(
     category: Option<String>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
     let channel =
@@ -206,15 +214,20 @@ async fn update_channel_with(
     );
     let channel_rkey_scope = channel.rkey.clone();
 
-    with_community_authz_scoped(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.channel.update",
         community_uri,
         Some(Permission::ChannelUpdate),
         Some(&channel_rkey_scope),
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let channel_rkey = &channel.rkey;
@@ -405,6 +418,7 @@ async fn update_channel_with(
 )]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn update_channel(
+    relay: RelayContext,
     channel: &str,
     name: Option<&str>,
     description: Option<&str>,
@@ -418,6 +432,7 @@ pub async fn update_channel(
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
     update_channel_with(
+        relay,
         channel.to_string(),
         name.map(str::to_string),
         description.map(str::to_string),
@@ -429,7 +444,7 @@ pub async fn update_channel(
         category.map(str::to_string),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -438,10 +453,11 @@ pub async fn update_channel(
 // ---- channel.delete --------------------------------------------------------
 
 async fn delete_channel_with(
+    relay: RelayContext,
     channel_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
     let channel =
@@ -452,15 +468,20 @@ async fn delete_channel_with(
     );
     let channel_rkey_scope = channel.rkey.clone();
 
-    with_community_authz_scoped(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.channel.delete",
         community_uri,
         Some(Permission::ChannelDelete),
         Some(&channel_rkey_scope),
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let channel_rkey = &channel.rkey;
@@ -507,15 +528,17 @@ async fn delete_channel_with(
 
 #[post("/xrpc/social.colibri.channel.delete?<channel>&<auth>")]
 pub async fn delete_channel(
+    relay: RelayContext,
     channel: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
     delete_channel_with(
+        relay,
         channel.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -525,7 +548,9 @@ pub async fn delete_channel(
 mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::{member, mock_db, owner_authz, role, role_with_override};
+    use crate::lib::test_fixtures::{
+        local_write_deps, member, mock_db, owner_authz, relay_ctx, role, role_with_override,
+    };
     use crate::models::record_data;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
@@ -563,6 +588,7 @@ mod tests {
         };
 
         let result = update_channel_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.channel/chan1"),
             None,
             None,
@@ -574,7 +600,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &move |_, _, _| {
                 let authz = authz.clone();
                 Box::pin(async move { Ok(authz) })
@@ -608,6 +634,7 @@ mod tests {
         };
 
         let result = update_channel_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.channel/chan1"),
             Some(String::from("New name")),
             None,
@@ -619,7 +646,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &move |_, _, _| {
                 let authz = authz.clone();
                 Box::pin(async move { Ok(authz) })
@@ -656,6 +683,7 @@ mod tests {
         };
 
         let result = create_channel_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/self"),
             String::from("at://did:plc:owner/social.colibri.category/cat1"),
             String::from("Restricted"),
@@ -665,7 +693,7 @@ mod tests {
             vec![],
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &move |_, _, _| {
                 let authz = authz.clone();
                 Box::pin(async move { Ok(authz) })
@@ -711,6 +739,7 @@ mod tests {
         };
 
         let result = update_channel_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.channel/chan1"),
             None,
             None,
@@ -722,7 +751,7 @@ mod tests {
             None,
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
+            local_write_deps("did:plc:owner-human"),
             &move |_, _, _| {
                 let authz = authz.clone();
                 Box::pin(async move { Ok(authz) })
@@ -760,6 +789,7 @@ mod tests {
             .into_connection();
 
         let result = update_channel_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.channel/chan1"),
             None,
             None,
@@ -773,7 +803,7 @@ mod tests {
             )),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
+            local_write_deps("did:plc:owner-human"),
             &move |_, _, _| Box::pin(async { Ok(owner_authz()) }),
         )
         .await;
@@ -805,6 +835,7 @@ mod tests {
             .into_connection();
 
         let result = update_channel_with(
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.channel/chan1"),
             None,
             None,
@@ -818,7 +849,7 @@ mod tests {
             )),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner-human")) }),
+            local_write_deps("did:plc:owner-human"),
             &move |_, _, _| Box::pin(async { Ok(owner_authz()) }),
         )
         .await;

@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::community_credentials::{self, CommunityCredentials};
+use crate::lib::community_hub;
 use crate::lib::community_session_cache;
 use crate::lib::credential_recovery;
 use crate::lib::crypto;
@@ -55,16 +56,64 @@ pub fn invalid_request(message: impl Into<String>) -> ErrorResponse {
 
 // ---- Session helper --------------------------------------------------------
 
-/// Returns `(pds_endpoint, access_jwt)` for `community_did`, ready for immediate
-/// PDS calls.
-pub async fn community_session(
-    db: &DatabaseConnection,
-    community_did: &str,
-) -> Result<(String, String), DbErr> {
-    if let Some(session) = community_session_cache::get(community_did) {
-        return Ok(session);
+pub mod unchecked {
+    use super::*;
+
+    pub async fn community_session(
+        db: &DatabaseConnection,
+        community_did: &str,
+    ) -> Result<(String, String), DbErr> {
+        if let Some(session) = community_session_cache::get(community_did) {
+            return Ok(session);
+        }
+        fresh_session(db, community_did).await
     }
-    fresh_session(db, community_did).await
+
+    pub async fn with_session<'a, T, F>(
+        db: &DatabaseConnection,
+        community_did: &str,
+        op: F,
+    ) -> Result<T, DbErr>
+    where
+        F: Fn(String, String) -> BoxFuture<'a, Result<T, PdsError>>,
+    {
+        let (endpoint, jwt) = community_session(db, community_did).await?;
+
+        match op(endpoint, jwt).await {
+            Ok(value) => Ok(value),
+
+            Err(e) if e.is_stale_token() => {
+                log::debug!(
+                    "cached session for community {community_did} was stale; re-authenticating"
+                );
+                community_session_cache::invalidate(community_did);
+
+                let (endpoint, jwt) = fresh_session(db, community_did).await?;
+                op(endpoint, jwt).await.map_err(pds_err_to_db)
+            }
+
+            Err(e) => Err(pds_err_to_db(e)),
+        }
+    }
+
+    pub async fn put_record(
+        db: &DatabaseConnection,
+        community_did: &str,
+        nsid: &str,
+        rkey: &str,
+        data: Value,
+    ) -> Result<(), DbErr> {
+        with_session(db, community_did, |endpoint, jwt| {
+            let data = data.clone();
+            Box::pin(async move {
+                pds_client::put_record(&endpoint, &jwt, community_did, nsid, rkey, &data).await
+            })
+        })
+        .await?;
+
+        cache_upsert(db, community_did, nsid, rkey, data).await;
+        Ok(())
+    }
 }
 
 /// Authenticates from scratch, ignoring any cached token.
@@ -152,23 +201,8 @@ pub async fn with_session<'a, T, F>(
 where
     F: Fn(String, String) -> BoxFuture<'a, Result<T, PdsError>>,
 {
-    let (endpoint, jwt) = community_session(db, community_did).await?;
-
-    match op(endpoint, jwt).await {
-        Ok(value) => Ok(value),
-
-        Err(e) if e.is_stale_token() => {
-            log::debug!(
-                "cached session for community {community_did} was stale; re-authenticating"
-            );
-            community_session_cache::invalidate(community_did);
-
-            let (endpoint, jwt) = fresh_session(db, community_did).await?;
-            op(endpoint, jwt).await.map_err(pds_err_to_db)
-        }
-
-        Err(e) => Err(pds_err_to_db(e)),
-    }
+    community_hub::ensure_hub(db, community_did).await?;
+    unchecked::with_session(db, community_did, op).await
 }
 
 // ---- Record write helpers --------------------------------------------------
@@ -359,6 +393,16 @@ mod tests {
         format!("did:plc:write-{tag}")
     }
 
+    fn expect_hub_lookup(
+        db: MockDatabase,
+        did: &str,
+        pds_endpoint: &str,
+        source: &str,
+    ) -> MockDatabase {
+        db.append_query_results([Vec::<record_data::Model>::new()])
+            .append_query_results([vec![credentials_row(did, pds_endpoint, source)]])
+    }
+
     fn credentials_row(did: &str, pds_endpoint: &str, source: &str) -> credentials_model::Model {
         let (ciphertext, nonce) = crypto::encrypt(STORED_PASSWORD.as_bytes(), &install_key())
             .expect("fixture encryption should succeed");
@@ -458,7 +502,7 @@ mod tests {
             )]])
             .into_connection();
 
-        let (_endpoint, jwt) = community_session(&db, &did).await.unwrap();
+        let (_endpoint, jwt) = unchecked::community_session(&db, &did).await.unwrap();
         assert_eq!(jwt, "jwt-1");
         assert_eq!(login_identifiers(&server).await, vec![did.clone()]);
 
@@ -485,7 +529,7 @@ mod tests {
             .append_query_results([vec![credentials_row(&did, &server.uri(), SOURCE_BYO)]])
             .into_connection();
 
-        community_session(&db, &did).await.unwrap();
+        unchecked::community_session(&db, &did).await.unwrap();
         assert_eq!(
             login_identifiers(&server).await,
             vec![String::from("c-abc.test")]
@@ -534,7 +578,7 @@ mod tests {
             }])
             .into_connection();
 
-        let (_endpoint, jwt) = community_session(&db, &did)
+        let (_endpoint, jwt) = unchecked::community_session(&db, &did)
             .await
             .expect("recovery should have restored access");
 
@@ -578,7 +622,7 @@ mod tests {
             .append_query_results([vec![row.clone()], vec![row]])
             .into_connection();
 
-        community_session(&db, &did)
+        unchecked::community_session(&db, &did)
             .await
             .expect_err("a BYO rejection is terminal");
 
@@ -611,7 +655,9 @@ mod tests {
             .append_query_results([vec![row.clone()], vec![row]])
             .into_connection();
 
-        community_session(&db, &did).await.expect_err("not ours");
+        unchecked::community_session(&db, &did)
+            .await
+            .expect_err("not ours");
         assert_eq!(rotation_count(&server).await, 0);
     }
 
@@ -636,7 +682,7 @@ mod tests {
             .append_query_results([vec![row.clone()], vec![row]])
             .into_connection();
 
-        let err = community_session(&db, &did)
+        let err = unchecked::community_session(&db, &did)
             .await
             .expect_err("no authority");
         assert!(
@@ -663,7 +709,7 @@ mod tests {
             ])
             .into_connection();
 
-        let err = community_session(&db, &did)
+        let err = unchecked::community_session(&db, &did)
             .await
             .expect_err("nothing to authenticate with");
         assert!(
@@ -697,7 +743,7 @@ mod tests {
             .into_connection();
 
         for _ in 0..5 {
-            community_session(&db, &did).await.unwrap();
+            unchecked::community_session(&db, &did).await.unwrap();
         }
 
         assert_eq!(
@@ -715,7 +761,7 @@ mod tests {
                 SOURCE_APPVIEW_MANAGED,
             )]])
             .into_connection();
-        community_session(&db, &did).await.unwrap();
+        unchecked::community_session(&db, &did).await.unwrap();
         assert_eq!(login_count(&server).await, 2);
 
         community_session_cache::invalidate(&did);
@@ -756,13 +802,18 @@ mod tests {
             .await;
 
         let row = credentials_row(&did, &server.uri(), SOURCE_APPVIEW_MANAGED);
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![row.clone()], vec![row]])
-            .append_exec_results([MockExecResult {
-                last_insert_id: 1,
-                rows_affected: 1,
-            }])
-            .into_connection();
+        let db = expect_hub_lookup(
+            MockDatabase::new(DatabaseBackend::Postgres),
+            &did,
+            &server.uri(),
+            SOURCE_APPVIEW_MANAGED,
+        )
+        .append_query_results([vec![row.clone()], vec![row]])
+        .append_exec_results([MockExecResult {
+            last_insert_id: 1,
+            rows_affected: 1,
+        }])
+        .into_connection();
 
         let rkey = create_record(
             &db,
@@ -813,9 +864,14 @@ mod tests {
             .await;
 
         let row = credentials_row(&did, &server.uri(), SOURCE_APPVIEW_MANAGED);
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![row.clone()], vec![row]])
-            .into_connection();
+        let db = expect_hub_lookup(
+            MockDatabase::new(DatabaseBackend::Postgres),
+            &did,
+            &server.uri(),
+            SOURCE_APPVIEW_MANAGED,
+        )
+        .append_query_results([vec![row.clone()], vec![row]])
+        .into_connection();
 
         create_record(
             &db,

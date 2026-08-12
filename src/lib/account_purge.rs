@@ -228,7 +228,7 @@ async fn revoke_memberships(db: &DatabaseConnection, did: &str) {
             continue;
         }
         if let Err(e) = moderation::revoke_community_member(db, community_did, did).await
-            && !community_credentials::is_missing_credentials(&e)
+            && !community_credentials::skip_community_write(&e)
         {
             log::warn!("Could not revoke {did}'s membership in {community_did}: {e}");
         }

@@ -2,21 +2,20 @@ use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::{DatabaseConnection, DbErr};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriModerationSubject;
 use crate::lib::community_record::fetch_community_record;
 use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
 use crate::lib::get_state::get_did_states;
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::moderation::{
     self, ACTION_BAN, ACTION_KICK, ACTION_UNBAN, RevokeMemberFn, WriteRecordFn,
     revoke_member_boxed, write_moderation_boxed,
 };
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::state::leave_vc;
 use crate::lib::tap::CommsBridge;
@@ -27,7 +26,7 @@ use crate::xrpc::social::colibri::community::list_applications_handler::{
     Application, find_application_for_did,
 };
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct BanUserResponse {
     pub did: String,
     pub handle: String,
@@ -105,13 +104,14 @@ fn find_application_boxed(
 #[allow(clippy::too_many_arguments)]
 async fn moderate_user_with(
     action: &'static str,
+    relay: RelayContext,
     community_uri: String,
     identifier: String,
     auth: String,
     db: DatabaseConnection,
     lxm: &'static str,
     permission: Permission,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     resolve_fn: &ResolveFn,
     load_authz_fn: &LoadAuthzFn,
     write_record_fn: &WriteRecordFn,
@@ -120,18 +120,24 @@ async fn moderate_user_with(
     find_application_fn: &FindApplicationFn,
     broadcast_fn: &BroadcastFn,
 ) -> Result<Json<BanUserResponse>, ErrorResponse> {
-    let (target_did, target_handle) = resolve_fn(identifier).await?;
-    let target_did_for_body = target_did.clone();
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
 
-    with_community_authz(
+    with_community_write(
+        relay,
         auth,
         lxm,
         community_uri,
         Some(permission),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         move |ctx, db| async move {
+            let (target_did, target_handle) = resolve_fn(identifier).await?;
+            let target_did_for_body = target_did.clone();
+
             // Hierarchy check for any action that targets a present member
             // (ban, kick). Unban is exempt because the target is, by
             // definition, not currently in the community.
@@ -331,6 +337,7 @@ async fn disconnect_from_community_vc(
 #[post("/xrpc/social.colibri.community.banUser?<community>&<identifier>&<auth>")]
 /// Bans a user from a community by writing a `ban` moderation record.
 pub async fn ban_user(
+    relay: RelayContext,
     community: &str,
     identifier: &str,
     auth: &str,
@@ -340,13 +347,14 @@ pub async fn ban_user(
     let sender = bridge.applications.clone();
     let result = moderate_user_with(
         ACTION_BAN,
+        relay,
         community.to_string(),
         identifier.to_string(),
         auth.to_string(),
         db.inner().clone(),
         "social.colibri.community.banUser",
         Permission::MemberBan,
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
@@ -369,6 +377,7 @@ pub async fn ban_user(
 #[post("/xrpc/social.colibri.community.unbanUser?<community>&<identifier>&<auth>")]
 /// Unbans a user from a community by writing an `unban` moderation record.
 pub async fn unban_user(
+    relay: RelayContext,
     community: &str,
     identifier: &str,
     auth: &str,
@@ -378,13 +387,14 @@ pub async fn unban_user(
     let sender = bridge.applications.clone();
     moderate_user_with(
         ACTION_UNBAN,
+        relay,
         community.to_string(),
         identifier.to_string(),
         auth.to_string(),
         db.inner().clone(),
         "social.colibri.community.unbanUser",
         Permission::MemberUnban,
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
@@ -405,6 +415,7 @@ pub async fn unban_user(
 /// just revokes their current membership. The same hierarchy guard as `ban`
 /// applies — callers can only kick members ranked strictly below them.
 pub async fn kick_user(
+    relay: RelayContext,
     community: &str,
     identifier: &str,
     auth: &str,
@@ -414,13 +425,14 @@ pub async fn kick_user(
     let sender = bridge.applications.clone();
     let result = moderate_user_with(
         ACTION_KICK,
+        relay,
         community.to_string(),
         identifier.to_string(),
         auth.to_string(),
         db.inner().clone(),
         "social.colibri.community.kickUser",
         Permission::MemberKick,
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
@@ -445,6 +457,7 @@ pub async fn kick_user(
 /// accepts a DID instead of an identifier, avoiding a handle-resolution
 /// round-trip when the caller already holds the member's DID.
 pub async fn kick(
+    relay: RelayContext,
     community: &str,
     member: &str,
     auth: &str,
@@ -454,13 +467,14 @@ pub async fn kick(
     let sender = bridge.applications.clone();
     let result = moderate_user_with(
         ACTION_KICK,
+        relay,
         community.to_string(),
         member.to_string(),
         auth.to_string(),
         db.inner().clone(),
         "social.colibri.community.kick",
         Permission::MemberKick,
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &resolve_boxed,
         &load_authz_boxed,
         &write_moderation_boxed,
@@ -486,7 +500,7 @@ mod tests {
     use crate::lib::at_uri::AtUri;
     use crate::lib::colibri::ColibriModeration;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::{member, mock_db, role};
+    use crate::lib::test_fixtures::{local_write_deps, member, mock_db, relay_ctx, role};
     use crate::models::record_data;
     use rocket::tokio;
     use sea_orm::DbErr;
@@ -529,13 +543,14 @@ mod tests {
         };
         let result = moderate_user_with(
             ACTION_BAN,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.banUser",
             Permission::MemberBan,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:owner")) }),
+            local_write_deps("did:plc:owner"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
@@ -576,13 +591,14 @@ mod tests {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.banUser",
             Permission::MemberBan,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
@@ -616,13 +632,14 @@ mod tests {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_BAN,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.banUser",
             Permission::MemberBan,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
@@ -687,13 +704,14 @@ mod tests {
 
         let result = moderate_user_with(
             ACTION_KICK,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.kickUser",
             Permission::MemberKick,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
@@ -742,13 +760,14 @@ mod tests {
 
         let result = moderate_user_with(
             ACTION_KICK,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.kickUser",
             Permission::MemberKick,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
@@ -842,13 +861,14 @@ mod tests {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_KICK,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.kickUser",
             Permission::MemberKick,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))
@@ -892,13 +912,14 @@ mod tests {
         let db = mock_db();
         let result = moderate_user_with(
             ACTION_UNBAN,
+            relay_ctx(),
             String::from("at://did:plc:owner/social.colibri.community/c1"),
             String::from("did:plc:target"),
             String::from("token"),
             db,
             "social.colibri.community.unbanUser",
             Permission::MemberUnban,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_| {
                 Box::pin(async {
                     Ok((String::from("did:plc:target"), String::from("target.test")))

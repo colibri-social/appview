@@ -1,23 +1,22 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriCategory, ColibriCommunity};
 use crate::lib::community_write::{self, invalid_request, not_found_error};
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::moderation::generate_tid;
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::ErrorResponse;
 
 const COMMUNITY_NSID: &str = "social.colibri.community";
 const COMMUNITY_RKEY: &str = "self";
 const CATEGORY_NSID: &str = "social.colibri.category";
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct CategoryUriResponse {
     pub uri: String,
 }
@@ -25,21 +24,28 @@ pub struct CategoryUriResponse {
 // ---- category.create -------------------------------------------------------
 
 async fn create_category_with(
+    relay: RelayContext,
     community_uri: String,
     name: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.category.create",
         community_uri,
         Some(Permission::CategoryCreate),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let category_rkey = generate_tid();
@@ -96,17 +102,19 @@ async fn create_category_with(
 
 #[post("/xrpc/social.colibri.category.create?<community>&<name>&<auth>")]
 pub async fn create_category(
+    relay: RelayContext,
     community: &str,
     name: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
     create_category_with(
+        relay,
         community.to_string(),
         name.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -115,11 +123,12 @@ pub async fn create_category(
 // ---- category.update -------------------------------------------------------
 
 async fn update_category_with(
+    relay: RelayContext,
     category_uri: String,
     name: Option<String>,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
     let category =
@@ -129,14 +138,20 @@ async fn update_category_with(
         category.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.category.update",
         community_uri,
         Some(Permission::CategoryUpdate),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let category_rkey = &category.rkey;
@@ -167,17 +182,19 @@ async fn update_category_with(
 
 #[post("/xrpc/social.colibri.category.update?<category>&<name>&<auth>")]
 pub async fn update_category(
+    relay: RelayContext,
     category: &str,
     name: Option<&str>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
     update_category_with(
+        relay,
         category.to_string(),
         name.map(str::to_string),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await
@@ -186,10 +203,11 @@ pub async fn update_category(
 // ---- category.delete -------------------------------------------------------
 
 async fn delete_category_with(
+    relay: RelayContext,
     category_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
     let category =
@@ -199,14 +217,20 @@ async fn delete_category_with(
         category.authority, COMMUNITY_NSID, COMMUNITY_RKEY
     );
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.category.delete",
         community_uri,
         Some(Permission::CategoryDelete),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
             let category_rkey = &category.rkey;
@@ -247,15 +271,17 @@ async fn delete_category_with(
 
 #[post("/xrpc/social.colibri.category.delete?<category>&<auth>")]
 pub async fn delete_category(
+    relay: RelayContext,
     category: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<CategoryUriResponse>, ErrorResponse> {
     delete_category_with(
+        relay,
         category.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
     )
     .await

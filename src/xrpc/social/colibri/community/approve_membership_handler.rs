@@ -21,22 +21,21 @@ use futures::future::BoxFuture;
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::ColibriMembership;
 use crate::lib::dismissed_applications;
 use crate::lib::events::{ApplicationEventData, ColibriServerEvent, ColibriServerEventData};
-use crate::lib::handler::{
-    LoadAuthzFn, VerifyAuthFn, load_authz_boxed, verify_auth_boxed, with_community_authz,
-};
+use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
 use crate::lib::moderation;
 use crate::lib::permissions::Permission;
+use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::tap::CommsBridge;
 use crate::models::record_data;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ApproveMembershipResponse {
     /// DID of the user who was admitted.
     pub did: String,
@@ -151,10 +150,11 @@ fn invalid_request(message: &str) -> ErrorResponse {
 
 #[allow(clippy::too_many_arguments)]
 async fn approve_membership_with(
+    relay: RelayContext,
     membership_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: WriteDeps<'_>,
     load_authz_fn: &LoadAuthzFn,
     fetch_membership_fn: &FetchMembershipFn,
     write_member_fn: &WriteMemberFn,
@@ -176,14 +176,20 @@ async fn approve_membership_with(
 
     let community_uri_string = membership.community.clone();
 
-    with_community_authz(
+    let deps = WriteDeps {
+        load_authz_fn,
+        ..deps
+    };
+
+    with_community_write(
+        relay,
         auth,
         "social.colibri.community.approveMembership",
         community_uri_string,
         Some(Permission::ApprovalManage),
+        None,
         db,
-        verify_auth_fn,
-        load_authz_fn,
+        &deps,
         move |ctx, db| async move {
             if is_banned_fn(
                 db.clone(),
@@ -250,6 +256,7 @@ async fn approve_membership_with(
 /// hold the `approval.manage` permission. Idempotent on already-admitted
 /// members.
 pub async fn approve_membership(
+    relay: RelayContext,
     membership: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
@@ -257,10 +264,11 @@ pub async fn approve_membership(
 ) -> Result<Json<ApproveMembershipResponse>, ErrorResponse> {
     let sender = bridge.applications.clone();
     approve_membership_with(
+        relay,
         membership.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        WriteDeps::production(),
         &load_authz_boxed,
         &fetch_membership_boxed,
         &write_member_boxed,
@@ -277,7 +285,9 @@ pub async fn approve_membership(
 mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
-    use crate::lib::test_fixtures::{member, mock_db, role};
+    use crate::lib::test_fixtures::{
+        local_write_deps, member, mock_db, relay_ctx, role, write_deps_never_authenticating,
+    };
     use rocket::tokio;
     use std::sync::{Arc, Mutex};
 
@@ -322,10 +332,11 @@ mod tests {
             };
 
         let result = approve_membership_with(
+            relay_ctx(),
             String::from("at://did:plc:applicant/social.colibri.membership/m1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
@@ -380,10 +391,11 @@ mod tests {
     async fn rejects_when_caller_lacks_approval_permission() {
         let db = mock_db();
         let result = approve_membership_with(
+            relay_ctx(),
             String::from("at://did:plc:applicant/social.colibri.membership/m1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:rando")) }),
+            local_write_deps("did:plc:rando"),
             &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
@@ -407,10 +419,11 @@ mod tests {
     async fn rejects_banned_subject() {
         let db = mock_db();
         let result = approve_membership_with(
+            relay_ctx(),
             String::from("at://did:plc:applicant/social.colibri.membership/m1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:mod")) }),
+            local_write_deps("did:plc:mod"),
             &|_, _, _| {
                 Box::pin(async {
                     Ok(ActorAuthz {
@@ -437,10 +450,11 @@ mod tests {
     async fn rejects_when_membership_record_missing() {
         let db = mock_db();
         let result = approve_membership_with(
+            relay_ctx(),
             String::from("at://did:plc:applicant/social.colibri.membership/m1"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { panic!("should not authenticate before validating uri") }),
+            write_deps_never_authenticating(),
             &|_, _, _| Box::pin(async { panic!("should not load authz") }),
             &|_, _| Box::pin(async { Ok(None) }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member") }),
@@ -459,10 +473,11 @@ mod tests {
     async fn rejects_uri_with_wrong_collection() {
         let db = mock_db();
         let result = approve_membership_with(
+            relay_ctx(),
             String::from("at://did:plc:applicant/app.bsky.feed.post/abc"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { panic!("should not authenticate") }),
+            write_deps_never_authenticating(),
             &|_, _, _| Box::pin(async { panic!("should not load authz") }),
             &|_, _| Box::pin(async { panic!("should not fetch") }),
             &|_, _, _, _, _| Box::pin(async { panic!("should not write member") }),

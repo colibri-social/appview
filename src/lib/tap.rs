@@ -7,7 +7,7 @@ use crate::lib::colibri::{
     ColibriModerationSubject, ColibriReaction,
 };
 use crate::lib::community_authz;
-use crate::lib::community_credentials::{self, warn_missing_credentials_once};
+use crate::lib::community_credentials::skip_community_write;
 use crate::lib::community_record::fetch_community_record;
 use crate::lib::community_write;
 use crate::lib::event_scope::{CommunityResolver, ScopedEvent, SharedScopedEvent};
@@ -1028,7 +1028,7 @@ async fn process_event(
     if record.collection == MEMBERSHIP_NSID
         && record.action == "delete"
         && let Err(e) = revoke_member_for_leave(db, &record).await
-        && !warn_missing_credentials_once(&e)
+        && !skip_community_write(&e)
     {
         log::error!(
             "member revoke on leave failed for {}/{}: {}",
@@ -1048,7 +1048,7 @@ async fn process_event(
         let retry = match process_membership_create(db, &record).await {
             Ok(MembershipOutcome::Settled) => false,
             Ok(MembershipOutcome::Retry) => true,
-            Err(e) if warn_missing_credentials_once(&e) => false,
+            Err(e) if skip_community_write(&e) => false,
             Err(e) => {
                 log::error!(
                     "membership-create processing failed for {}/{}: {}",
@@ -1261,7 +1261,7 @@ async fn process_membership_create(
             created_at: current_iso8601_utc(),
         };
         if let Err(e) = moderation::write_moderation_record(db, &community_uri, &audit).await
-            && !warn_missing_credentials_once(&e)
+            && !skip_community_write(&e)
         {
             log::error!(
                 "blockedJoin audit write failed for {} in {}: {e}",
@@ -1307,10 +1307,9 @@ async fn process_membership_create(
             );
             Ok(MembershipOutcome::Settled)
         }
-        Err(e) if community_credentials::is_missing_credentials(&e) => {
-            warn_missing_credentials_once(&e);
+        Err(e) if skip_community_write(&e) => {
             log::info!(
-                "cannot auto-admit {} to {}: no stored credentials for the community repo",
+                "cannot auto-admit {} to {}: the community repo is not ours to write to",
                 record.did,
                 community_did
             );

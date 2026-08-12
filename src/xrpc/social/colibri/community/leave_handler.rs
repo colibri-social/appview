@@ -1,32 +1,34 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
-use crate::lib::handler::{
-    VerifyAuthFn, invalid_community_uri, verify_auth_boxed, with_authenticated,
-};
+use crate::lib::handler::invalid_community_uri;
 use crate::lib::moderation::{RevokeMemberFn, revoke_member_boxed};
+use crate::lib::relay::{RelayContext, WriteDeps, with_authenticated_write};
 use crate::lib::responses::ErrorResponse;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct LeaveResponse {}
 
 async fn leave_with(
+    relay: RelayContext,
     community_uri: String,
     auth: String,
     db: DatabaseConnection,
-    verify_auth_fn: &VerifyAuthFn,
+    deps: &WriteDeps<'_>,
     revoke_member_fn: &RevokeMemberFn,
 ) -> Result<Json<LeaveResponse>, ErrorResponse> {
     let community = AtUri::parse(&community_uri).ok_or_else(invalid_community_uri)?;
 
-    with_authenticated(
+    with_authenticated_write(
+        relay,
         auth,
         "social.colibri.community.leave",
+        community.authority.clone(),
         db,
-        verify_auth_fn,
+        deps,
         move |caller_did, db| async move {
             // Idempotent: `revoke_community_member` returns Ok(false) when no
             // member record exists (never joined, already left, or a legacy
@@ -42,15 +44,17 @@ async fn leave_with(
 /// Removes the authenticated caller from a community by revoking their
 /// community-side `social.colibri.member` record.
 pub async fn leave(
+    relay: RelayContext,
     community: &str,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<LeaveResponse>, ErrorResponse> {
     leave_with(
+        relay,
         community.to_string(),
         auth.to_string(),
         db.inner().clone(),
-        &verify_auth_boxed,
+        &WriteDeps::production(),
         &revoke_member_boxed,
     )
     .await
@@ -59,7 +63,9 @@ pub async fn leave(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lib::test_fixtures::mock_db;
+    use crate::lib::test_fixtures::{
+        local_write_deps, mock_db, relay_ctx, write_deps_never_authenticating,
+    };
     use futures::future::BoxFuture;
     use rocket::tokio;
     use sea_orm::DbErr;
@@ -83,10 +89,11 @@ mod tests {
         };
 
         let result = leave_with(
+            relay_ctx(),
             String::from("at://did:plc:community/social.colibri.community/self"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &local_write_deps("did:plc:me"),
             &revoke_fn,
         )
         .await;
@@ -101,10 +108,11 @@ mod tests {
     async fn leave_succeeds_when_no_member_record_exists() {
         let db = mock_db();
         let result = leave_with(
+            relay_ctx(),
             String::from("at://did:plc:community/social.colibri.community/self"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { Ok(String::from("did:plc:me")) }),
+            &local_write_deps("did:plc:me"),
             &|_, _, _| Box::pin(async { Ok(false) }),
         )
         .await;
@@ -116,10 +124,11 @@ mod tests {
     async fn leave_rejects_invalid_community_uri() {
         let db = mock_db();
         let result = leave_with(
+            relay_ctx(),
             String::from("not-a-uri"),
             String::from("token"),
             db,
-            &|_, _| Box::pin(async { panic!("should not authenticate on invalid uri") }),
+            &write_deps_never_authenticating(),
             &|_, _, _| Box::pin(async { panic!("should not revoke on invalid uri") }),
         )
         .await;

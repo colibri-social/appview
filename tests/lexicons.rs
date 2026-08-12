@@ -295,6 +295,28 @@ const COMBINATOR_CODES: &[(&str, &[&str])] = &[
         "with_community_authz_scoped",
         &["AuthRequired", "InvalidRequest", "Forbidden"],
     ),
+    (
+        "with_community_write",
+        &[
+            "AuthRequired",
+            "InvalidRequest",
+            "Forbidden",
+            "NotCommunityHub",
+            "AppViewNotAuthorized",
+            "PdsUnavailable",
+            "UpstreamFailure",
+        ],
+    ),
+    (
+        "with_authenticated_write",
+        &[
+            "AuthRequired",
+            "NotCommunityHub",
+            "AppViewNotAuthorized",
+            "PdsUnavailable",
+            "UpstreamFailure",
+        ],
+    ),
     ("with_authenticated", &["AuthRequired"]),
     ("handler::auth_error", &["AuthRequired"]),
     ("handler::invalid_community_uri", &["InvalidRequest"]),
@@ -305,12 +327,14 @@ const COMBINATOR_CODES: &[(&str, &[&str])] = &[
 ];
 
 const COMMUNITY_WRITE_FNS: &[&str] = &[
-    "community_write::community_session",
     "community_write::with_session",
     "community_write::create_record",
     "community_write::put_record",
     "community_write::delete_record",
     "community_write::upload_blob",
+    "write_moderation_boxed",
+    "revoke_member_boxed",
+    "write_member_boxed",
 ];
 const COMMUNITY_WRITE_CODES: &[&str] = &["PdsUnavailable", "CommunityCredentialsUnrecoverable"];
 
