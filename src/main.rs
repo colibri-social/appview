@@ -383,6 +383,8 @@ async fn rocket() -> _ {
                     xrpc::social::colibri::community::approve_membership,
                     xrpc::social::colibri::community::ban_user,
                     xrpc::social::colibri::community::block_message,
+                    xrpc::social::colibri::community::suppress_message_embeds,
+                    xrpc::social::colibri::community::unsuppress_message_embeds,
                     xrpc::social::colibri::community::create,
                     xrpc::social::colibri::community::migrate,
                     xrpc::social::colibri::community::create_category,

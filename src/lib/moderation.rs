@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use futures::future::BoxFuture;
 use sea_orm::{
@@ -65,6 +65,8 @@ pub const ACTION_UNBAN: &str = "unban";
 pub const ACTION_HIDE_MESSAGE: &str = "hideMessage";
 pub const ACTION_UNHIDE_MESSAGE: &str = "unhideMessage";
 pub const ACTION_KICK: &str = "kick";
+pub const ACTION_SUPPRESS_EMBEDS: &str = "suppressEmbeds";
+pub const ACTION_UNSUPPRESS_EMBEDS: &str = "unsuppressEmbeds";
 /// System-issued audit entry recorded when a currently-banned user writes a
 /// `social.colibri.membership` targeting this community. The AppView refuses
 /// to write the matching `member` record; this entry exists so moderators can
@@ -191,6 +193,19 @@ fn pds_error_to_db_err(e: PdsError) -> DbErr {
 pub struct ModerationState {
     pub banned_dids: HashSet<String>,
     pub hidden_message_uris: HashSet<String>,
+    pub embed_suppressed: HashMap<String, HashSet<String>>,
+}
+
+pub fn suppressed_embeds_for(
+    embed_suppressed: &HashMap<String, HashSet<String>>,
+    message_uri: &str,
+) -> Vec<String> {
+    let mut uris: Vec<String> = embed_suppressed
+        .get(message_uri)
+        .map(|set| set.iter().cloned().collect())
+        .unwrap_or_default();
+    uris.sort();
+    uris
 }
 
 /// Replays every moderation event for a community in rkey (≈ createdAt) order
@@ -232,6 +247,27 @@ pub async fn community_moderation_state(
             ACTION_UNHIDE_MESSAGE => {
                 if let Some(uri) = mod_record.subject.uri {
                     state.hidden_message_uris.remove(&uri);
+                }
+            }
+            ACTION_SUPPRESS_EMBEDS => {
+                if let (Some(uri), Some(embeds)) = (mod_record.subject.uri, mod_record.embeds) {
+                    state
+                        .embed_suppressed
+                        .entry(uri)
+                        .or_default()
+                        .extend(embeds);
+                }
+            }
+            ACTION_UNSUPPRESS_EMBEDS => {
+                if let (Some(uri), Some(embeds)) = (mod_record.subject.uri, mod_record.embeds)
+                    && let Some(set) = state.embed_suppressed.get_mut(&uri)
+                {
+                    for embed in embeds {
+                        set.remove(&embed);
+                    }
+                    if set.is_empty() {
+                        state.embed_suppressed.remove(&uri);
+                    }
                 }
             }
             _ => {}
@@ -489,10 +525,34 @@ pub fn moderation_record(
         record_type: Some(MODERATION_NSID.to_string()),
         action: action.to_string(),
         subject,
+        embeds: None,
         reason,
         created_by,
         created_at,
     }
+}
+
+pub async fn issue_embed_action(
+    write_record_fn: &WriteRecordFn,
+    db: DatabaseConnection,
+    community: AtUri,
+    action: &str,
+    message_uri: String,
+    embeds: Vec<String>,
+    created_by: String,
+) -> Result<record_data::Model, DbErr> {
+    let mut record = moderation_record(
+        action,
+        ColibriModerationSubject {
+            did: None,
+            uri: Some(message_uri),
+        },
+        created_by,
+        current_iso8601_utc(),
+        None,
+    );
+    record.embeds = Some(embeds);
+    write_record_fn(db, community, record).await
 }
 
 /// Computes the latest moderation action targeting a given (subject) DID. Used
@@ -553,6 +613,7 @@ mod tests {
                 did: Some(did.to_string()),
                 uri: None,
             },
+            embeds: None,
             reason: None,
             created_by: String::from("did:plc:owner"),
             created_at: String::from("2026-05-13T00:00:00Z"),
@@ -586,6 +647,7 @@ mod tests {
                 did: did.map(String::from),
                 uri: uri.map(String::from),
             },
+            embeds: None,
             reason: None,
             created_by: String::from("did:plc:owner"),
             created_at: String::from("2026-05-13T00:00:00Z"),
@@ -644,6 +706,65 @@ mod tests {
                 .hidden_message_uris
                 .contains("at://did:plc:carol/social.colibri.message/m2")
         );
+    }
+
+    fn embed_row(rkey: &str, action: &str, uri: &str, embeds: &[&str]) -> record_data::Model {
+        let payload = ColibriModeration {
+            record_type: Some(MODERATION_NSID.to_string()),
+            action: action.to_string(),
+            subject: ColibriModerationSubject {
+                did: None,
+                uri: Some(String::from(uri)),
+            },
+            embeds: Some(embeds.iter().map(|e| String::from(*e)).collect()),
+            reason: None,
+            created_by: String::from("did:plc:owner"),
+            created_at: String::from("2026-05-13T00:00:00Z"),
+        };
+        record_data::Model {
+            id: 0,
+            did: String::from("did:plc:owner"),
+            nsid: MODERATION_NSID.to_string(),
+            rkey: rkey.to_string(),
+            data: serde_json::to_value(payload).unwrap(),
+            indexed_at: String::from("2026-05-13T00:00:00.000Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn moderation_state_folds_embed_suppression_per_url() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+
+        const M1: &str = "at://did:plc:bob/social.colibri.message/m1";
+        const M2: &str = "at://did:plc:bob/social.colibri.message/m2";
+
+        let rows = vec![
+            embed_row(
+                "r1",
+                ACTION_SUPPRESS_EMBEDS,
+                M1,
+                &["https://a", "https://b"],
+            ),
+            embed_row("r2", ACTION_SUPPRESS_EMBEDS, M1, &["https://c"]),
+            embed_row("r3", ACTION_UNSUPPRESS_EMBEDS, M1, &["https://b"]),
+            embed_row("r4", ACTION_SUPPRESS_EMBEDS, M2, &["https://d"]),
+            embed_row("r5", ACTION_UNSUPPRESS_EMBEDS, M2, &["https://d"]),
+        ];
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([rows])
+            .into_connection();
+
+        let state = community_moderation_state(&db, "did:plc:owner")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            suppressed_embeds_for(&state.embed_suppressed, M1),
+            vec![String::from("https://a"), String::from("https://c")]
+        );
+        assert!(!state.embed_suppressed.contains_key(M2));
+        assert!(suppressed_embeds_for(&state.embed_suppressed, M2).is_empty());
+        assert!(state.hidden_message_uris.is_empty());
     }
 
     #[test]

@@ -1256,6 +1256,7 @@ async fn process_membership_create(
                 did: Some(record.did.clone()),
                 uri: None,
             },
+            embeds: None,
             reason: None,
             created_by: community_did.clone(),
             created_at: current_iso8601_utc(),

@@ -20,7 +20,7 @@ use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effecti
 use crate::lib::handler::{
     LoadAuthzFn, VerifyAuthFn, auth_error, forbidden, load_authz_boxed, verify_auth_boxed,
 };
-use crate::lib::moderation::community_moderation_state;
+use crate::lib::moderation::{community_moderation_state, suppressed_embeds_for};
 use crate::lib::permissions::Permission;
 use crate::lib::reactions::{ReactionSummary, group_reactions_for_messages};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
@@ -73,6 +73,18 @@ pub struct ParentMessage {
     #[serde(rename = "createdAt")]
     pub created_at: String,
     pub edited: bool,
+    #[serde(
+        rename = "suppressedEmbeds",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub suppressed_embeds: Vec<String>,
+    #[serde(
+        rename = "modSuppressedEmbeds",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub mod_suppressed_embeds: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -92,6 +104,18 @@ pub struct Message {
     #[serde(rename = "createdAt")]
     pub created_at: String,
     pub edited: bool,
+    #[serde(
+        rename = "suppressedEmbeds",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub suppressed_embeds: Vec<String>,
+    #[serde(
+        rename = "modSuppressedEmbeds",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub mod_suppressed_embeds: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -114,6 +138,8 @@ struct StoredMessage {
     created_at: Option<String>,
     #[serde(default)]
     edited: bool,
+    #[serde(rename = "suppressedEmbeds", default)]
+    suppressed_embeds: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -305,6 +331,7 @@ fn build_message(
     author: MessageAuthor,
     parent: Option<ParentMessage>,
     reactions: Vec<ReactionSummary>,
+    mod_suppressed_embeds: Vec<String>,
 ) -> Option<Message> {
     let stored = serde_json::from_value::<StoredMessage>(record.data.clone()).ok()?;
     Some(Message {
@@ -321,6 +348,8 @@ fn build_message(
             .created_at
             .unwrap_or_else(|| record.indexed_at.clone()),
         edited: stored.edited,
+        suppressed_embeds: stored.suppressed_embeds.unwrap_or_default(),
+        mod_suppressed_embeds,
     })
 }
 
@@ -340,6 +369,7 @@ pub struct MessagePage {
     pub author_actor_data: HashMap<String, ColibriActorData>,
     pub author_states: HashMap<String, String>,
     pub author_handles: HashMap<String, String>,
+    pub embed_suppressed: HashMap<String, HashSet<String>>,
 }
 
 pub async fn assemble_message_page(
@@ -535,6 +565,7 @@ pub async fn assemble_message_page(
         author_actor_data,
         author_states,
         author_handles,
+        embed_suppressed: moderation.embed_suppressed,
     })
 }
 
@@ -646,8 +677,13 @@ pub fn message_list_from_page(
                     page.author_actor_data.get(&pr.did).cloned(),
                     page.author_states.get(&pr.did).cloned(),
                 );
+                let parent_uri = format!("at://{}/{}/{}", pr.did, pr.nsid, pr.rkey);
                 Some(ParentMessage {
-                    uri: format!("at://{}/{}/{}", pr.did, pr.nsid, pr.rkey),
+                    mod_suppressed_embeds: suppressed_embeds_for(
+                        &page.embed_suppressed,
+                        &parent_uri,
+                    ),
+                    uri: parent_uri,
                     text: ps.text,
                     facets: ps.facets.unwrap_or_default(),
                     channel: channel_uri.to_string(),
@@ -657,6 +693,7 @@ pub fn message_list_from_page(
                     reactions: parent_reactions,
                     created_at: ps.created_at.unwrap_or_else(|| pr.indexed_at.clone()),
                     edited: ps.edited,
+                    suppressed_embeds: ps.suppressed_embeds.unwrap_or_default(),
                 })
             });
             let author = build_author(
@@ -672,6 +709,7 @@ pub fn message_list_from_page(
                 .get(&record.rkey)
                 .cloned()
                 .unwrap_or_default();
+            let uri = format!("at://{}/{}/{}", record.did, record.nsid, record.rkey);
             build_message(
                 record,
                 channel_uri,
@@ -679,6 +717,7 @@ pub fn message_list_from_page(
                 author,
                 parent,
                 reactions,
+                suppressed_embeds_for(&page.embed_suppressed, &uri),
             )
         })
         .collect();
@@ -902,6 +941,7 @@ mod tests {
                         author_actor_data: HashMap::new(),
                         author_states: HashMap::new(),
                         author_handles: HashMap::new(),
+                        embed_suppressed: HashMap::new(),
                     })
                 })
             },
@@ -926,6 +966,7 @@ mod tests {
             &|_, _, _, _, _| {
                 Box::pin(async {
                     Ok(MessagePage {
+                        embed_suppressed: HashMap::new(),
                         records: vec![
                             message_record(
                                 "msg-2",
@@ -1026,6 +1067,7 @@ mod tests {
                         author_actor_data: HashMap::new(),
                         author_states: HashMap::new(),
                         author_handles: HashMap::new(),
+                        embed_suppressed: HashMap::new(),
                     })
                 })
             },
@@ -1240,6 +1282,7 @@ mod tests {
                         author_actor_data: HashMap::new(),
                         author_states: HashMap::new(),
                         author_handles: HashMap::new(),
+                        embed_suppressed: HashMap::new(),
                     })
                 })
             },

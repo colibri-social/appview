@@ -208,6 +208,7 @@ pub fn plan_structure(
                 owner_only: chan.owner_only,
                 allowed_roles: vec![],
                 allowed_members: vec![],
+                link_embeds: chan.link_embeds,
                 migrated_from: Some(format!("at://{source_authority}/{CHANNEL_NSID}/{old_rkey}")),
             };
             Some((new_rkey, record))
@@ -262,6 +263,7 @@ pub fn plan_structure(
         requires_approval_to_join: input
             .requires_approval_to_join
             .unwrap_or(old.community.requires_approval_to_join),
+        link_embeds: old.community.link_embeds,
         picture: None,
         banner: None,
         migrated_to: None,
@@ -997,6 +999,7 @@ mod tests {
 
     fn legacy_community() -> ColibriCommunity {
         ColibriCommunity {
+            link_embeds: None,
             r#type: String::from(COMMUNITY_NSID),
             name: String::from("Old Community"),
             description: String::from("legacy"),
@@ -1025,6 +1028,7 @@ mod tests {
             channels: vec![(
                 String::from("chan-old"),
                 ColibriChannel {
+                    link_embeds: None,
                     r#type: String::from(CHANNEL_NSID),
                     name: String::from("general"),
                     description: None,

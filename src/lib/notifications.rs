@@ -815,6 +815,7 @@ mod tests {
 
     fn message_with_facets(facets: Value, parent: Option<&str>) -> ColibriMessage {
         ColibriMessage {
+            suppressed_embeds: None,
             r#type: "social.colibri.message".to_string(),
             text: "hello".to_string(),
             facets: Some(facets.as_array().cloned().unwrap_or_default()),
@@ -933,6 +934,7 @@ mod tests {
 
     fn message_with_channel(channel: &str) -> ColibriMessage {
         ColibriMessage {
+            suppressed_embeds: None,
             r#type: "social.colibri.message".to_string(),
             text: "hello".to_string(),
             facets: None,

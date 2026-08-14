@@ -322,6 +322,7 @@ async fn bootstrap_community(
         description: input.description.clone().unwrap_or_default(),
         category_order: vec![category_rkey.clone()],
         requires_approval_to_join: input.requires_approval_to_join,
+        link_embeds: None,
         picture: picture_blob,
         banner: banner_blob,
         migrated_to: None,
@@ -376,6 +377,7 @@ async fn bootstrap_community(
         owner_only: None,
         allowed_roles: vec![],
         allowed_members: vec![],
+        link_embeds: None,
         migrated_from: None,
     };
     let channel_ref = write_record_logged(

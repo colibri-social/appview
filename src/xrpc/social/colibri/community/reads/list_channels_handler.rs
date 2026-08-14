@@ -24,6 +24,8 @@ pub struct Channel {
     pub allowed_roles: Vec<String>,
     #[serde(rename = "allowedMembers", skip_serializing_if = "Vec::is_empty")]
     pub allowed_members: Vec<String>,
+    #[serde(rename = "linkEmbeds", skip_serializing_if = "Option::is_none")]
+    pub link_embeds: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,6 +47,8 @@ struct StoredChannel {
     allowed_roles: Vec<String>,
     #[serde(rename = "allowedMembers", default)]
     allowed_members: Vec<String>,
+    #[serde(rename = "linkEmbeds", default)]
+    link_embeds: Option<bool>,
 }
 
 pub async fn fetch_channel_records(
@@ -105,6 +109,7 @@ async fn list_channels_with(
                     })
                     .collect(),
                 allowed_members: stored.allowed_members,
+                link_embeds: stored.link_embeds,
             })
         })
         .collect();

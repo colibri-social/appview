@@ -24,6 +24,8 @@ pub struct CommunityEventData {
         skip_serializing_if = "Option::is_none"
     )]
     pub requires_approval_to_join: Option<bool>,
+    #[serde(rename = "linkEmbeds", skip_serializing_if = "Option::is_none")]
+    pub link_embeds: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -143,6 +145,8 @@ pub struct ChannelEventData {
     pub allowed_roles: Option<Vec<String>>,
     #[serde(rename = "allowedMembers", skip_serializing_if = "Option::is_none")]
     pub allowed_members: Option<Vec<String>>,
+    #[serde(rename = "linkEmbeds", skip_serializing_if = "Option::is_none")]
+    pub link_embeds: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -196,6 +200,13 @@ pub struct MessageEventData {
     pub attachments: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<MessageEventAuthor>,
+    #[serde(rename = "suppressedEmbeds", skip_serializing_if = "Option::is_none")]
+    pub suppressed_embeds: Option<Vec<String>>,
+    #[serde(
+        rename = "modSuppressedEmbeds",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mod_suppressed_embeds: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live: Option<bool>,
 }

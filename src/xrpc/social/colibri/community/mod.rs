@@ -29,7 +29,10 @@ pub use invitations::{create_invitation, delete_invitation, get_invitation, list
 pub use leave_handler::leave;
 pub use list_applications_handler::list_applications;
 pub use migration::migrate;
-pub use moderation::{ban_user, block_message, kick, kick_user, list_banned_users, unban_user};
+pub use moderation::{
+    ban_user, block_message, kick, kick_user, list_banned_users, suppress_message_embeds,
+    unban_user, unsuppress_message_embeds,
+};
 pub use reads::{get_data, list_categories, list_channels, list_members, list_roles};
 pub use register_credentials_handler::register_credentials;
 pub use undismiss_application_handler::undismiss_application;

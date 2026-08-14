@@ -37,6 +37,7 @@ struct CommunityPatch {
     name: Option<String>,
     description: Option<String>,
     requires_approval_to_join: Option<bool>,
+    link_embeds: Option<bool>,
     picture: Option<Value>,
     remove_picture: bool,
     banner: Option<Value>,
@@ -52,6 +53,9 @@ fn apply_patch(community: &mut ColibriCommunity, patch: CommunityPatch) {
     }
     if let Some(r) = patch.requires_approval_to_join {
         community.requires_approval_to_join = r;
+    }
+    if let Some(l) = patch.link_embeds {
+        community.link_embeds = Some(l);
     }
 
     if patch.picture.is_some() {
@@ -78,6 +82,7 @@ async fn update_community_with(
     banner_blob: Option<Vec<u8>>,
     banner_mime: Option<String>,
     requires_approval_to_join: Option<bool>,
+    link_embeds: Option<bool>,
     remove_picture: bool,
     remove_banner: bool,
     auth: String,
@@ -149,6 +154,7 @@ async fn update_community_with(
                     name,
                     description,
                     requires_approval_to_join,
+                    link_embeds,
                     picture: new_picture,
                     remove_picture,
                     banner: new_banner,
@@ -204,7 +210,7 @@ async fn upload_image_to_pds(
 }
 
 #[post(
-    "/xrpc/social.colibri.community.update?<community>&<name>&<description>&<requiresApprovalToJoin>&<removePicture>&<removeBanner>&<auth>",
+    "/xrpc/social.colibri.community.update?<community>&<name>&<description>&<requiresApprovalToJoin>&<linkEmbeds>&<removePicture>&<removeBanner>&<auth>",
     data = "<body>"
 )]
 /// Updates the community's metadata. Only the fields supplied are changed;
@@ -219,6 +225,7 @@ pub async fn update_community(
     name: Option<&str>,
     description: Option<&str>,
     requiresApprovalToJoin: Option<bool>,
+    linkEmbeds: Option<bool>,
     removePicture: Option<bool>,
     removeBanner: Option<bool>,
     auth: &str,
@@ -253,6 +260,7 @@ pub async fn update_community(
         banner_blob,
         banner_mime,
         requiresApprovalToJoin,
+        linkEmbeds,
         removePicture.unwrap_or(false),
         removeBanner.unwrap_or(false),
         auth.to_string(),
@@ -321,6 +329,7 @@ mod tests {
 
     fn community() -> ColibriCommunity {
         ColibriCommunity {
+            link_embeds: None,
             r#type: String::from(COMMUNITY_NSID),
             name: String::from("Test"),
             description: String::from("desc"),
@@ -336,6 +345,7 @@ mod tests {
 
     fn patch() -> CommunityPatch {
         CommunityPatch {
+            link_embeds: None,
             name: None,
             description: None,
             requires_approval_to_join: None,
@@ -425,6 +435,7 @@ mod tests {
             None,
             Some(vec![1, 2, 3]),
             Some(String::from("image/png")),
+            None,
             None,
             false,
             true,

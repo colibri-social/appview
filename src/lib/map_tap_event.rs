@@ -425,6 +425,7 @@ async fn map_tap_event_with(
                             picture: record_data.picture,
                             banner: record_data.banner,
                             requires_approval_to_join: Some(record_data.requires_approval_to_join),
+                            link_embeds: record_data.link_embeds,
                         })),
                     },
                     scope,
@@ -442,6 +443,7 @@ async fn map_tap_event_with(
                             picture: None,
                             banner: None,
                             requires_approval_to_join: None,
+                            link_embeds: None,
                         })),
                     },
                     scope,
@@ -494,6 +496,7 @@ async fn map_tap_event_with(
                             picture: None,
                             banner: None,
                             requires_approval_to_join: None,
+                            link_embeds: None,
                         })),
                     },
                     EventScope::User(event_record.did.clone()),
@@ -675,6 +678,7 @@ async fn map_tap_event_with(
                     picture: None,
                     banner: None,
                     requires_approval_to_join: None,
+                    link_embeds: None,
                 })),
             };
             let leave = ColibriServerEvent {
@@ -771,6 +775,7 @@ async fn map_tap_event_with(
                                 record_data.allowed_roles,
                             )),
                             allowed_members: Some(record_data.allowed_members),
+                            link_embeds: record_data.link_embeds,
                         })),
                     },
                     scope,
@@ -790,6 +795,7 @@ async fn map_tap_event_with(
                             owner_only: None,
                             allowed_roles: None,
                             allowed_members: None,
+                            link_embeds: None,
                         })),
                     },
                     scope,
@@ -879,6 +885,8 @@ async fn map_tap_event_with(
                             parent: record_data.parent,
                             text: Some(record_data.text),
                             author: Some(author),
+                            suppressed_embeds: record_data.suppressed_embeds,
+                            mod_suppressed_embeds: None,
                             live: Some(event_record.live),
                         })),
                     },
@@ -912,6 +920,8 @@ async fn map_tap_event_with(
                             parent: None,
                             text: None,
                             author: None,
+                            suppressed_embeds: None,
+                            mod_suppressed_embeds: None,
                             live: None,
                         })),
                     },
@@ -1205,6 +1215,67 @@ async fn map_tap_event_with(
                             parent: None,
                             text: None,
                             author: None,
+                            suppressed_embeds: None,
+                            mod_suppressed_embeds: None,
+                            live: None,
+                        })),
+                    },
+                    EventScope::Community(event_record.did.clone()),
+                ))
+            } else if record_data.action == moderation::ACTION_SUPPRESS_EMBEDS
+                || record_data.action == moderation::ACTION_UNSUPPRESS_EMBEDS
+            {
+                let suppressing = record_data.action == moderation::ACTION_SUPPRESS_EMBEDS;
+                let message_uri = record_data.subject.uri.ok_or_else(|| {
+                    serde_json::Error::custom("embed suppression missing subject.uri")
+                })?;
+                let embeds = record_data.embeds.unwrap_or_default();
+
+                let Ok(state) =
+                    moderation::community_moderation_state(&db, &event_record.did).await
+                else {
+                    return Ok(vec![]);
+                };
+                let mut current: std::collections::HashSet<String> = state
+                    .embed_suppressed
+                    .get(&message_uri)
+                    .cloned()
+                    .unwrap_or_default();
+                if suppressing {
+                    current.extend(embeds);
+                } else {
+                    for embed in &embeds {
+                        current.remove(embed);
+                    }
+                }
+                let mut mod_suppressed: Vec<String> = current.into_iter().collect();
+                mod_suppressed.sort();
+
+                let channel_rkey = resolver
+                    .channel_for_message(&db, &AtUri::rkey_or_value(&message_uri))
+                    .await;
+                Ok(scoped(
+                    ColibriServerEvent {
+                        event_type: String::from("message_event"),
+                        data: Some(ColibriServerEventData::Message(MessageEventData {
+                            event: String::from("embeds"),
+                            uri: message_uri,
+                            attachments: None,
+                            channel: channel_rkey.map(|channel_rkey| {
+                                expand_rkey(
+                                    &event_record.did,
+                                    "social.colibri.channel",
+                                    &channel_rkey,
+                                )
+                            }),
+                            created_at: None,
+                            edited: None,
+                            facets: None,
+                            parent: None,
+                            text: None,
+                            author: None,
+                            suppressed_embeds: None,
+                            mod_suppressed_embeds: Some(mod_suppressed),
                             live: None,
                         })),
                     },

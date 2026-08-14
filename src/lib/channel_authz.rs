@@ -69,6 +69,7 @@ mod tests {
 
     fn channel() -> ColibriChannel {
         ColibriChannel {
+            link_embeds: None,
             r#type: String::from("social.colibri.channel"),
             name: String::from("general"),
             description: None,

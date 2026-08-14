@@ -187,6 +187,8 @@ fn list_messages_response_matches_its_fixture() {
     let response = MessageList {
         cursor: Some(String::from("3lkfixturecursor")),
         messages: vec![Message {
+            suppressed_embeds: vec![],
+            mod_suppressed_embeds: vec![],
             uri: String::from(
                 "at://did:plc:fixtureauthor00000000000/social.colibri.message/3lkfixture0001",
             ),
@@ -200,6 +202,8 @@ fn list_messages_response_matches_its_fixture() {
             ),
             author: message_author(),
             parent: Some(ParentMessage {
+                suppressed_embeds: vec![],
+                mod_suppressed_embeds: vec![],
                 uri: String::from(
                     "at://did:plc:fixtureauthor00000000000/social.colibri.message/3lkfixture0000",
                 ),
@@ -259,6 +263,7 @@ fn list_channels_response_matches_its_fixture() {
     let response = ChannelList {
         channels: vec![
             Channel {
+                link_embeds: None,
                 uri: String::from(
                     "at://did:plc:fixturecommunity000000000/social.colibri.channel/general",
                 ),
@@ -273,6 +278,7 @@ fn list_channels_response_matches_its_fixture() {
                 allowed_members: vec![],
             },
             Channel {
+                link_embeds: None,
                 uri: String::from(
                     "at://did:plc:fixturecommunity000000000/social.colibri.channel/staff",
                 ),

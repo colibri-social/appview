@@ -118,6 +118,7 @@ async fn create_channel_with(
                 owner_only: None,
                 allowed_roles,
                 allowed_members,
+                link_embeds: None,
                 migrated_from: None,
             };
             let chan_data = serde_json::to_value(&channel)
@@ -201,6 +202,8 @@ async fn update_channel_with(
     allowed_members: Vec<String>,
     clear_allowed_members: Option<bool>,
     category: Option<String>,
+    link_embeds: Option<bool>,
+    clear_link_embeds: Option<bool>,
     auth: String,
     db: DatabaseConnection,
     deps: WriteDeps<'_>,
@@ -368,6 +371,12 @@ async fn update_channel_with(
             }
             rec.allowed_members = final_allowed_members;
 
+            if clear_link_embeds == Some(true) {
+                rec.link_embeds = None;
+            } else if let Some(value) = link_embeds {
+                rec.link_embeds = Some(value);
+            }
+
             let data =
                 serde_json::to_value(&rec).map_err(|e| sea_orm::DbErr::Custom(e.to_string()))?;
             community_write::put_record(&db, community_did, CHANNEL_NSID, channel_rkey, data)
@@ -414,7 +423,7 @@ async fn update_channel_with(
 }
 
 #[post(
-    "/xrpc/social.colibri.channel.update?<channel>&<name>&<description>&<ownerOnly>&<allowedRoles>&<clearAllowedRoles>&<allowedMembers>&<clearAllowedMembers>&<category>&<auth>"
+    "/xrpc/social.colibri.channel.update?<channel>&<name>&<description>&<ownerOnly>&<allowedRoles>&<clearAllowedRoles>&<allowedMembers>&<clearAllowedMembers>&<category>&<linkEmbeds>&<clearLinkEmbeds>&<auth>"
 )]
 #[allow(non_snake_case, clippy::too_many_arguments)]
 pub async fn update_channel(
@@ -428,6 +437,8 @@ pub async fn update_channel(
     allowedMembers: Vec<String>,
     clearAllowedMembers: Option<bool>,
     category: Option<&str>,
+    linkEmbeds: Option<bool>,
+    clearLinkEmbeds: Option<bool>,
     auth: &str,
     db: &State<DatabaseConnection>,
 ) -> Result<Json<ChannelUriResponse>, ErrorResponse> {
@@ -442,6 +453,8 @@ pub async fn update_channel(
         allowedMembers,
         clearAllowedMembers,
         category.map(str::to_string),
+        linkEmbeds,
+        clearLinkEmbeds,
         auth.to_string(),
         db.inner().clone(),
         WriteDeps::production(),
@@ -598,6 +611,8 @@ mod tests {
             vec![],
             None,
             None,
+            None,
+            None,
             String::from("token"),
             db,
             local_write_deps("did:plc:rando"),
@@ -642,6 +657,8 @@ mod tests {
             vec![],
             None,
             vec![],
+            None,
+            None,
             None,
             None,
             String::from("token"),
@@ -749,6 +766,8 @@ mod tests {
             vec![String::from("did:plc:owner-human")],
             None,
             None,
+            None,
+            None,
             String::from("token"),
             db,
             local_write_deps("did:plc:owner-human"),
@@ -801,6 +820,8 @@ mod tests {
             Some(String::from(
                 "at://did:plc:owner/social.colibri.category/gone",
             )),
+            None,
+            None,
             String::from("token"),
             db,
             local_write_deps("did:plc:owner-human"),
@@ -847,6 +868,8 @@ mod tests {
             Some(String::from(
                 "at://did:plc:owner/social.colibri.category/cat1",
             )),
+            None,
+            None,
             String::from("token"),
             db,
             local_write_deps("did:plc:owner-human"),

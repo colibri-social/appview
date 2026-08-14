@@ -174,6 +174,9 @@ pub struct ColibriCommunity {
     #[serde(default)]
     pub requires_approval_to_join: bool,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_embeds: Option<bool>,
+
     /// Optional avatar image for the community.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picture: Option<Value>,
@@ -276,6 +279,9 @@ pub struct ColibriChannel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_members: Vec<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_embeds: Option<bool>,
+
     /// Set on a channel created by migrating a legacy community. Points at the
     /// legacy channel record it replaces, so its message history can be
     /// surfaced here at read time. Format: at-uri.
@@ -314,6 +320,9 @@ pub struct ColibriMessage {
     /// An array of attachment objects for this message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<Value>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed_embeds: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -440,10 +449,13 @@ pub struct ColibriModeration {
     #[serde(rename = "$type", skip_serializing_if = "Option::is_none")]
     pub record_type: Option<String>,
 
-    /// `ban` | `unban` | `hideMessage` | `unhideMessage` | `kick`
+    /// `ban` | `unban` | `hideMessage` | `unhideMessage` | `kick` | `suppressEmbeds` | `unsuppressEmbeds`
     pub action: String,
 
     pub subject: ColibriModerationSubject,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embeds: Option<Vec<String>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

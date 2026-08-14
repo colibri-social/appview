@@ -29,6 +29,8 @@ pub struct CommunityInfo {
     pub category_order: Vec<String>,
     #[serde(rename = "requiresApprovalToJoin")]
     pub requires_approval_to_join: bool,
+    #[serde(rename = "linkEmbeds", skip_serializing_if = "Option::is_none")]
+    pub link_embeds: Option<bool>,
     pub appview: String,
 }
 
@@ -101,6 +103,8 @@ struct StoredChannel {
     allowed_roles: Vec<String>,
     #[serde(rename = "allowedMembers", default)]
     allowed_members: Vec<String>,
+    #[serde(rename = "linkEmbeds", default)]
+    link_embeds: Option<bool>,
 }
 
 type FetchDataFn = fn(
@@ -151,6 +155,7 @@ async fn get_data_with(
         banner: stored_community.banner,
         category_order,
         requires_approval_to_join: stored_community.requires_approval_to_join,
+        link_embeds: stored_community.link_embeds,
         appview,
     };
 
@@ -201,6 +206,7 @@ async fn get_data_with(
                     })
                     .collect(),
                 allowed_members: stored.allowed_members,
+                link_embeds: stored.link_embeds,
             })
         })
         .collect();
