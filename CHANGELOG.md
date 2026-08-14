@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/colibri-social/appview/compare/v0.2.7...v0.2.8) - 2026-08-14
+
+### Added
+
+- removable embeds
+- cross-appview moderation
+- optional `filename` param for downloads
+
+### Fixed
+
+- large embed images by default
+
 ## [0.2.7](https://github.com/colibri-social/appview/compare/v0.2.6...v0.2.7) - 2026-08-10
 
 ### Fixed
