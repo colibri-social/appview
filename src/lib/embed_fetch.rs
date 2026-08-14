@@ -413,10 +413,6 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
     };
     let image_width = declared(["og:image:width", "twitter:image:width"]);
     let image_height = declared(["og:image:height", "twitter:image:height"]);
-    let (image_width, image_height) = match (image_width, image_height) {
-        (Some(w), Some(h)) => (Some(w), Some(h)),
-        _ => (None, None),
-    };
 
     let image = image_url.map(|abs| {
         vec![EmbedImage {
@@ -427,10 +423,15 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
         }]
     });
 
-    // Discord-style sizing: large unless the card is explicitly a `summary`.
-    let large_image = image
-        .as_ref()
-        .map(|_| get("twitter:card").as_deref() != Some("summary"));
+    // A thumbnail unless the card explicitly asks for a
+    // large image, which pages shipping no `twitter:card` at all never do.
+    let card = get("twitter:card").map(|raw| raw.trim().to_ascii_lowercase());
+    let large_image = image.as_ref().map(|_| {
+        matches!(
+            card.as_deref(),
+            Some("summary_large_image") | Some("player")
+        )
+    });
 
     EmbedMetadata {
         title,
@@ -615,6 +616,49 @@ mod tests {
         let meta = extract_metadata(html, &base);
         assert!(meta.image.is_some());
         assert_eq!(meta.large_image, Some(false));
+    }
+
+    #[test]
+    fn missing_card_marks_thumbnail() {
+        let base = Url::parse("https://x.com/naval/status/1002103360646823936").unwrap();
+        let html = r#"
+            <html><head>
+                <meta content="Naval (@naval) on X" property="og:title" />
+                <meta content="How to Get Rich." property="og:description" />
+                <meta content="https://pbs.twimg.com/profile_images/1/a_200x200.jpg" property="og:image" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        assert!(meta.image.is_some());
+        assert_eq!(meta.large_image, Some(false));
+    }
+
+    #[test]
+    fn card_match_ignores_case_and_padding() {
+        let base = Url::parse("https://example.com/p").unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="/hero.png" />
+                <meta name="twitter:card" content="  SUMMARY_LARGE_IMAGE  " />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        assert_eq!(meta.large_image, Some(true));
+    }
+
+    #[test]
+    fn keeps_a_lone_declared_dimension() {
+        let base = Url::parse("https://example.com/p").unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="/hero.png" />
+                <meta property="og:image:width" content="200" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        let img = meta.image.expect("image should be present");
+        assert_eq!(img[0].width, Some(200));
+        assert_eq!(img[0].height, None);
     }
 
     #[test]
