@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use futures::future::BoxFuture;
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, prelude::Expr,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriMember, ColibriModeration, ColibriModerationSubject};
 use crate::lib::community_write;
+use crate::lib::member_records;
 use crate::lib::pds_client::{self, PdsError};
 use crate::lib::repo_endpoint::{self, RepoEndpoint};
 use crate::lib::time::current_iso8601_utc;
@@ -330,15 +329,7 @@ pub async fn find_member_rkey(
     community_did: &str,
     subject_did: &str,
 ) -> Result<Option<String>, DbErr> {
-    let row = record_data::Entity::find()
-        .filter(record_data::Column::Did.eq(community_did))
-        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
-        .filter(Expr::cust_with_values(
-            r#""record_data"."data"->>'subject' = $1"#,
-            vec![sea_orm::Value::from(subject_did.to_string())],
-        ))
-        .one(db)
-        .await?;
+    let row = member_records::find_authoritative(db, community_did, subject_did).await?;
     Ok(row.map(|r| r.rkey))
 }
 
@@ -357,22 +348,38 @@ pub async fn revoke_community_member(
     community_did: &str,
     subject_did: &str,
 ) -> Result<bool, DbErr> {
-    let Some(member_rkey) = find_member_rkey(db, community_did, subject_did).await? else {
+    let rows = member_records::rows_for_subject(db, community_did, subject_did).await?;
+    if rows.is_empty() {
         return Ok(false);
-    };
+    }
 
-    community_write::with_session(db, community_did, |endpoint, jwt| {
-        let member_rkey = member_rkey.clone();
-        Box::pin(async move {
-            pds_client::delete_record(&endpoint, &jwt, community_did, MEMBER_NSID, &member_rkey)
-                .await
+    let mut first_failure: Option<DbErr> = None;
+
+    for row in &rows {
+        let member_rkey = row.rkey.clone();
+        let deleted = community_write::with_session(db, community_did, |endpoint, jwt| {
+            let member_rkey = member_rkey.clone();
+            Box::pin(async move {
+                pds_client::delete_record(&endpoint, &jwt, community_did, MEMBER_NSID, &member_rkey)
+                    .await
+            })
         })
-    })
-    .await?;
+        .await;
 
-    drop_cached_member_row(db, community_did, &member_rkey).await;
+        match deleted {
+            Ok(()) => drop_cached_member_row(db, community_did, &member_rkey).await,
+            Err(e) => {
+                if first_failure.is_none() {
+                    first_failure = Some(e);
+                }
+            }
+        }
+    }
 
-    Ok(true)
+    match first_failure {
+        Some(e) => Err(e),
+        None => Ok(true),
+    }
 }
 
 /// Removes a `social.colibri.member` row from the local `record_data` cache.
@@ -387,6 +394,74 @@ async fn drop_cached_member_row(db: &DatabaseConnection, community_did: &str, me
         .await
     {
         log::warn!("local member-row delete failed for {community_did}/{member_rkey}: {e}");
+    }
+}
+
+const MEMBER_SCAN_PAGE: u32 = 100;
+
+async fn find_member_on_pds(
+    db: &DatabaseConnection,
+    community_did: &str,
+    subject_did: &str,
+) -> Result<Option<(String, serde_json::Value)>, DbErr> {
+    let endpoint = repo_endpoint::resolve(db, community_did)
+        .await
+        .map_err(|e| {
+            DbErr::Custom(format!(
+                "cannot reach {community_did} to check for an existing member record: {e}"
+            ))
+        })?;
+
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let page = match &endpoint {
+            RepoEndpoint::Trusted(_) => {
+                pds_client::list_records_trusted(
+                    endpoint.as_str(),
+                    community_did,
+                    MEMBER_NSID,
+                    MEMBER_SCAN_PAGE,
+                    cursor.as_deref(),
+                )
+                .await
+            }
+            RepoEndpoint::Untrusted(_) => {
+                pds_client::list_records(
+                    endpoint.as_str(),
+                    community_did,
+                    MEMBER_NSID,
+                    MEMBER_SCAN_PAGE,
+                    cursor.as_deref(),
+                )
+                .await
+            }
+        }
+        .map_err(pds_error_to_db_err)?;
+
+        for record in &page.records {
+            if record
+                .value
+                .get("subject")
+                .and_then(serde_json::Value::as_str)
+                != Some(subject_did)
+            {
+                continue;
+            }
+            if let Some(uri) = AtUri::parse(&record.uri) {
+                return Ok(Some((uri.rkey, record.value.clone())));
+            }
+        }
+
+        match page.cursor {
+            Some(next) if page.records.is_empty() || Some(&next) == cursor.as_ref() => {
+                return Err(DbErr::Custom(format!(
+                    "listRecords on {community_did} did not advance past cursor {next}"
+                )));
+            }
+            Some(next) => cursor = Some(next),
+            None => return Ok(None),
+        }
     }
 }
 
@@ -424,6 +499,19 @@ pub async fn write_member_record(
         from_membership,
     };
     let data = serde_json::to_value(&record).map_err(|e| DbErr::Custom(e.to_string()))?;
+
+    if cached_rkey.is_none()
+        && let Some((existing_rkey, existing)) =
+            find_member_on_pds(db, community_did, subject_did).await?
+    {
+        log::info!(
+            "member record {community_did}/{existing_rkey} for {subject_did} is on the PDS but was \
+             missing locally; adopting it instead of minting a duplicate"
+        );
+        community_write::cache_upsert(db, community_did, MEMBER_NSID, &existing_rkey, existing)
+            .await;
+        return Ok(None);
+    }
 
     if let Some(rkey) = cached_rkey {
         // Where to read from comes from `repo_endpoint`, not the credentials row.

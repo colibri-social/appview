@@ -18,6 +18,7 @@ use rocket::tokio::time::{MissedTickBehavior, interval};
 use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::backfill_status;
 use crate::lib::colibri::ColibriMembership;
 use crate::lib::community_credentials::skip_community_write;
 use crate::lib::community_record::fetch_community_record;
@@ -104,9 +105,24 @@ pub async fn reconcile_once(db: &DatabaseConnection) -> Result<ReconcileSummary,
 
     let mut open_community: HashMap<String, bool> = HashMap::new();
     let mut banned_by_community: HashMap<String, Vec<String>> = HashMap::new();
+    let mut caught_up: HashMap<String, bool> = HashMap::new();
 
     for candidate in candidates {
         let community_did = candidate.community_did.clone();
+
+        if !caught_up.contains_key(&community_did) {
+            let ready = backfill_status::repo_caught_up(db, &community_did).await;
+            if !ready {
+                log::info!(
+                    "reconcile: {community_did} is still backfilling; deferring its admissions"
+                );
+            }
+            caught_up.insert(community_did.clone(), ready);
+        }
+        if caught_up.get(&community_did) != Some(&true) {
+            summary.skipped += 1;
+            continue;
+        }
 
         if !open_community.contains_key(&community_did) {
             let open = match fetch_community_record(db, &community_did, COMMUNITY_SELF_RKEY).await {

@@ -254,6 +254,76 @@ pub async fn get_record_trusted(
     interpret_get_record(resp).await
 }
 
+#[derive(Deserialize)]
+pub struct ListedRecord {
+    pub uri: String,
+    pub value: Value,
+}
+
+#[derive(Deserialize)]
+pub struct ListedRecords {
+    pub records: Vec<ListedRecord>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+pub async fn list_records(
+    pds_endpoint: &str,
+    repo: &str,
+    collection: &str,
+    limit: u32,
+    cursor: Option<&str>,
+) -> Result<ListedRecords, PdsError> {
+    let resp = embed_fetch::guarded_get(&list_records_url(
+        pds_endpoint,
+        repo,
+        collection,
+        limit,
+        cursor,
+    ))
+    .await?;
+    handle_response(resp).await
+}
+
+pub async fn list_records_trusted(
+    pds_endpoint: &str,
+    repo: &str,
+    collection: &str,
+    limit: u32,
+    cursor: Option<&str>,
+) -> Result<ListedRecords, PdsError> {
+    let resp = HTTP
+        .clone()
+        .get(list_records_url(
+            pds_endpoint,
+            repo,
+            collection,
+            limit,
+            cursor,
+        ))
+        .send()
+        .await?;
+    handle_response(resp).await
+}
+
+fn list_records_url(
+    pds_endpoint: &str,
+    repo: &str,
+    collection: &str,
+    limit: u32,
+    cursor: Option<&str>,
+) -> String {
+    let mut url = format!(
+        "{}/xrpc/com.atproto.repo.listRecords?repo={repo}&collection={collection}&limit={limit}",
+        pds_endpoint.trim_end_matches('/')
+    );
+    if let Some(cursor) = cursor {
+        url.push_str("&cursor=");
+        url.push_str(cursor);
+    }
+    url
+}
+
 fn get_record_url(pds_endpoint: &str, repo: &str, collection: &str, rkey: &str) -> String {
     format!(
         "{}/xrpc/com.atproto.repo.getRecord?repo={repo}&collection={collection}&rkey={rkey}",

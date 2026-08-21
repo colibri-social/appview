@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::lib::at_uri::AtUri;
 use crate::lib::bsky::ActorProfile;
 use crate::lib::colibri::{ColibriActorData, ColibriActorProfile, resolve_effective_profile};
+use crate::lib::member_records;
 use crate::lib::responses::{ErrorCode, ErrorResponse};
 use crate::lib::voice_moderation::ModerationLookup;
 use crate::models::{record_data, repos, user_states};
@@ -74,6 +75,9 @@ pub async fn fetch_member_aggregate(
         .filter(record_data::Column::Nsid.eq("social.colibri.member"))
         .all(db)
         .await?;
+
+    member_records::spawn_dedupe(db, &community.authority, &members);
+    let members = member_records::one_per_subject(members);
 
     let mut member_roles: HashMap<String, Vec<String>> = HashMap::new();
     let mut member_dids: Vec<String> = members

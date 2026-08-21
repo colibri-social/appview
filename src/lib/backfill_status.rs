@@ -83,6 +83,17 @@ fn classify_state(state: &str) -> RepoState {
     }
 }
 
+pub async fn repo_caught_up(db: &DatabaseConnection, did: &str) -> bool {
+    match repos::Entity::find_by_id(did.to_string()).one(db).await {
+        Ok(Some(repo)) => classify_state(&repo.state) != RepoState::Waiting,
+        Ok(None) => true,
+        Err(e) => {
+            log::warn!("backfill state lookup failed for {did}: {e}");
+            true
+        }
+    }
+}
+
 #[derive(FromQueryResult)]
 struct StateCount {
     state: String,
@@ -481,6 +492,49 @@ mod tests {
     use super::*;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
+
+    fn repo_row(state: &str) -> repos::Model {
+        repos::Model {
+            did: String::from("did:plc:community"),
+            state: state.to_string(),
+            status: String::from("ok"),
+            handle: None,
+            rev: None,
+            prev_data: None,
+            error_msg: None,
+            retry_count: 0,
+            retry_after: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_repo_still_backfilling_is_not_caught_up() {
+        for state in ["pending", "resyncing", "desynchronized"] {
+            let db = MockDatabase::new(DatabaseBackend::Postgres)
+                .append_query_results([vec![repo_row(state)]])
+                .into_connection();
+
+            assert!(!repo_caught_up(&db, "did:plc:community").await, "{state}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_active_repo_is_caught_up() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![repo_row("active")]])
+            .into_connection();
+
+        assert!(repo_caught_up(&db, "did:plc:community").await);
+    }
+
+    #[tokio::test]
+    async fn an_untracked_repo_does_not_block() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<repos::Model>::new()])
+            .into_connection();
+
+        assert!(repo_caught_up(&db, "did:plc:community").await);
+    }
 
     /// A first-attempt group: `retry_count = 0`.
     fn row(state: &str, count: i64) -> StateCount {

@@ -2,6 +2,7 @@ use sea_orm::{ColumnTrait, Condition, DatabaseConnection, DbErr, EntityTrait, Qu
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriMember, ColibriRole};
+use crate::lib::member_records;
 use crate::lib::permissions::Permission;
 use crate::models::record_data;
 
@@ -160,15 +161,8 @@ pub async fn load_actor_authz(
 
     let is_owner = community.authority == actor_did;
 
-    let member_record = record_data::Entity::find()
-        .filter(record_data::Column::Did.eq(&community.authority))
-        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
-        .filter(sea_orm::prelude::Expr::cust_with_values(
-            r#""record_data"."data"->>'subject' = $1"#,
-            vec![sea_orm::Value::from(actor_did.to_string())],
-        ))
-        .one(db)
-        .await?;
+    let member_record =
+        member_records::find_authoritative(db, &community.authority, actor_did).await?;
 
     let member = match member_record {
         Some(record) => {
@@ -316,6 +310,51 @@ mod tests {
             member.from_membership.as_deref(),
             Some("at://did:plc:joiner/social.colibri.membership/m1")
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_duplicate_member_record_does_not_strip_the_admin_role() {
+        const NATIVE: &str = "at://did:plc:host/social.colibri.community/self";
+
+        let mut owner_role = role("Owner", 100, vec![]);
+        owner_role.protected = Some(true);
+
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                record_data::Model {
+                    id: 2,
+                    did: String::from("did:plc:host"),
+                    nsid: MEMBER_NSID.to_string(),
+                    rkey: String::from("3mtm3gkst5u2k"),
+                    data: serde_json::to_value(member("did:plc:alice", vec![])).unwrap(),
+                    indexed_at: String::from("2026-08-21T15:32:44.389Z"),
+                },
+                record_data::Model {
+                    id: 1,
+                    did: String::from("did:plc:host"),
+                    nsid: MEMBER_NSID.to_string(),
+                    rkey: String::from("3msyodfzdhfvw"),
+                    data: serde_json::to_value(member("did:plc:alice", vec!["owner-role"]))
+                        .unwrap(),
+                    indexed_at: String::from("2026-08-13T22:17:45.045Z"),
+                },
+            ]])
+            .append_query_results([vec![record_data::Model {
+                id: 3,
+                did: String::from("did:plc:host"),
+                nsid: ROLE_NSID.to_string(),
+                rkey: String::from("owner-role"),
+                data: serde_json::to_value(&owner_role).unwrap(),
+                indexed_at: String::from("2026-08-13T22:17:45.045Z"),
+            }]])
+            .into_connection();
+
+        let authz = load_actor_authz(&db, NATIVE, "did:plc:alice")
+            .await
+            .unwrap();
+
+        assert!(authz.is_admin());
+        assert_eq!(authz.highest_position(), Some(100));
     }
 
     #[test]

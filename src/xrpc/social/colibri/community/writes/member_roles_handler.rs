@@ -1,17 +1,16 @@
 use rocket::serde::json::Json;
 use rocket::{State, post};
-use sea_orm::prelude::Expr;
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{DatabaseConnection, DbErr};
 use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
 use crate::lib::colibri::{ColibriMember, ColibriRole};
 use crate::lib::community_write::{self, invalid_request, not_found_error};
 use crate::lib::handler::{LoadAuthzFn, load_authz_boxed};
+use crate::lib::member_records;
 use crate::lib::permissions::Permission;
 use crate::lib::relay::{RelayContext, WriteDeps, with_community_write};
 use crate::lib::responses::{ErrorCode, ErrorResponse};
-use crate::models::record_data;
 use crate::xrpc::social::colibri::community::reads::list_roles_handler::fetch_role_records;
 
 const MEMBER_NSID: &str = "social.colibri.member";
@@ -67,14 +66,7 @@ async fn set_member_roles_with(
         |ctx, db| async move {
             let community_did = &ctx.community.authority;
 
-            let member_row = record_data::Entity::find()
-                .filter(record_data::Column::Did.eq(community_did))
-                .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
-                .filter(Expr::cust_with_values(
-                    r#""record_data"."data"->>'subject' = $1"#,
-                    vec![sea_orm::Value::from(member_did.clone())],
-                ))
-                .one(&db)
+            let member_row = member_records::find_authoritative(&db, community_did, &member_did)
                 .await?
                 .ok_or_else(|| {
                     not_found_error(format!("{member_did} is not a member of this community."))
@@ -152,6 +144,7 @@ mod tests {
     use super::*;
     use crate::lib::community_authz::ActorAuthz;
     use crate::lib::test_fixtures::{local_write_deps, member, relay_ctx, role};
+    use crate::models::record_data;
     use rocket::tokio;
     use sea_orm::{DatabaseBackend, MockDatabase};
 

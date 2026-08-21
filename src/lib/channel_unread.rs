@@ -31,13 +31,13 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 
 use crate::lib::at_uri::AtUri;
+use crate::lib::member_records;
 use crate::lib::notifications;
 use crate::models::record_data;
 
 const CHANNEL_NSID: &str = "social.colibri.channel";
 const MESSAGE_NSID: &str = "social.colibri.message";
 const READ_NSID: &str = "social.colibri.channel.read";
-const MEMBER_NSID: &str = "social.colibri.member";
 const MEMBERSHIP_NSID: &str = "social.colibri.membership";
 const COMMUNITY_NSID: &str = "social.colibri.community";
 
@@ -91,15 +91,10 @@ async fn join_boundary_indexed_at(
     caller_did: &str,
     community: &AtUri,
 ) -> Result<Option<String>, DbErr> {
-    let member = record_data::Entity::find()
-        .filter(record_data::Column::Did.eq(&community.authority))
-        .filter(record_data::Column::Nsid.eq(MEMBER_NSID))
-        .filter(Expr::cust_with_values(
-            r#""record_data"."data"->>'subject' = $1"#,
-            vec![sea_orm::Value::from(caller_did.to_string())],
-        ))
-        .one(db)
-        .await?;
+    let member = member_records::rows_for_subject(db, &community.authority, caller_did)
+        .await?
+        .into_iter()
+        .min_by(|a, b| a.indexed_at.cmp(&b.indexed_at));
     if let Some(record) = member {
         return Ok(Some(record.indexed_at));
     }

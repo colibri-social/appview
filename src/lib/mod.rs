@@ -37,6 +37,7 @@ pub mod image_variant;
 pub mod klipy;
 pub mod list_atproto_records;
 pub mod map_tap_event;
+pub mod member_records;
 pub mod membership_reconcile;
 pub mod moderation;
 pub mod notification_preferences;
