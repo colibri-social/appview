@@ -18,6 +18,7 @@ pub enum ErrorCode {
     RateLimited,
     TooManySubscribers,
     NotAnImage,
+    NotAVideo,
     SfuError,
     PdsUnavailable,
     CommunityCredentialsUnrecoverable,
@@ -39,6 +40,7 @@ impl ErrorCode {
             Self::RateLimited => "RateLimited",
             Self::TooManySubscribers => "TooManySubscribers",
             Self::NotAnImage => "NotAnImage",
+            Self::NotAVideo => "NotAVideo",
             Self::SfuError => "SfuError",
             Self::PdsUnavailable => "PdsUnavailable",
             Self::CommunityCredentialsUnrecoverable => "CommunityCredentialsUnrecoverable",
@@ -60,6 +62,7 @@ impl ErrorCode {
             "RateLimited" => Self::RateLimited,
             "TooManySubscribers" => Self::TooManySubscribers,
             "NotAnImage" => Self::NotAnImage,
+            "NotAVideo" => Self::NotAVideo,
             "SfuError" => Self::SfuError,
             "PdsUnavailable" => Self::PdsUnavailable,
             "CommunityCredentialsUnrecoverable" => Self::CommunityCredentialsUnrecoverable,
@@ -79,7 +82,7 @@ impl ErrorCode {
             Self::InvalidRequest | Self::InvalidState => Status::BadRequest,
             Self::NotFound => Status::NotFound,
             Self::RateLimited => Status::TooManyRequests,
-            Self::NotAnImage => Status::UnsupportedMediaType,
+            Self::NotAnImage | Self::NotAVideo => Status::UnsupportedMediaType,
             Self::TooManySubscribers => Status::ServiceUnavailable,
             Self::NotCommunityHub => Status::MisdirectedRequest,
             Self::SfuError | Self::PdsUnavailable | Self::UpstreamFailure => Status::BadGateway,
@@ -228,7 +231,7 @@ impl From<&FetchError> for ErrorCode {
 mod tests {
     use super::*;
 
-    const ALL_CODES: [ErrorCode; 16] = [
+    const ALL_CODES: [ErrorCode; 17] = [
         ErrorCode::AuthRequired,
         ErrorCode::Forbidden,
         ErrorCode::InvalidRequest,
@@ -238,6 +241,7 @@ mod tests {
         ErrorCode::RateLimited,
         ErrorCode::TooManySubscribers,
         ErrorCode::NotAnImage,
+        ErrorCode::NotAVideo,
         ErrorCode::SfuError,
         ErrorCode::PdsUnavailable,
         ErrorCode::CommunityCredentialsUnrecoverable,

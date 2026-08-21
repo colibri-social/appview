@@ -104,6 +104,7 @@ mod tests {
             site_name: None,
             theme_color: None,
             image: None,
+            video: None,
             large_image: None,
         }
     }

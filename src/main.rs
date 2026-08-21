@@ -377,6 +377,7 @@ async fn rocket() -> _ {
                     xrpc::social::colibri::channel::update_channel,
                     xrpc::social::colibri::embed::get_metadata,
                     xrpc::social::colibri::embed::get_image,
+                    xrpc::social::colibri::embed::get_video,
                     xrpc::social::colibri::embed::search_gifs,
                     xrpc::social::colibri::embed::trending_gifs,
                     xrpc::social::colibri::embed::gif_categories,

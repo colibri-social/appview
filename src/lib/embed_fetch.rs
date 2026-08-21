@@ -42,6 +42,8 @@ pub struct EmbedMetadata {
     pub theme_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<Vec<EmbedImage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video: Option<Vec<EmbedVideo>>,
     /// Whether the preview image should render large (Discord's
     /// `summary_large_image` style) vs a small thumbnail beside the text
     /// (`summary`). Only present when there's an image.
@@ -60,11 +62,51 @@ pub struct EmbedImage {
     pub height: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EmbedVideo {
+    pub url: String,
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+pub const PLAYABLE_VIDEO_TYPES: &[&str] = &["video/mp4", "video/webm"];
+
+pub fn playable_video_type(raw: &str) -> Option<&'static str> {
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    PLAYABLE_VIDEO_TYPES
+        .iter()
+        .copied()
+        .find(|known| *known == base)
+}
+
+fn video_type_from_extension(url: &Url) -> Option<&'static str> {
+    let path = url.path().to_ascii_lowercase();
+    if path.ends_with(".mp4") || path.ends_with(".m4v") {
+        Some("video/mp4")
+    } else if path.ends_with(".webm") {
+        Some("video/webm")
+    } else {
+        None
+    }
+}
+
 impl EmbedMetadata {
     /// True when there's nothing worth rendering a card for.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.description.is_none() && self.image.is_none()
+        self.title.is_none()
+            && self.description.is_none()
+            && self.image.is_none()
+            && self.video.is_none()
     }
 }
 
@@ -242,6 +284,14 @@ pub async fn guarded_get_with_timeout(
     raw_url: &str,
     timeout: Duration,
 ) -> Result<Response, FetchError> {
+    guarded_get_ranged(raw_url, timeout, None).await
+}
+
+pub async fn guarded_get_ranged(
+    raw_url: &str,
+    timeout: Duration,
+    range: Option<&str>,
+) -> Result<Response, FetchError> {
     let mut current = Url::parse(raw_url).map_err(|e| FetchError::InvalidUrl(e.to_string()))?;
 
     for _ in 0..=MAX_REDIRECTS {
@@ -252,8 +302,12 @@ pub async fn guarded_get_with_timeout(
             .to_string();
         let client = pinned_client(&host, &addrs, timeout)?;
 
-        let resp = client
-            .get(current.clone())
+        let mut request = client.get(current.clone());
+        if let Some(range) = range {
+            request = request.header(reqwest::header::RANGE, range);
+        }
+
+        let resp = request
             .send()
             .await
             .map_err(|e| FetchError::Upstream(e.to_string()))?;
@@ -342,6 +396,47 @@ pub async fn validate_and_fetch(
     })
 }
 
+pub struct VideoProbe {
+    pub content_type: String,
+    pub length: Option<u64>,
+}
+
+pub async fn probe_video(raw_url: &str) -> Result<VideoProbe, FetchError> {
+    let resp = guarded_get_ranged(raw_url, FETCH_TIMEOUT, Some("bytes=0-0")).await?;
+
+    if !resp.status().is_success() {
+        return Err(FetchError::Upstream(format!(
+            "upstream returned {}",
+            resp.status()
+        )));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let length = content_range_total(&resp).or_else(|| resp.content_length());
+
+    Ok(VideoProbe {
+        content_type,
+        length,
+    })
+}
+
+fn content_range_total(resp: &Response) -> Option<u64> {
+    resp.headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            raw.rsplit_once('/')
+                .map(|(_, total)| total.trim().to_string())
+        })
+        .and_then(|total| total.parse().ok())
+}
+
 /// Parses OpenGraph / Twitter-card / standard meta tags out of an HTML document.
 /// `base` is the (post-redirect) page URL, used to absolutize relative images.
 pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
@@ -423,14 +518,40 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
         }]
     });
 
+    let declared_video_type = ["og:video:type", "twitter:player:stream:content_type"]
+        .iter()
+        .filter_map(|k| get(k))
+        .find_map(|raw| playable_video_type(&raw));
+
+    let video = [
+        "og:video:secure_url",
+        "og:video:url",
+        "og:video",
+        "twitter:player:stream",
+    ]
+    .iter()
+    .filter_map(|k| get(k))
+    .filter_map(|raw| base.join(&raw).ok())
+    .filter(|abs| abs.as_str() != page_url.as_str() && abs.as_str() != base.as_str())
+    .find_map(|abs| {
+        let mime = video_type_from_extension(&abs).or(declared_video_type)?;
+        Some(vec![EmbedVideo {
+            url: abs.to_string(),
+            mime_type: Some(String::from(mime)),
+            width: declared(["og:video:width", "twitter:player:width"]),
+            height: declared(["og:video:height", "twitter:player:height"]),
+        }])
+    });
+
     // A thumbnail unless the card explicitly asks for a
     // large image, which pages shipping no `twitter:card` at all never do.
     let card = get("twitter:card").map(|raw| raw.trim().to_ascii_lowercase());
     let large_image = image.as_ref().map(|_| {
-        matches!(
-            card.as_deref(),
-            Some("summary_large_image") | Some("player")
-        )
+        video.is_some()
+            || matches!(
+                card.as_deref(),
+                Some("summary_large_image") | Some("player")
+            )
     });
 
     EmbedMetadata {
@@ -439,6 +560,7 @@ pub fn extract_metadata(html: &str, base: &Url) -> EmbedMetadata {
         site_name,
         theme_color,
         image,
+        video,
         large_image,
     }
 }
@@ -631,6 +753,107 @@ mod tests {
         let meta = extract_metadata(html, &base);
         assert!(meta.image.is_some());
         assert_eq!(meta.large_image, Some(false));
+    }
+
+    #[test]
+    fn picks_the_mp4_when_a_page_lists_mp4_and_webm() {
+        let base =
+            Url::parse("https://tenor.com/view/cat-cat-meme-cute-cat-gif-11036838802643676822")
+                .unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="https://media1.tenor.com/m/abc/cat.gif" />
+                <meta property="og:video" content="https://media.tenor.com/abc/cat.mp4" />
+                <meta property="og:video" content="https://media.tenor.com/abc/cat.webm" />
+                <meta property="og:video:type" content="video/mp4" />
+                <meta property="og:video:type" content="video/webm" />
+                <meta property="og:video:width" content="498" />
+                <meta property="og:video:height" content="498" />
+                <meta name="twitter:card" content="player" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        let video = meta.video.as_ref().expect("video candidate");
+        assert_eq!(video[0].url, "https://media.tenor.com/abc/cat.mp4");
+        assert_eq!(video[0].mime_type.as_deref(), Some("video/mp4"));
+        assert_eq!(video[0].width, Some(498));
+    }
+
+    #[test]
+    fn accepts_an_extensionless_video_on_its_declared_type() {
+        let base = Url::parse("https://gifbox.me/view/abc-anime-spray-face").unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="https://rpc.gifbox.me/media/post/abc/poster" />
+                <meta property="og:video" content="https://rpc.gifbox.me/media/post/abc/mp4" />
+                <meta property="og:video:type" content="video/mp4" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        let video = meta.video.as_ref().expect("video candidate");
+        assert_eq!(video[0].url, "https://rpc.gifbox.me/media/post/abc/mp4");
+        assert_eq!(video[0].mime_type.as_deref(), Some("video/mp4"));
+    }
+
+    #[test]
+    fn rejects_a_video_that_is_really_an_html_embed_page() {
+        let base = Url::parse("https://www.youtube.com/watch?v=abc").unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="https://i.ytimg.com/vi/abc/hq.jpg" />
+                <meta property="og:video:secure_url" content="https://www.youtube.com/embed/abc" />
+                <meta property="og:video:url" content="https://www.youtube.com/embed/abc" />
+                <meta property="og:video:type" content="text/html" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        assert!(meta.video.is_none());
+    }
+
+    #[test]
+    fn a_playable_video_implies_a_large_card() {
+        let base = Url::parse("https://example.com/clip").unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="/poster.png" />
+                <meta property="og:video" content="/clip.mp4" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        assert!(meta.video.is_some());
+        assert_eq!(meta.large_image, Some(true));
+    }
+
+    #[test]
+    fn falls_back_to_the_twitter_player_stream() {
+        let base = Url::parse("https://example.com/clip").unwrap();
+        let html = r#"
+            <html><head>
+                <meta property="og:image" content="/poster.png" />
+                <meta name="twitter:player:stream" content="https://cdn.example.com/clip" />
+                <meta name="twitter:player:stream:content_type" content="video/webm" />
+            </head></html>
+        "#;
+        let meta = extract_metadata(html, &base);
+        let video = meta.video.as_ref().expect("video candidate");
+        assert_eq!(video[0].url, "https://cdn.example.com/clip");
+        assert_eq!(video[0].mime_type.as_deref(), Some("video/webm"));
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live network (HTTP/DNS); run explicitly with --ignored"]
+    async fn scrapes_and_confirms_a_live_gifbox_clip() {
+        let uri = "https://gifbox.me/view/yv2A7CgkdSXRS3RErncyY-anime-spray-face";
+        let resource = validate_and_fetch(uri, 1024 * 1024).await.unwrap();
+        let html = String::from_utf8_lossy(&resource.bytes);
+        let meta = extract_metadata(&html, &resource.final_url);
+
+        let video = meta.video.as_ref().expect("gifbox publishes og:video");
+        assert_eq!(video[0].mime_type.as_deref(), Some("video/mp4"));
+
+        let probe = probe_video(&video[0].url).await.unwrap();
+        assert!(playable_video_type(&probe.content_type).is_some());
+        assert!(probe.length.is_some_and(|length| length > 0));
     }
 
     #[test]

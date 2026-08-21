@@ -13,6 +13,20 @@ pub const DEFAULT_PER_PAGE: u32 = 24;
 const MEDIA_SIZES: [&str; 4] = ["md", "hd", "sm", "xs"];
 const PREVIEW_SIZES: [&str; 4] = ["sm", "xs", "md", "hd"];
 
+const GIFS_RESOURCE: &str = "gifs";
+
+const MEDIA_RESOURCES: [&str; 6] = [
+    "gifs",
+    "stickers",
+    "clips",
+    "static-memes",
+    "ai-gifs",
+    "emojis",
+];
+
+const IMAGE_FORMATS: [&str; 3] = ["gif", "webp", "jpg"];
+const VIDEO_FORMATS: [(&str, &str); 2] = [("mp4", "video/mp4"), ("webm", "video/webm")];
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GifItem {
     pub id: String,
@@ -54,9 +68,13 @@ fn api_key() -> Result<String, ErrorResponse> {
     }
 }
 
-async fn get_json(path: &str, query: &[(&str, String)]) -> Result<Value, ErrorResponse> {
+async fn get_json(
+    resource: &str,
+    path: &str,
+    query: &[(&str, String)],
+) -> Result<Value, ErrorResponse> {
     let key = api_key()?;
-    let base = format!("{KLIPY_BASE}/{key}/gifs/{path}");
+    let base = format!("{KLIPY_BASE}/{key}/{resource}/{path}");
     let mut url = reqwest::Url::parse(&base).map_err(|e| upstream(e.to_string()))?;
     {
         let mut pairs = url.query_pairs_mut();
@@ -76,6 +94,7 @@ async fn get_json(path: &str, query: &[(&str, String)]) -> Result<Value, ErrorRe
 
 pub async fn search(q: &str, page: u32) -> Result<GifPage, ErrorResponse> {
     let body = get_json(
+        GIFS_RESOURCE,
         "search",
         &[
             ("q", q.to_string()),
@@ -89,6 +108,7 @@ pub async fn search(q: &str, page: u32) -> Result<GifPage, ErrorResponse> {
 
 pub async fn trending(page: u32) -> Result<GifPage, ErrorResponse> {
     let body = get_json(
+        GIFS_RESOURCE,
         "trending",
         &[
             ("page", page.to_string()),
@@ -100,8 +120,99 @@ pub async fn trending(page: u32) -> Result<GifPage, ErrorResponse> {
 }
 
 pub async fn categories() -> Result<Vec<GifCategory>, ErrorResponse> {
-    let body = get_json("categories", &[]).await?;
+    let body = get_json(GIFS_RESOURCE, "categories", &[]).await?;
     Ok(normalize_categories(&body))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KlipyVariant {
+    pub url: String,
+    pub width: Option<u64>,
+    pub height: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KlipyMedia {
+    pub title: Option<String>,
+    pub image: KlipyVariant,
+    pub video: Option<(KlipyVariant, &'static str)>,
+}
+
+pub fn parse_media_page(raw_url: &str) -> Option<(&'static str, String)> {
+    let url = reqwest::Url::parse(raw_url).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+
+    let host = url.host_str()?.to_ascii_lowercase();
+    if host != "klipy.com" && host != "www.klipy.com" {
+        return None;
+    }
+
+    let mut segments = url.path_segments()?.filter(|part| !part.is_empty());
+    let requested = segments.next()?;
+    let resource = MEDIA_RESOURCES
+        .iter()
+        .copied()
+        .find(|known| *known == requested)?;
+    let slug = segments.next()?.to_string();
+    if segments.next().is_some() {
+        return None;
+    }
+
+    let usable = !slug.is_empty()
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    usable.then_some((resource, slug))
+}
+
+pub async fn media_by_slug(resource: &str, slug: &str) -> Result<KlipyMedia, ErrorResponse> {
+    if !MEDIA_RESOURCES.contains(&resource) {
+        return Err(upstream("Unsupported Klipy resource"));
+    }
+    let body = get_json(resource, slug, &[]).await?;
+    normalize_media(&body["data"]).ok_or_else(|| upstream("Klipy returned no usable media"))
+}
+
+fn media_variant(item: &Value, format: &str) -> Option<KlipyVariant> {
+    let file = &item["file"];
+
+    if let Some(node) = pick(file, &MEDIA_SIZES, format) {
+        return Some(KlipyVariant {
+            url: node["url"].as_str()?.to_string(),
+            width: node["width"].as_u64(),
+            height: node["height"].as_u64(),
+        });
+    }
+
+    let url = file[format].as_str()?.to_string();
+    let meta = &item["file_meta"][format];
+    Some(KlipyVariant {
+        url,
+        width: meta["width"].as_u64(),
+        height: meta["height"].as_u64(),
+    })
+}
+
+fn normalize_media(item: &Value) -> Option<KlipyMedia> {
+    let image = IMAGE_FORMATS
+        .iter()
+        .find_map(|format| media_variant(item, format))?;
+
+    let video = VIDEO_FORMATS
+        .iter()
+        .find_map(|(format, mime)| media_variant(item, format).map(|found| (found, *mime)));
+
+    Some(KlipyMedia {
+        title: item["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string),
+        image,
+        video,
+    })
 }
 
 fn items_array(body: &Value) -> &[Value] {
@@ -206,7 +317,155 @@ fn normalize_categories(body: &Value) -> Vec<GifCategory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rocket::tokio;
     use serde_json::json;
+
+    #[tokio::test]
+    #[ignore = "hits the live network and needs KLIPY_API_KEY; run explicitly with --ignored"]
+    async fn resolves_a_live_klipy_gif_page() {
+        let (resource, slug) = parse_media_page("https://klipy.com/gifs/nix-nixos").unwrap();
+        let media = media_by_slug(resource, &slug).await.unwrap();
+
+        assert!(media.image.url.starts_with("https://static.klipy.com/"));
+        let (video, mime) = media.video.expect("klipy publishes an mp4");
+        assert!(video.url.starts_with("https://static.klipy.com/"));
+        assert_eq!(mime, "video/mp4");
+    }
+
+    #[test]
+    fn parses_every_media_page_path() {
+        for (raw, resource, slug) in [
+            ("https://klipy.com/gifs/nix-nixos", "gifs", "nix-nixos"),
+            (
+                "https://www.klipy.com/stickers/happy-4",
+                "stickers",
+                "happy-4",
+            ),
+            (
+                "https://klipy.com/clips/give-it-to-me",
+                "clips",
+                "give-it-to-me",
+            ),
+            ("https://klipy.com/static-memes/a_b", "static-memes", "a_b"),
+            ("https://klipy.com/ai-gifs/x1", "ai-gifs", "x1"),
+            ("https://klipy.com/emojis/y2/", "emojis", "y2"),
+            (
+                "https://klipy.com/gifs/nix-nixos?utm=1",
+                "gifs",
+                "nix-nixos",
+            ),
+        ] {
+            assert_eq!(
+                parse_media_page(raw),
+                Some((resource, String::from(slug))),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_urls_that_are_not_media_pages() {
+        for raw in [
+            "https://klipy.com/",
+            "https://klipy.com/gifs",
+            "https://klipy.com/explore/trending",
+            "https://klipy.com/gifs/a/b",
+            "https://klipy.com/gifs/..%2F..%2Fsecret",
+            "https://klipy.com/gifs/bad!slug",
+            "https://notklipy.com/gifs/nix-nixos",
+            "https://klipy.com.evil.test/gifs/nix-nixos",
+            "ftp://klipy.com/gifs/nix-nixos",
+        ] {
+            assert_eq!(parse_media_page(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn normalizes_a_nested_media_item() {
+        let item = json!({
+            "slug": "nix-nixos",
+            "title": "NixOS Rebuild Switch Heart Locket",
+            "file": {
+                "md": {
+                    "gif": { "url": "https://static/md.gif", "width": 400, "height": 300 },
+                    "mp4": { "url": "https://static/md.mp4", "width": 400, "height": 300 },
+                    "webm": { "url": "https://static/md.webm" }
+                }
+            }
+        });
+
+        let media = normalize_media(&item).expect("usable media");
+        assert_eq!(
+            media.title.as_deref(),
+            Some("NixOS Rebuild Switch Heart Locket")
+        );
+        assert_eq!(media.image.url, "https://static/md.gif");
+        assert_eq!(media.image.width, Some(400));
+
+        let (video, mime) = media.video.expect("video variant");
+        assert_eq!(video.url, "https://static/md.mp4");
+        assert_eq!(mime, "video/mp4");
+    }
+
+    #[test]
+    fn normalizes_a_flat_clip_item() {
+        let item = json!({
+            "url": "https://klipy.com/clips/give-it-to-me",
+            "slug": "give-it-to-me",
+            "title": "Give It To Me",
+            "file": {
+                "mp4": "https://static/clip.mp4",
+                "gif": "https://static/clip.gif",
+                "webp": "https://static/clip.webp"
+            },
+            "file_meta": {
+                "mp4": { "width": 480, "height": 360, "size": 231164 },
+                "gif": { "width": 320, "height": 240, "size": 1427722 }
+            }
+        });
+
+        let media = normalize_media(&item).expect("usable media");
+        assert_eq!(media.image.url, "https://static/clip.gif");
+        assert_eq!(media.image.width, Some(320));
+
+        let (video, mime) = media.video.expect("video variant");
+        assert_eq!(video.url, "https://static/clip.mp4");
+        assert_eq!(video.width, Some(480));
+        assert_eq!(mime, "video/mp4");
+    }
+
+    #[test]
+    fn never_falls_back_to_the_page_url_as_media() {
+        let item = json!({
+            "url": "https://klipy.com/clips/give-it-to-me",
+            "slug": "give-it-to-me",
+            "file": {}
+        });
+        assert_eq!(normalize_media(&item), None);
+    }
+
+    #[test]
+    fn prefers_an_animated_image_over_a_still_one() {
+        let item = json!({
+            "slug": "s",
+            "file": { "md": { "jpg": { "url": "https://static/md.jpg" } } }
+        });
+        let media = normalize_media(&item).expect("usable media");
+        assert_eq!(media.image.url, "https://static/md.jpg");
+        assert!(media.video.is_none());
+
+        let animated = json!({
+            "slug": "s",
+            "file": {
+                "md": {
+                    "jpg": { "url": "https://static/md.jpg" },
+                    "gif": { "url": "https://static/md.gif" }
+                }
+            }
+        });
+        let media = normalize_media(&animated).expect("usable media");
+        assert_eq!(media.image.url, "https://static/md.gif");
+    }
 
     #[test]
     fn normalizes_a_paginated_search_page() {
